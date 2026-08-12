@@ -1,0 +1,17 @@
+services:
+  relaydock:
+    build: .
+    image: relaydock:0.1.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4310:4310"
+    environment:
+      ADMIN_TOKEN: "${ADMIN_TOKEN:?Set ADMIN_TOKEN to at least 24 random characters}"
+      MASTER_KEY: "${MASTER_KEY:?Set MASTER_KEY to a base64-encoded 32-byte key}"
+      DELIVERY_WORKERS: "2"
+      MAX_DELIVERY_ATTEMPTS: "4"
+    volumes:
+      - relaydock-data:/app/data
+
+volumes:
+  relaydock-data:
