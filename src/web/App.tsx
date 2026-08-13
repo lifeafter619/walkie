@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import {
   Activity, AlertTriangle, ArrowDown, ArrowUp, BellRing, Bot, Check, CheckCircle2, ChevronRight,
-  CircleDot, Clock3, Copy, Edit3, ExternalLink, Eye, EyeOff, Gauge, KeyRound, LayoutDashboard,
-  LoaderCircle, LockKeyhole, Menu, MessageSquareText, Network, Plus, Power, RefreshCw,
-  Route as RouteIcon, Search, Send, ServerCog, Settings2, ShieldCheck, TestTube2, Trash2, X, XCircle
+  CircleDot, Clock3, Code2, Copy, Edit3, ExternalLink, Eye, EyeOff, Gauge, KeyRound, LayoutDashboard,
+  LoaderCircle, LockKeyhole, Menu, MessageSquareText, Monitor, Moon, Network, Plus, Power, RefreshCw,
+  Route as RouteIcon, Search, Send, ServerCog, Settings2, ShieldCheck, SquareTerminal, Sun, TestTube2, Trash2, X, XCircle
 } from 'lucide-react';
 import type { ApiKey, Channel, DashboardStats, Delivery, Destination, ProviderDefinition, Route, Severity } from '../shared/types';
 import { api, getToken, setToken } from './api';
 
-type Page = 'overview' | 'channels' | 'routes' | 'deliveries' | 'agents' | 'system';
+type Page = 'overview' | 'channels' | 'routes' | 'deliveries' | 'agents' | 'integrations' | 'system';
 type Toast = { id: number; kind: 'success' | 'error'; message: string };
 type Meta = Awaited<ReturnType<typeof api.meta>>;
 type Notify = (kind: Toast['kind'], message: string) => void;
@@ -16,13 +16,15 @@ type Notify = (kind: Toast['kind'], message: string) => void;
 const nav: Array<{ id: Page; label: string; icon: typeof Gauge }> = [
   { id: 'overview', label: '概览', icon: LayoutDashboard }, { id: 'channels', label: '频道', icon: MessageSquareText },
   { id: 'routes', label: '路由', icon: RouteIcon }, { id: 'deliveries', label: '投递', icon: Activity },
-  { id: 'agents', label: 'Agents', icon: Bot }, { id: 'system', label: '系统', icon: ServerCog }
+  { id: 'agents', label: 'Agents', icon: Bot }, { id: 'integrations', label: '接入', icon: Code2 },
+  { id: 'system', label: '系统', icon: ServerCog }
 ];
 
 const pageTitles: Record<Page, [string, string]> = {
   overview: ['运行概览', '通知流量与服务健康状态'], channels: ['推送频道', '配置并验证外部通知服务'],
   routes: ['通知路由', '编排并发广播与故障转移'], deliveries: ['投递记录', '查看消息状态和每次渠道尝试'],
-  agents: ['Agent 授权', '管理 MCP 与 REST API 访问密钥'], system: ['系统状态', '实例端点、支持能力和安全配置']
+  agents: ['Agent 授权', '管理 MCP 与 REST API 访问密钥'], integrations: ['MCP 接入', '客户端配置与远程 HTTP 端点'],
+  system: ['系统状态', '实例端点、支持能力和安全配置']
 };
 
 const formatDate = (date?: string) => date ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(date)) : '—';
@@ -32,6 +34,23 @@ const severityLabel: Record<Severity, string> = { info: '信息', success: '成�
 
 function Button({ children, variant = 'secondary', icon: Icon, loading, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'danger' | 'ghost'; icon?: typeof Plus; loading?: boolean }) {
   return <button className={`button button-${variant}`} {...props} disabled={loading || props.disabled}>{loading ? <LoaderCircle className="spin" size={16} /> : Icon ? <Icon size={16} /> : null}{children}</button>;
+}
+
+type ThemeMode = 'system' | 'dark' | 'light';
+function useTheme(): [ThemeMode, () => void] {
+  const [mode, setMode] = useState<ThemeMode>(() => (localStorage.getItem('rd-theme') as ThemeMode) || 'system');
+  useEffect(() => {
+    const root = document.documentElement;
+    mode === 'system' ? root.removeAttribute('data-theme') : root.setAttribute('data-theme', mode);
+    localStorage.setItem('rd-theme', mode);
+  }, [mode]);
+  return [mode, () => setMode((old) => old === 'system' ? 'dark' : old === 'dark' ? 'light' : 'system')];
+}
+
+function ThemeToggle() {
+  const [mode, cycle] = useTheme();
+  const [Icon, label] = mode === 'system' ? [Monitor, '跟随系统'] : mode === 'dark' ? [Moon, '暗色'] : [Sun, '亮色'];
+  return <IconButton label={`主题：${label}（点击切换）`} icon={Icon} onClick={cycle} />;
 }
 
 function IconButton({ label, icon: Icon, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: typeof Plus }) {
@@ -125,9 +144,34 @@ function Agents({ keys, destinations, refresh, notify }: { keys: ApiKey[]; desti
   return <><div className="toolbar"><div className="toolbar-copy"><strong>{keys.filter((key) => !key.revokedAt).length} 个有效密钥</strong><span>密钥使用高熵随机值，服务端仅保存哈希</span></div><Button variant="primary" icon={Plus} onClick={() => setCreating(true)}>创建密钥</Button></div><section className="panel"><div className="table-wrap"><table><thead><tr><th>Agent</th><th>密钥前缀</th><th>权限</th><th>目的地</th><th>最近使用</th><th>状态</th><th /></tr></thead><tbody>{keys.map((key) => <tr key={key.id} className={key.revokedAt ? 'disabled-row' : ''}><td><strong className="table-title with-icon"><Bot size={16} />{key.name}</strong><span className="muted-row">创建于 {formatDate(key.createdAt)}</span></td><td><code>rdk_{key.prefix}_••••</code></td><td><div className="scope-pills">{key.scopes.map((scope) => <span key={scope}>{scope === 'notifications:send' ? '发送' : '读取'}</span>)}</div></td><td>{key.destinationIds.length ? `${key.destinationIds.length} 个指定目的地` : '全部目的地'}</td><td>{formatDate(key.lastUsedAt)}</td><td>{key.revokedAt ? <Badge status="revoked" /> : <span className="state-dot active">有效</span>}</td><td>{!key.revokedAt && <IconButton label="吊销密钥" icon={Power} onClick={() => revoke(key)} />}</td></tr>)}</tbody></table>{!keys.length && <Empty icon={Bot} title="还没有 Agent Key" text="创建一个密钥，让 Agent 通过 MCP 或 REST 发送通知。" action={<Button variant="primary" icon={Plus} onClick={() => setCreating(true)}>创建密钥</Button>} />}</div></section>{creating && <KeyForm destinations={destinations} close={() => setCreating(false)} saved={refresh} notify={notify} />}</>;
 }
 
+function Integrations({ meta, notify }: { meta: Meta; notify: Notify }) {
+  const [client, setClient] = useState<'codex' | 'claude' | 'cursor' | 'generic'>('codex');
+  const snippets = {
+    codex: {
+      label: 'Codex', path: '~/.codex/config.toml', icon: SquareTerminal,
+      content: `[mcp_servers.relaydock]\nurl = "${meta.mcpUrl}"\nbearer_token_env_var = "RELAYDOCK_API_KEY"\ndefault_tools_approval_mode = "writes"`
+    },
+    claude: {
+      label: 'Claude Code', path: '.mcp.json', icon: Bot,
+      content: JSON.stringify({ mcpServers: { relaydock: { type: 'http', url: meta.mcpUrl, headers: { Authorization: 'Bearer ${RELAYDOCK_API_KEY}' } } } }, null, 2)
+    },
+    cursor: {
+      label: 'Cursor', path: '.cursor/mcp.json', icon: Code2,
+      content: JSON.stringify({ mcpServers: { relaydock: { url: meta.mcpUrl, headers: { Authorization: 'Bearer ${env:RELAYDOCK_API_KEY}' } } } }, null, 2)
+    },
+    generic: {
+      label: '通用 MCP', path: 'Streamable HTTP', icon: Network,
+      content: JSON.stringify({ transport: 'streamable-http', url: meta.mcpUrl, headers: { Authorization: 'Bearer <Agent API Key>' } }, null, 2)
+    }
+  } as const;
+  const selected = snippets[client];
+  const copy = async (value: string, message: string) => { await navigator.clipboard.writeText(value); notify('success', message); };
+  return <div className="integration-layout"><section className="panel endpoint-hero"><div><span className="eyebrow">STREAMABLE HTTP</span><h2>{meta.mcpUrl}</h2><p>Bearer Agent API Key</p></div><IconButton label="复制 MCP URL" icon={Copy} onClick={() => copy(meta.mcpUrl, 'MCP URL 已复制')} /></section><section className="panel integration-config"><div className="client-tabs" role="tablist">{Object.entries(snippets).map(([id, item]) => { const Icon = item.icon; return <button key={id} role="tab" aria-selected={client === id} className={client === id ? 'active' : ''} onClick={() => setClient(id as typeof client)}><Icon size={16} /><span>{item.label}</span></button>; })}</div><div className="config-head"><div><strong>{selected.label}</strong><code>{selected.path}</code></div><Button icon={Copy} onClick={() => copy(selected.content, `${selected.label} 配置已复制`)}>复制配置</Button></div><pre className="integration-code">{selected.content}</pre></section><aside className="integration-notes"><section className="panel"><div className="section-head"><div><h2>连接检查</h2><p>远程客户端所需参数</p></div><ShieldCheck size={18} /></div><dl className="connection-facts"><div><dt>传输</dt><dd>Streamable HTTP</dd></div><div><dt>鉴权</dt><dd>Authorization: Bearer</dd></div><div><dt>会话</dt><dd>Stateless</dd></div><div><dt>端点</dt><dd><code>/mcp</code></dd></div></dl></section><section className="panel env-callout"><KeyRound size={18} /><div><strong>RELAYDOCK_API_KEY</strong><p>在 Agents 页面创建，原始值只显示一次。</p></div></section></aside></div>;
+}
+
 function SystemPage({ meta, providers }: { meta: Meta; providers: ProviderDefinition[] }) {
-  const origin = window.location.origin; const categories = useMemo(() => Object.entries(providers.reduce<Record<string, number>>((accumulator, item) => ({ ...accumulator, [item.category]: (accumulator[item.category] ?? 0) + 1 }), {})), [providers]);
-  return <div className="system-grid"><section className="panel system-status"><div className="section-head"><div><h2>实例状态</h2><p>RelayDock {meta.version}</p></div><span className="health"><i />运行正常</span></div><dl><div><dt>管理面板</dt><dd><code>{origin}</code></dd></div><div><dt>MCP Streamable HTTP</dt><dd><code>{origin}{meta.mcpEndpoint}</code></dd></div><div><dt>REST 通知 API</dt><dd><code>{origin}/api/v1/notify</code></dd></div><div><dt>Server酱兼容入口</dt><dd><code>{origin}/send/&lt;AgentKey&gt;.send</code></dd></div><div><dt>管理鉴权</dt><dd>{meta.adminAuthRequired ? <span><ShieldCheck size={15} />已启用</span> : <span className="warning-text"><AlertTriangle size={15} />本地免鉴权</span>}</dd></div></dl></section><section className="panel provider-summary"><div className="section-head"><div><h2>渠道能力</h2><p>{providers.length} 个内置适配器</p></div><Network size={18} /></div><div className="capability-bars">{categories.map(([category, count]) => <div key={category}><span>{({ chat: '聊天协作', push: '移动推送', email: '邮件', sms: '短信', universal: '通用扩展' } as Record<string, string>)[category]}</span><div><i style={{ width: `${count / providers.length * 100}%` }} /></div><strong>{count}</strong></div>)}</div></section><section className="panel endpoint-sample"><div className="section-head"><div><h2>MCP 配置</h2><p>使用 Agent API Key 作为 Bearer Token</p></div><Settings2 size={18} /></div><pre>{JSON.stringify({ mcpServers: { relaydock: { type: 'http', url: `${origin}/mcp`, headers: { Authorization: 'Bearer rdk_••••' } } } }, null, 2)}</pre></section><section className="panel security-list"><div className="section-head"><div><h2>安全边界</h2><p>当前默认策略</p></div><ShieldCheck size={18} /></div><ul><li><Check size={16} /><span><strong>凭据静态加密</strong><small>AES-256-GCM</small></span></li><li><Check size={16} /><span><strong>Agent Key 哈希存储</strong><small>原始值仅显示一次</small></span></li><li><Check size={16} /><span><strong>Webhook SSRF 防护</strong><small>默认禁止 HTTP、私网和回环地址</small></span></li><li><Check size={16} /><span><strong>最小权限</strong><small>Scope 与目的地白名单</small></span></li></ul></section></div>;
+  const categories = useMemo(() => Object.entries(providers.reduce<Record<string, number>>((accumulator, item) => ({ ...accumulator, [item.category]: (accumulator[item.category] ?? 0) + 1 }), {})), [providers]);
+  return <div className="system-grid"><section className="panel system-status"><div className="section-head"><div><h2>实例状态</h2><p>RelayDock {meta.version}</p></div><span className="health"><i />运行正常</span></div><dl><div><dt>运行时</dt><dd><code>{meta.runtime === 'cloudflare-workers' ? 'Cloudflare Workers' : 'Node.js'}</code></dd></div><div><dt>管理面板</dt><dd><code>{meta.publicUrl}</code></dd></div><div><dt>MCP Streamable HTTP</dt><dd><code>{meta.mcpUrl}</code></dd></div><div><dt>REST 通知 API</dt><dd><code>{meta.publicUrl}/api/v1/notify</code></dd></div><div><dt>Server酱兼容入口</dt><dd><code>{meta.publicUrl}/send/&lt;AgentKey&gt;.send</code></dd></div><div><dt>管理鉴权</dt><dd>{meta.adminAuthRequired ? <span><ShieldCheck size={15} />已启用</span> : <span className="warning-text"><AlertTriangle size={15} />本地免鉴权</span>}</dd></div></dl></section><section className="panel provider-summary"><div className="section-head"><div><h2>渠道能力</h2><p>{providers.length} 个内置适配器</p></div><Network size={18} /></div><div className="capability-bars">{categories.map(([category, count]) => <div key={category}><span>{({ chat: '聊天协作', push: '移动推送', email: '邮件', sms: '短信', universal: '通用扩展' } as Record<string, string>)[category]}</span><div><i style={{ width: `${count / providers.length * 100}%` }} /></div><strong>{count}</strong></div>)}</div></section><section className="panel endpoint-sample"><div className="section-head"><div><h2>MCP 端点</h2><p>远程 HTTP 直连</p></div><Settings2 size={18} /></div><pre>{meta.mcpUrl}</pre></section><section className="panel security-list"><div className="section-head"><div><h2>安全边界</h2><p>当前默认策略</p></div><ShieldCheck size={18} /></div><ul><li><Check size={16} /><span><strong>凭据静态加密</strong><small>AES-256-GCM</small></span></li><li><Check size={16} /><span><strong>Agent Key 哈希存储</strong><small>原始值仅显示一次</small></span></li><li><Check size={16} /><span><strong>Webhook SSRF 防护</strong><small>默认禁止 HTTP、私网和回环地址</small></span></li><li><Check size={16} /><span><strong>最小权限</strong><small>Scope 与目的地白名单</small></span></li></ul></section></div>;
 }
 
 export default function App() {
@@ -140,6 +184,6 @@ export default function App() {
   const refreshDeliveries = async (status = '') => { try { setDeliveries((await api.deliveries(status)).deliveries); } catch (error) { notify('error', error instanceof Error ? error.message : '加载失败'); } };
   if (loading || !meta) return <div className="boot"><div className="brand-mark"><BellRing size={22} /></div><LoaderCircle className="spin" /></div>;
   if (!authenticated) return <Login meta={meta} onSuccess={loadAll} />;
-  const content = page === 'overview' ? <Overview stats={stats} deliveries={deliveries} destinations={destinations} refresh={refresh} notify={notify} /> : page === 'channels' ? <Channels channels={channels} providers={providers} refresh={refresh} notify={notify} /> : page === 'routes' ? <Routes routes={routes} channels={channels} refresh={refresh} notify={notify} /> : page === 'deliveries' ? <Deliveries deliveries={deliveries} refresh={refreshDeliveries} notify={notify} /> : page === 'agents' ? <Agents keys={keys} destinations={destinations} refresh={refresh} notify={notify} /> : <SystemPage meta={meta} providers={providers} />;
-  return <div className="app-shell"><aside className={menu ? 'open' : ''}><div className="brand"><span className="brand-mark"><BellRing size={20} /></span><div><strong>RelayDock</strong><small>NOTIFICATION FABRIC</small></div><IconButton label="关闭菜单" icon={X} onClick={() => setMenu(false)} /></div><nav>{nav.map(({ id, label, icon: Icon }) => <button key={id} className={page === id ? 'active' : ''} onClick={() => { setPage(id); setMenu(false); }}><Icon size={18} /><span>{label}</span>{id === 'deliveries' && stats?.failed24h ? <i>{stats.failed24h}</i> : null}</button>)}</nav><div className="side-health"><span><i />服务在线</span><small>队列与 SQLite 正常</small></div></aside>{menu && <div className="nav-backdrop" onClick={() => setMenu(false)} />}<main className="workspace"><header className="topbar"><IconButton label="打开菜单" icon={Menu} onClick={() => setMenu(true)} /><div><h1>{pageTitles[page][0]}</h1><p>{pageTitles[page][1]}</p></div><div className="top-actions"><span className="live-indicator"><i />LIVE</span><IconButton label="刷新数据" icon={RefreshCw} onClick={refresh} /></div></header><div className="page-content">{content}</div></main><nav className="mobile-nav">{nav.slice(0, 5).map(({ id, label, icon: Icon }) => <button key={id} className={page === id ? 'active' : ''} onClick={() => setPage(id)}><Icon size={19} /><span>{label}</span></button>)}</nav><div className="toast-stack" aria-live="polite">{toasts.map((toast) => <div className={`toast ${toast.kind}`} key={toast.id}>{toast.kind === 'success' ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}<span>{toast.message}</span><IconButton label="关闭" icon={X} onClick={() => setToasts((old) => old.filter((item) => item.id !== toast.id))} /></div>)}</div></div>;
+  const content = page === 'overview' ? <Overview stats={stats} deliveries={deliveries} destinations={destinations} refresh={refresh} notify={notify} /> : page === 'channels' ? <Channels channels={channels} providers={providers} refresh={refresh} notify={notify} /> : page === 'routes' ? <Routes routes={routes} channels={channels} refresh={refresh} notify={notify} /> : page === 'deliveries' ? <Deliveries deliveries={deliveries} refresh={refreshDeliveries} notify={notify} /> : page === 'agents' ? <Agents keys={keys} destinations={destinations} refresh={refresh} notify={notify} /> : page === 'integrations' ? <Integrations meta={meta} notify={notify} /> : <SystemPage meta={meta} providers={providers} />;
+  return <div className="app-shell"><aside className={menu ? 'open' : ''}><div className="brand"><span className="brand-mark"><BellRing size={20} /></span><div><strong>RelayDock</strong><small>NOTIFICATION FABRIC</small></div><IconButton label="关闭菜单" icon={X} onClick={() => setMenu(false)} /></div><nav>{nav.map(({ id, label, icon: Icon }) => <button key={id} className={page === id ? 'active' : ''} onClick={() => { setPage(id); setMenu(false); }}><Icon size={18} /><span>{label}</span>{id === 'deliveries' && stats?.failed24h ? <i>{stats.failed24h}</i> : null}</button>)}</nav><div className="side-health"><span><i />服务在线</span><small>队列与 SQLite 正常</small></div></aside>{menu && <div className="nav-backdrop" onClick={() => setMenu(false)} />}<main className="workspace"><header className="topbar"><IconButton label="打开菜单" icon={Menu} onClick={() => setMenu(true)} /><div><h1>{pageTitles[page][0]}</h1><p>{pageTitles[page][1]}</p></div><div className="top-actions"><span className="live-indicator"><i />LIVE</span><ThemeToggle /><IconButton label="刷新数据" icon={RefreshCw} onClick={refresh} /></div></header><div className="page-content">{content}</div></main><nav className="mobile-nav">{nav.filter(({ id }) => ['overview', 'channels', 'deliveries', 'agents', 'integrations'].includes(id)).map(({ id, label, icon: Icon }) => <button key={id} className={page === id ? 'active' : ''} onClick={() => setPage(id)}><Icon size={19} /><span>{label}</span></button>)}</nav><div className="toast-stack" aria-live="polite">{toasts.map((toast) => <div className={`toast ${toast.kind}`} key={toast.id}>{toast.kind === 'success' ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}<span>{toast.message}</span><IconButton label="关闭" icon={X} onClick={() => setToasts((old) => old.filter((item) => item.id !== toast.id))} /></div>)}</div></div>;
 }

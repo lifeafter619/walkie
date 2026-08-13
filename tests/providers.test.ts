@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../src/server/config.js';
-import { ProviderDispatcher } from '../src/server/providers/dispatcher.js';
+import { ProviderDispatcher, splitBody } from '../src/server/providers/dispatcher.js';
 import { assertSafeUrl } from '../src/server/providers/network.js';
 
 const config = { allowPrivateWebhooks: true, allowInsecureHttp: false } as AppConfig;
@@ -49,3 +49,52 @@ describe('provider dispatcher', () => {
     await expect(assertSafeUrl('https://127.0.0.1/hook', { allowPrivateWebhooks: false, allowInsecureHttp: false })).rejects.toThrow('私网或回环');
   });
 });
+
+describe('long message chunking', () => {
+  it('splits at newline boundaries and keeps every character', () => {
+    const body = Array.from({ length: 300 }, (_, i) => `line ${i} of the incident report`).join('\n');
+    const chunks = splitBody(body, 1000);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => chunk.length <= 1000)).toBe(true);
+    expect(chunks.join('\n')).toBe(body);
+    expect(splitBody('short', 1000)).toEqual(['short']);
+  });
+
+  it('sends numbered parts for over-limit Telegram messages, url only on last', async () => {
+    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
+    const dispatcher = new ProviderDispatcher(config, fetcher);
+    await dispatcher.send('telegram', { botToken: 't', chatId: '1' }, { title: 'Report', body: 'x'.repeat(8000), severity: 'info', url: 'https://example.com/r', metadata: {} });
+    const bodies = vi.mocked(fetcher).mock.calls.map((call) => JSON.parse(String(call[1]?.body)).text as string);
+    expect(bodies.length).toBe(3);
+    expect(bodies[0]).toContain('Report (1/3)');
+    expect(bodies[0]).not.toContain('https://example.com/r');
+    expect(bodies[2]).toContain('https://example.com/r');
+  });
+});
+
+describe('new providers', () => {
+  it('builds OneBot group message and PagerDuty event', async () => {
+    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
+    const dispatcher = new ProviderDispatcher({ allowPrivateWebhooks: true, allowInsecureHttp: true } as AppConfig, fetcher);
+    await dispatcher.send('onebot', { server: 'http://127.0.0.1:3000', groupId: '12345', accessToken: 'tok' }, { title: 'T', body: 'B', severity: 'info', metadata: {} });
+    const [url, init] = vi.mocked(fetcher).mock.calls[0];
+    expect(String(url)).toBe('http://127.0.0.1:3000/send_group_msg');
+    expect(JSON.parse(String(init?.body))).toMatchObject({ group_id: 12345 });
+    expect(new Headers(init?.headers).get('authorization')).toBe('Bearer tok');
+
+    await dispatcher.send('pagerduty', { routingKey: 'rk' }, { title: 'DB down', body: 'oops', severity: 'critical', metadata: { idempotencyKey: 'inc-1' } });
+    const body = JSON.parse(String(vi.mocked(fetcher).mock.calls[1][1]?.body));
+    expect(body).toMatchObject({ routing_key: 'rk', event_action: 'trigger', dedup_key: 'inc-1' });
+    expect(body.payload.severity).toBe('critical');
+  });
+
+  it('maps severity to Bark critical level and feishu header color', async () => {
+    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
+    const dispatcher = new ProviderDispatcher(config, fetcher);
+    await dispatcher.send('bark', { server: 'https://api.day.app', deviceKey: 'k', callOnCritical: true, criticalVolume: 8 }, { title: 'T', body: 'B', severity: 'critical', metadata: {} });
+    expect(JSON.parse(String(vi.mocked(fetcher).mock.calls[0][1]?.body))).toMatchObject({ level: 'critical', call: '1', volume: 8 });
+    await dispatcher.send('feishu', { webhookUrl: 'https://open.feishu.cn/hook/x' }, { title: 'T', body: 'B', severity: 'info', metadata: {} });
+    expect(JSON.parse(String(vi.mocked(fetcher).mock.calls[1][1]?.body)).card.header.template).toBe('blue');
+  });
+});
+

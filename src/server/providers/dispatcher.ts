@@ -2,7 +2,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import nodemailer from 'nodemailer';
 import type { ProviderId, Severity } from '../../shared/types.js';
 import type { AppConfig } from '../config.js';
-import { safeFetch } from './network.js';
+import { safeFetch, type ResolveHost } from './network.js';
 
 export interface ProviderMessage {
   title: string;
@@ -19,6 +19,27 @@ const text = (message: ProviderMessage) => `${message.title}\n\n${message.body}$
 const markdown = (message: ProviderMessage) => `**${message.title}**\n\n${message.body}${message.url ? `\n\n[查看详情](${message.url})` : ''}`;
 const color: Record<Severity, string> = { info: '#267365', success: '#178458', warning: '#b26b16', critical: '#b83b32' };
 
+// 有严格正文长度上限的渠道（字符数，留出标题/链接/多字节余量）；未列出的渠道不分片
+const BODY_LIMITS: Partial<Record<ProviderId, number>> = {
+  telegram: 3600, wecom: 1200, dingtalk: 16000, discord: 3600,
+  'google-chat': 3600, qmsg: 900, twilio: 1400, onebot: 3500, line: 4500
+};
+
+/** 按上限切分正文，优先在换行处断开 */
+export function splitBody(body: string, limit: number): string[] {
+  if (body.length <= limit) return [body];
+  const chunks: string[] = [];
+  let rest = body;
+  while (rest.length > limit) {
+    const cut = rest.lastIndexOf('\n', limit);
+    const at = cut > limit / 2 ? cut : limit;
+    chunks.push(rest.slice(0, at));
+    rest = rest.slice(at).replace(/^\n/, '');
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+}
+
 function renderTemplate(template: string, message: ProviderMessage): string {
   const values: Record<string, unknown> = { ...message.metadata, title: message.title, body: message.body, content: message.body, severity: message.severity, url: message.url ?? '' };
   return template.replace(/{{\s*([\w.-]+)\s*}}/g, (_, key: string) => {
@@ -28,13 +49,35 @@ function renderTemplate(template: string, message: ProviderMessage): string {
 }
 
 export class ProviderDispatcher {
-  constructor(private readonly appConfig: AppConfig, private readonly fetcher: typeof fetch = fetch) {}
+  constructor(
+    private readonly appConfig: AppConfig,
+    private readonly fetcher: typeof fetch = fetch,
+    private readonly resolveHost?: ResolveHost
+  ) {}
 
   async send(provider: ProviderId, config: Record<string, unknown>, message: ProviderMessage): Promise<ProviderResult> {
     if (provider === 'smtp') return this.sendSmtp(config, message);
-    const request = this.buildRequest(provider, config, message);
-    const result = await safeFetch(request.url, request.init, this.appConfig, this.fetcher);
-    return { responseCode: result.status, response: result.body };
+    const limit = BODY_LIMITS[provider];
+    const chunks = limit ? splitBody(message.body, limit) : [message.body];
+    let result: ProviderResult = {};
+    for (let index = 0; index < chunks.length; index += 1) {
+      const part: ProviderMessage = chunks.length === 1 ? message : {
+        ...message,
+        title: `${message.title} (${index + 1}/${chunks.length})`,
+        body: chunks[index],
+        // 链接只挂最后一片，避免每片都带按钮
+        url: index === chunks.length - 1 ? message.url : undefined
+      };
+      const request = this.buildRequest(provider, config, part);
+      const response = await safeFetch(request.url, request.init, this.appConfig, this.fetcher, this.resolveHost);
+      result = { responseCode: response.status, response: response.body };
+    }
+    return result;
+  }
+
+  /** 投递终态回调，走同一套 SSRF 校验 */
+  async postCallback(url: string, payload: unknown): Promise<void> {
+    await safeFetch(url, this.json(payload), this.appConfig, this.fetcher, this.resolveHost);
   }
 
   private json(body: unknown, headers: Record<string, string> = {}): RequestInit {
@@ -45,14 +88,18 @@ export class ProviderDispatcher {
     const bodyText = text(message);
     switch (provider) {
       case 'telegram':
-        return { url: `https://api.telegram.org/bot${string(config, 'botToken')}/sendMessage`, init: this.json({ chat_id: string(config, 'chatId'), text: bodyText, disable_notification: Boolean(config.disableNotification) }) };
+        return { url: `https://api.telegram.org/bot${string(config, 'botToken')}/sendMessage`, init: this.json({
+          chat_id: string(config, 'chatId'), text: bodyText, disable_notification: Boolean(config.disableNotification),
+          ...(config.parseMode ? { parse_mode: string(config, 'parseMode') } : {}),
+          ...(config.messageThreadId ? { message_thread_id: Number(config.messageThreadId) } : {})
+        }) };
       case 'wecom':
         return { url: `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${encodeURIComponent(string(config, 'key'))}`, init: this.json({ msgtype: 'markdown', markdown: { content: markdown(message) } }) };
       case 'feishu': {
         const timestamp = Math.floor(Date.now() / 1000).toString();
         const secret = string(config, 'secret');
         const signature = secret ? createHmac('sha256', `${timestamp}\n${secret}`).update('').digest('base64') : undefined;
-        return { url: string(config, 'webhookUrl'), init: this.json({ ...(signature ? { timestamp, sign: signature } : {}), msg_type: 'interactive', card: { header: { title: { tag: 'plain_text', content: message.title }, template: message.severity === 'critical' ? 'red' : message.severity === 'warning' ? 'orange' : 'green' }, elements: [{ tag: 'markdown', content: `${message.body}${message.url ? `\n[查看详情](${message.url})` : ''}` }] } }) };
+        return { url: string(config, 'webhookUrl'), init: this.json({ ...(signature ? { timestamp, sign: signature } : {}), msg_type: 'interactive', card: { header: { title: { tag: 'plain_text', content: message.title }, template: string(config, 'headerTemplate') || ({ critical: 'red', warning: 'orange', success: 'green', info: 'blue' } as const)[message.severity] }, elements: [{ tag: 'markdown', content: `${message.body}${message.url ? `\n[查看详情](${message.url})` : ''}` }] } }) };
       }
       case 'dingtalk': {
         const timestamp = Date.now().toString();
@@ -73,20 +120,33 @@ export class ProviderDispatcher {
       case 'mattermost':
       case 'rocketchat':
         return { url: string(config, 'webhookUrl'), init: this.json({ text: markdown(message) }) };
-      case 'ntfy':
-        return { url: `${string(config, 'server').replace(/\/$/, '')}/${encodeURIComponent(string(config, 'topic'))}`, init: { method: 'POST', headers: { Title: message.title, Priority: message.severity === 'critical' ? 'urgent' : message.severity === 'warning' ? 'high' : 'default', ...(message.url ? { Click: message.url } : {}), ...(config.token ? { Authorization: `Bearer ${string(config, 'token')}` } : {}) }, body: message.body } };
+      case 'ntfy': {
+        const priority = string(config, 'priority') || (message.severity === 'critical' ? 'urgent' : message.severity === 'warning' ? 'high' : 'default');
+        const tags = string(config, 'tags') || (typeof message.metadata.tags === 'string' ? message.metadata.tags.replace(/\|/g, ',') : '');
+        return { url: `${string(config, 'server').replace(/\/$/, '')}/${encodeURIComponent(string(config, 'topic'))}`, init: { method: 'POST', headers: { Title: message.title, Priority: priority, ...(tags ? { Tags: tags } : {}), ...(message.url ? { Click: message.url } : {}), ...(config.token ? { Authorization: `Bearer ${string(config, 'token')}` } : {}) }, body: message.body } };
+      }
       case 'gotify':
-        return { url: `${string(config, 'server').replace(/\/$/, '')}/message?token=${encodeURIComponent(string(config, 'token'))}`, init: this.json({ title: message.title, message: message.body, priority: Number(config.priority ?? 5), extras: message.url ? { 'client::notification': { click: { url: message.url } } } : undefined }) };
+        return { url: `${string(config, 'server').replace(/\/$/, '')}/message?token=${encodeURIComponent(string(config, 'token'))}`, init: this.json({ title: message.title, message: message.body, priority: message.severity === 'critical' ? Math.max(Number(config.priority ?? 5), 8) : Number(config.priority ?? 5), extras: message.url ? { 'client::notification': { click: { url: message.url } } } : undefined }) };
       case 'pushover': {
         const form = new URLSearchParams({ token: string(config, 'apiToken'), user: string(config, 'userKey'), title: message.title, message: message.body, priority: message.severity === 'critical' ? '1' : '0' });
         if (config.device) form.set('device', string(config, 'device'));
+        if (config.sound) form.set('sound', string(config, 'sound'));
         if (message.url) { form.set('url', message.url); form.set('url_title', '查看详情'); }
         return { url: 'https://api.pushover.net/1/messages.json', init: { method: 'POST', body: form } };
       }
       case 'pushbullet':
         return { url: 'https://api.pushbullet.com/v2/pushes', init: this.json({ type: message.url ? 'link' : 'note', title: message.title, body: message.body, url: message.url, device_iden: config.deviceIden || undefined }, { 'Access-Token': string(config, 'accessToken') }) };
       case 'bark':
-        return { url: `${string(config, 'server').replace(/\/$/, '')}/push`, init: this.json({ device_key: string(config, 'deviceKey'), title: message.title, body: message.body, group: string(config, 'group') || 'RelayDock', level: message.severity === 'critical' ? 'timeSensitive' : 'active', url: message.url }) };
+        return { url: `${string(config, 'server').replace(/\/$/, '')}/push`, init: this.json({
+          device_key: string(config, 'deviceKey'), title: message.title, body: message.body,
+          group: string(config, 'group') || 'RelayDock',
+          level: message.severity === 'critical' ? 'critical' : message.severity === 'warning' ? 'timeSensitive' : 'active',
+          ...(message.severity === 'critical' && config.criticalVolume !== undefined && config.criticalVolume !== '' ? { volume: Number(config.criticalVolume) } : {}),
+          ...(config.sound ? { sound: string(config, 'sound') } : {}),
+          ...(config.icon ? { icon: string(config, 'icon') } : {}),
+          ...(message.severity === 'critical' && config.callOnCritical ? { call: '1' } : {}),
+          url: message.url
+        }) };
       case 'serverchan': {
         const sendKey = string(config, 'sendKey');
         const desp = `${message.body}${message.url ? `\n\n${message.url}` : ''}`;
@@ -141,6 +201,33 @@ export class ProviderDispatcher {
         }
         return { url: string(config, 'url'), init: { method: string(config, 'method') || 'POST', headers, body: renderTemplate(string(config, 'bodyTemplate'), message) } };
       }
+      case 'pushdeer':
+        return { url: `${(string(config, 'server') || 'https://api2.pushdeer.com').replace(/\/$/, '')}/message/push`, init: { method: 'POST', body: new URLSearchParams({ pushkey: string(config, 'pushKey'), text: message.title, desp: markdown(message), type: 'markdown' }) } };
+      case 'chanify':
+        return { url: `${(string(config, 'server') || 'https://api.chanify.net').replace(/\/$/, '')}/v1/sender/${encodeURIComponent(string(config, 'token'))}`, init: this.json({ title: message.title, text: `${message.body}${message.url ? `\n${message.url}` : ''}`, priority: message.severity === 'critical' ? 10 : 5, ...(config.sound ? { sound: string(config, 'sound') } : {}) }) };
+      case 'pushme':
+        return { url: (string(config, 'server') || 'https://push.i-i.me').replace(/\/$/, ''), init: { method: 'POST', body: new URLSearchParams({ push_key: string(config, 'pushKey'), title: message.title, content: markdown(message), type: 'markdown' }) } };
+      case 'onebot': {
+        const target = string(config, 'groupId')
+          ? { endpoint: 'send_group_msg', id: { group_id: Number(string(config, 'groupId')) } }
+          : { endpoint: 'send_private_msg', id: { user_id: Number(string(config, 'userId')) } };
+        return { url: `${string(config, 'server').replace(/\/$/, '')}/${target.endpoint}`, init: this.json({ ...target.id, message: bodyText }, config.accessToken ? { Authorization: `Bearer ${string(config, 'accessToken')}` } : {}) };
+      }
+      case 'synology-chat':
+        return { url: string(config, 'webhookUrl'), init: { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ payload: JSON.stringify({ text: bodyText }) }) } };
+      case 'pagerduty':
+        return { url: 'https://events.pagerduty.com/v2/enqueue', init: this.json({
+          routing_key: string(config, 'routingKey'), event_action: 'trigger',
+          ...(message.metadata.idempotencyKey ? { dedup_key: String(message.metadata.idempotencyKey) } : {}),
+          payload: {
+            summary: `${message.title}: ${message.body}`.slice(0, 1024),
+            source: string(config, 'source') || 'relaydock',
+            severity: ({ critical: 'critical', warning: 'warning', info: 'info', success: 'info' } as const)[message.severity]
+          },
+          ...(message.url ? { links: [{ href: message.url, text: message.title }] } : {})
+        }) };
+      case 'line':
+        return { url: 'https://api.line.me/v2/bot/message/push', init: this.json({ to: string(config, 'to'), messages: [{ type: 'text', text: bodyText.slice(0, 5000) }] }, { Authorization: `Bearer ${string(config, 'channelAccessToken')}` }) };
       default:
         throw new Error(`不支持的渠道类型: ${provider}`);
     }

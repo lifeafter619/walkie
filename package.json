@@ -1,6 +1,6 @@
 {
   "name": "relaydock",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "MIT",
   "description": "Self-hosted notification control plane and MCP server for AI agents.",
@@ -11,18 +11,24 @@
   "scripts": {
     "dev": "tsx watch src/server/index.ts",
     "dev:web": "vite",
+    "dev:cf": "npm run build:web && wrangler dev",
     "build": "npm run build:web && npm run build:server",
     "build:web": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
+    "build:worker": "tsc -p tsconfig.worker.json --noEmit",
+    "deploy:cf": "npm run build:web && wrangler deploy",
+    "cf:types": "wrangler types",
     "start": "node dist/server/index.js",
     "test": "vitest run --config vitest.config.ts",
     "test:watch": "vitest --config vitest.config.ts",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.worker.json --noEmit && tsc -p tsconfig.vercel.json"
   },
   "dependencies": {
+    "@libsql/client": "^0.17.4",
     "@modelcontextprotocol/express": "^2.0.0",
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
+    "@vercel/functions": "^3.9.3",
     "better-sqlite3": "^13.0.3",
     "express": "^5.2.1",
     "lucide-react": "^1.30.0",
@@ -32,6 +38,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260812.1",
     "@types/better-sqlite3": "^9.6.0",
     "@types/express": "^5.0.6",
     "@types/node": "^26.1.2",
@@ -45,6 +52,7 @@
     "tsx": "^4.23.11",
     "typescript": "^7.0.2",
     "vite": "^8.2.1",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "wrangler": "^4.122.0"
   }
 }

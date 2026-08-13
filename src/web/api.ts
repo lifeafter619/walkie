@@ -17,7 +17,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  meta: () => request<{ name: string; version: string; adminAuthRequired: boolean; mcpEndpoint: string }>('/api/meta'),
+  meta: () => request<{ name: string; version: string; runtime: 'node' | 'cloudflare-workers'; adminAuthRequired: boolean; publicUrl: string; mcpEndpoint: string; mcpUrl: string }>('/api/meta'),
   session: () => request<{ authenticated: boolean }>('/api/admin/session'),
   stats: () => request<DashboardStats>('/api/admin/stats'),
   providers: () => request<{ providers: ProviderDefinition[] }>('/api/admin/providers'),

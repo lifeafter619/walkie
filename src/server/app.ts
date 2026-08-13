@@ -1,14 +1,16 @@
 import { createMcpExpressApp } from '@modelcontextprotocol/express';
 import { toNodeHandler } from '@modelcontextprotocol/node';
-import { createMcpHandler, type AuthInfo } from '@modelcontextprotocol/server';
+import { type AuthInfo } from '@modelcontextprotocol/server';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { z, ZodError } from 'zod';
+import { ZodError } from 'zod';
 import type { ApiKey, ProviderId } from '../shared/types.js';
+import { askSchema, channelSchema, keySchema, notificationSchema, routeSchema } from '../shared/schemas.js';
 import type { AppConfig } from './config.js';
 import type { RelayRepository } from './database.js';
-import { createRelayMcpServer } from './mcp.js';
+import { createRelayMcpHandler } from './mcp.js';
+import { renderReplyForm, renderReplyResult } from './reply-page.js';
 import type { NotificationService } from './notifications.js';
 import type { ProviderDispatcher } from './providers/dispatcher.js';
 import { PROVIDERS, PROVIDER_MAP, validateProviderConfig } from './providers/catalog.js';
@@ -17,11 +19,6 @@ import type { DeliveryWorker } from './queue.js';
 declare global {
   namespace Express { interface Request { agentKey?: ApiKey; auth?: AuthInfo } }
 }
-
-const slug = z.string().min(2).max(80).regex(/^[a-z0-9][a-z0-9-]*$/, '只允许小写字母、数字和连字符');
-const channelSchema = z.object({ name: z.string().min(1).max(100), slug, provider: z.string(), enabled: z.boolean().optional(), config: z.record(z.string(), z.unknown()), rateLimitPerMin: z.number().int().min(0).max(600).nullish(), quietHours: z.string().regex(/^\d{2}:\d{2}-\d{2}:\d{2}$/, '格式应为 HH:MM-HH:MM').or(z.literal('')).nullish() });
-const routeSchema = z.object({ name: z.string().min(1).max(100), slug, strategy: z.enum(['fanout', 'fallback']), channelIds: z.array(z.string().uuid()).min(1), enabled: z.boolean().optional() });
-const notificationSchema = z.object({ destination: z.string().min(1), title: z.string().min(1).max(200), body: z.string().min(1).max(20_000), severity: z.enum(['info', 'success', 'warning', 'critical']).optional(), url: z.url().optional(), tags: z.string().max(200).optional(), short: z.string().max(200).optional(), metadata: z.record(z.string(), z.unknown()).optional(), idempotencyKey: z.string().max(200).optional() });
 
 const asyncRoute = (handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>) =>
   (req: Request, res: Response, next: NextFunction) => void handler(req, res, next).catch(next);
@@ -44,15 +41,8 @@ export function createApp(deps: AppDependencies) {
   const app = createMcpExpressApp({ host: config.host });
   app.use(express.json({ limit: '256kb' }));
   app.use(express.urlencoded({ extended: false, limit: '256kb' }));
-  const mcpHandler = createMcpHandler(({ authInfo }) => {
-    const apiKey = authInfo?.clientId ? repository.getKey(authInfo.clientId) : undefined;
-    if (!apiKey || apiKey.revokedAt) throw new Error('无效或已吊销的 Agent API Key');
-    return createRelayMcpServer(repository, notifications, apiKey);
-  }, {
-    legacy: 'stateless',
-    responseMode: 'json',
-    onerror: (error) => console.error('MCP request failed:', error.message)
-  });
+  const publicUrl = () => (config.publicUrl ?? `http://${config.host}:${config.port}`).replace(/\/$/, '');
+  const mcpHandler = createRelayMcpHandler(repository, notifications, publicUrl);
   const nodeMcpHandler = toNodeHandler(mcpHandler, {
     onerror: (error) => console.error('MCP adapter failed:', error.message)
   });
@@ -62,101 +52,140 @@ export function createApp(deps: AppDependencies) {
     if (!config.adminToken || bearer(req) === config.adminToken || req.header('x-admin-token') === config.adminToken) return next();
     res.status(401).json({ error: '需要管理令牌' });
   };
-  const requireAgent = (req: Request, res: Response, next: NextFunction) => {
+  const requireAgent = asyncRoute(async (req: Request, res: Response, next: NextFunction) => {
     const secret = bearer(req);
-    const apiKey = secret ? repository.authenticateKey(secret) : undefined;
+    const apiKey = secret ? await repository.authenticateKey(secret) : undefined;
     if (!apiKey) return res.status(401).json({ error: '无效或已吊销的 Agent API Key' });
     req.agentKey = apiKey;
     req.auth = { token: secret!, clientId: apiKey.id, scopes: apiKey.scopes };
     next();
-  };
+  });
 
-  app.get('/health', (_req, res) => res.json({ status: 'ok', version: '0.1.0', queue: 'running' }));
-  app.get('/api/meta', (_req, res) => res.json({ name: 'RelayDock', version: '0.1.0', adminAuthRequired: Boolean(config.adminToken), mcpEndpoint: '/mcp' }));
+  app.get('/health', (_req, res) => res.json({ status: 'ok', version: '0.2.0', queue: 'running' }));
+  app.get('/api/meta', (req, res) => {
+    const publicUrl = (config.publicUrl ?? `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+    res.json({
+      name: 'RelayDock', version: '0.2.0', runtime: 'node', adminAuthRequired: Boolean(config.adminToken),
+      publicUrl, mcpEndpoint: '/mcp', mcpUrl: `${publicUrl}/mcp`
+    });
+  });
   app.get('/api/admin/session', requireAdmin, (_req, res) => res.json({ authenticated: true }));
 
   const admin = express.Router();
   admin.use(requireAdmin);
   admin.get('/providers', (_req, res) => res.json({ providers: PROVIDERS }));
-  admin.get('/stats', (_req, res) => res.json(repository.getDashboardStats()));
-  admin.get('/destinations', (_req, res) => res.json({ destinations: repository.listDestinations() }));
-  admin.get('/channels', (_req, res) => res.json({ channels: repository.listChannels() }));
-  admin.post('/channels', (req, res) => {
+  admin.get('/stats', asyncRoute(async (_req, res) => res.json(await repository.getDashboardStats())));
+  admin.get('/destinations', asyncRoute(async (_req, res) => res.json({ destinations: await repository.listDestinations() })));
+  admin.get('/channels', asyncRoute(async (_req, res) => res.json({ channels: await repository.listChannels() })));
+  admin.post('/channels', asyncRoute(async (req, res) => {
     const input = channelSchema.parse(req.body);
     const provider = input.provider as ProviderId;
     if (!PROVIDER_MAP.has(provider)) throw new Error('不支持的渠道类型');
     const errors = validateProviderConfig(provider, input.config);
     if (errors.length) return res.status(400).json({ error: errors.join('；') });
-    res.status(201).json(repository.createChannel({ ...input, provider }));
-  });
-  admin.patch('/channels/:id', (req, res) => {
+    res.status(201).json(await repository.createChannel({ ...input, provider }));
+  }));
+  admin.patch('/channels/:id', asyncRoute(async (req, res) => {
     const input = channelSchema.partial().parse(req.body);
     const provider = input.provider as ProviderId | undefined;
     if (provider && !PROVIDER_MAP.has(provider)) throw new Error('不支持的渠道类型');
-    res.json(repository.updateChannel(req.params.id, { ...input, provider }));
-  });
-  admin.delete('/channels/:id', (req, res) => { repository.deleteChannel(req.params.id); res.status(204).end(); });
+    res.json(await repository.updateChannel(String(req.params.id), { ...input, provider }));
+  }));
+  admin.delete('/channels/:id', asyncRoute(async (req, res) => { await repository.deleteChannel(String(req.params.id)); res.status(204).end(); }));
   admin.post('/channels/:id/test', asyncRoute(async (req, res) => {
-    const channel = repository.getChannel(String(req.params.id));
+    const channel = await repository.getChannel(String(req.params.id));
     if (!channel) return res.status(404).json({ error: '频道不存在' });
     try {
-      await dispatcher.send(channel.provider, repository.getChannelConfig(channel.id), { title: 'RelayDock 测试通知', body: '频道连接正常，可以接收 Agent 通知。', severity: 'success', metadata: {} });
-      repository.setChannelTest(channel.id, true);
+      await dispatcher.send(channel.provider, await repository.getChannelConfig(channel.id), { title: 'RelayDock 测试通知', body: '频道连接正常，可以接收 Agent 通知。', severity: 'success', metadata: {} });
+      await repository.setChannelTest(channel.id, true);
       res.json({ success: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      repository.setChannelTest(channel.id, false, message);
+      await repository.setChannelTest(channel.id, false, message);
       res.status(502).json({ error: message });
     }
   }));
 
-  admin.get('/routes', (_req, res) => res.json({ routes: repository.listRoutes() }));
-  admin.post('/routes', (req, res) => {
+  admin.get('/routes', asyncRoute(async (_req, res) => res.json({ routes: await repository.listRoutes() })));
+  admin.post('/routes', asyncRoute(async (req, res) => {
     const input = routeSchema.parse(req.body);
-    const channels = new Set(repository.listChannels().map((channel) => channel.id));
+    const channels = new Set((await repository.listChannels()).map((channel) => channel.id));
     if (input.channelIds.some((id) => !channels.has(id))) return res.status(400).json({ error: '路由包含不存在的频道' });
-    res.status(201).json(repository.createRoute(input));
-  });
-  admin.patch('/routes/:id', (req, res) => {
+    res.status(201).json(await repository.createRoute(input));
+  }));
+  admin.patch('/routes/:id', asyncRoute(async (req, res) => {
     const input = routeSchema.partial().parse(req.body);
-    const channels = new Set(repository.listChannels().map((channel) => channel.id));
+    const channels = new Set((await repository.listChannels()).map((channel) => channel.id));
     if (input.channelIds?.some((id) => !channels.has(id))) return res.status(400).json({ error: '路由包含不存在的频道' });
-    res.json(repository.updateRoute(String(req.params.id), input));
-  });
-  admin.delete('/routes/:id', (req, res) => { repository.deleteRoute(req.params.id); res.status(204).end(); });
+    res.json(await repository.updateRoute(String(req.params.id), input));
+  }));
+  admin.delete('/routes/:id', asyncRoute(async (req, res) => { await repository.deleteRoute(String(req.params.id)); res.status(204).end(); }));
 
-  admin.get('/keys', (_req, res) => res.json({ keys: repository.listKeys() }));
-  admin.post('/keys', (req, res) => {
-    const input = z.object({ name: z.string().min(1).max(100), scopes: z.array(z.enum(['notifications:send', 'deliveries:read'])).min(1).optional(), destinationIds: z.array(z.string()).optional() }).parse(req.body);
-    res.status(201).json(repository.createKey(input));
-  });
-  admin.post('/keys/:id/revoke', (req, res) => { repository.revokeKey(req.params.id); res.json({ success: true }); });
+  admin.get('/keys', asyncRoute(async (_req, res) => res.json({ keys: await repository.listKeys() })));
+  admin.post('/keys', asyncRoute(async (req, res) => {
+    const input = keySchema.parse(req.body);
+    res.status(201).json(await repository.createKey(input));
+  }));
+  admin.post('/keys/:id/revoke', asyncRoute(async (req, res) => { await repository.revokeKey(String(req.params.id)); res.json({ success: true }); }));
 
-  admin.get('/deliveries', (req, res) => res.json({ deliveries: repository.listDeliveries({ limit: Number(req.query.limit ?? 100), status: typeof req.query.status === 'string' ? req.query.status : undefined }) }));
-  admin.get('/deliveries/:id', (req, res) => {
-    const delivery = repository.getDelivery(String(req.params.id));
+  admin.get('/deliveries', asyncRoute(async (req, res) => res.json({ deliveries: await repository.listDeliveries({ limit: Number(req.query.limit ?? 100), status: typeof req.query.status === 'string' ? req.query.status : undefined }) })));
+  admin.get('/deliveries/:id', asyncRoute(async (req, res) => {
+    const delivery = await repository.getDelivery(String(req.params.id));
     if (!delivery) return res.status(404).json({ error: '投递不存在' });
     res.json(delivery);
-  });
-  admin.post('/send', (req, res) => {
-    const delivery = notifications.send(notificationSchema.parse(req.body), 'admin');
+  }));
+  admin.post('/send', asyncRoute(async (req, res) => {
+    const delivery = await notifications.send(notificationSchema.parse(req.body), 'admin');
     void worker.drainOnce();
     res.status(202).json(delivery);
-  });
+  }));
   admin.post('/queue/drain', asyncRoute(async (_req, res) => res.json({ processed: await worker.drainOnce() })));
+  admin.get('/conversations', asyncRoute(async (req, res) => res.json({ conversations: await repository.listConversations({ pendingOnly: req.query.pending === '1', limit: Number(req.query.limit ?? 50) }) })));
+  admin.post('/conversations/:id/reply', asyncRoute(async (req, res) => {
+    const reply = String((req.body as Record<string, unknown>)?.reply ?? '').trim().slice(0, 4000);
+    if (!reply) return res.status(400).json({ error: '回复内容不能为空' });
+    const accepted = await repository.replyConversation(String(req.params.id), reply, 'admin');
+    if (!accepted) return res.status(409).json({ error: '会话已回复或已过期' });
+    res.json({ success: true });
+  }));
   app.use('/api/admin', admin);
 
-  app.post('/api/v1/notify', requireAgent, (req, res) => {
-    const delivery = notifications.send(notificationSchema.parse(req.body), `agent:${req.agentKey!.id}`, req.agentKey);
+  app.post('/api/v1/notify', requireAgent, asyncRoute(async (req, res) => {
+    const delivery = await notifications.send(notificationSchema.parse(req.body), `agent:${req.agentKey!.id}`, req.agentKey);
     void worker.drainOnce();
     res.status(202).json({ deliveryId: delivery.id, status: delivery.status, createdAt: delivery.createdAt });
-  });
-  app.get('/api/v1/deliveries/:id', requireAgent, (req, res) => res.json(notifications.getDelivery(String(req.params.id), req.agentKey)));
+  }));
+  app.get('/api/v1/deliveries/:id', requireAgent, asyncRoute(async (req, res) => res.json(await notifications.getDelivery(String(req.params.id), req.agentKey))));
+  app.post('/api/v1/ask', requireAgent, asyncRoute(async (req, res) => {
+    const input = askSchema.parse(req.body);
+    const base = config.publicUrl ? publicUrl() : `${req.protocol}://${req.get('host')}`;
+    const asked = await notifications.ask(input, `agent:${req.agentKey!.id}`, req.agentKey!, base);
+    void worker.drainOnce();
+    res.status(201).json({ conversationId: asked.conversation.id, deliveryId: asked.deliveryId, replyUrl: asked.replyUrl, expiresAt: asked.conversation.expiresAt });
+  }));
+  app.get('/api/v1/conversations/:id', requireAgent, asyncRoute(async (req, res) => {
+    const { status, conversation } = await notifications.conversationStatus(String(req.params.id), req.agentKey!);
+    res.json({ status, reply: conversation.reply, repliedAt: conversation.repliedAt, expiresAt: conversation.expiresAt });
+  }));
+
+  // 一次性回复链接：GET 表单 / POST 提交，token 即鉴权
+  app.get('/reply/:id/:token', asyncRoute(async (req, res) => {
+    const conversation = await repository.getConversationForReply(String(req.params.id), String(req.params.token));
+    const usable = conversation && !conversation.repliedAt && conversation.expiresAt > new Date().toISOString();
+    res.status(usable ? 200 : 410).type('html').send(usable ? renderReplyForm(conversation.question, conversation.options) : renderReplyResult('gone'));
+  }));
+  app.post('/reply/:id/:token', asyncRoute(async (req, res) => {
+    const params = (req.body ?? {}) as Record<string, unknown>;
+    const reply = String(params.reply ?? params.replyText ?? '').trim().slice(0, 4000);
+    if (!reply) return res.status(400).type('html').send(renderReplyResult('gone'));
+    const accepted = await repository.replyConversation(String(req.params.id), reply, 'reply-link', String(req.params.token));
+    res.status(accepted ? 200 : 410).type('html').send(renderReplyResult(accepted ? 'done' : 'gone'));
+  }));
 
   // Server酱兼容入口：GET/POST /{key}.send 或 /send/{key}.send，key 为 Agent API Key。
   // 参数 title/text、desp、tags、short 与 Server酱³ 一致；destination 指定目的地（Key 白名单只有一个时可省略）。
-  const serverchanCompat = (req: Request, res: Response) => {
-    const apiKey = repository.authenticateKey(String(req.params[0]));
+  const serverchanCompat = asyncRoute(async (req: Request, res: Response) => {
+    const apiKey = await repository.authenticateKey(String(req.params[0]));
     if (!apiKey) return res.status(401).json({ code: 40001, message: '无效或已吊销的 SendKey', data: {} });
     const params: Record<string, unknown> = { ...req.query, ...(req.body && typeof req.body === 'object' ? req.body : {}) };
     const title = String(params.title ?? params.text ?? '').trim();
@@ -165,7 +194,7 @@ export function createApp(deps: AppDependencies) {
     const destination = String(params.destination ?? '').trim() || (apiKey.destinationIds.length === 1 ? apiKey.destinationIds[0] : '');
     if (!destination) return res.status(400).json({ code: 40002, message: '请用 destination 参数指定目的地，或为该 Key 只配置一个目的地', data: {} });
     try {
-      const delivery = notifications.send({
+      const delivery = await notifications.send({
         destination,
         title: (title || desp).slice(0, 200),
         body: (desp || title).slice(0, 20_000),
@@ -179,13 +208,15 @@ export function createApp(deps: AppDependencies) {
     } catch (error) {
       res.status(400).json({ code: 40004, message: error instanceof Error ? error.message : '发送失败', data: {} });
     }
-  };
+  });
   app.get(/^\/(?:send\/)?(rdk_[a-f0-9]{8}_[A-Za-z0-9_-]+)\.send$/, serverchanCompat);
   app.post(/^\/(?:send\/)?(rdk_[a-f0-9]{8}_[A-Za-z0-9_-]+)\.send$/, serverchanCompat);
 
   app.post('/mcp', requireAgent, asyncRoute(async (req, res) => {
     await nodeMcpHandler(req, res, req.body);
   }));
+  app.get('/mcp', (_req, res) => res.set('Allow', 'POST').status(405).send('Method not allowed'));
+  app.delete('/mcp', (_req, res) => res.set('Allow', 'POST').status(405).send('Method not allowed'));
 
   const webDir = path.resolve('dist/web');
   if (existsSync(webDir)) {

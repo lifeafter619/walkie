@@ -20,7 +20,7 @@ export function quietUntil(quietHours: string | undefined, severity: Severity, a
 }
 
 export class DeliveryWorker {
-  private timer?: NodeJS.Timeout;
+  private timer?: ReturnType<typeof setInterval>;
   private running = false;
   // ponytail: 内存滑动窗口限流，进程重启后窗口清零；需要跨进程精确限流时改为按 attempts 表统计
   private readonly sentAt = new Map<string, number[]>();
@@ -28,21 +28,54 @@ export class DeliveryWorker {
   constructor(
     private readonly repository: RelayRepository,
     private readonly dispatcher: ProviderDispatcher,
-    private readonly config: Pick<AppConfig, 'deliveryWorkers' | 'maxDeliveryAttempts' | 'retryBaseMs'>
+    private readonly config: Pick<AppConfig, 'deliveryWorkers' | 'maxDeliveryAttempts' | 'retryBaseMs'> & { maxSendsPerMin?: number }
   ) {}
 
   private throttled(channel: Channel): boolean {
-    if (!channel.rateLimitPerMin) return false;
+    // ponytail: 全局与频道限流共用内存滑动窗口；跨进程精确限流需改为按 attempts 表统计
     const cutoff = Date.now() - 60_000;
+    if (this.config.maxSendsPerMin) {
+      const global = (this.sentAt.get('*') ?? []).filter((time) => time > cutoff);
+      this.sentAt.set('*', global);
+      if (global.length >= this.config.maxSendsPerMin) return true;
+    }
+    if (!channel.rateLimitPerMin) return false;
     const window = (this.sentAt.get(channel.id) ?? []).filter((time) => time > cutoff);
     this.sentAt.set(channel.id, window);
     return window.length >= channel.rateLimitPerMin;
   }
 
+  private recordSend(channel: Channel): void {
+    if (this.config.maxSendsPerMin) this.sentAt.set('*', [...(this.sentAt.get('*') ?? []), Date.now()]);
+    if (channel.rateLimitPerMin) this.sentAt.set(channel.id, [...(this.sentAt.get(channel.id) ?? []), Date.now()]);
+  }
+
+  /** 投递到达终态且带 callbackUrl 时，POST 最终结果（只发一次，SSRF 校验同 webhook） */
+  private async notifyCallback(deliveryId: string): Promise<void> {
+    const delivery = await this.repository.getDelivery(deliveryId);
+    const callbackUrl = delivery?.metadata.callbackUrl;
+    if (!delivery || typeof callbackUrl !== 'string') return;
+    if (!['delivered', 'partial', 'failed'].includes(delivery.status)) return;
+    if (!(await this.repository.claimCallback(deliveryId))) return;
+    try {
+      await this.dispatcher.postCallback(callbackUrl, {
+        deliveryId: delivery.id,
+        status: delivery.status,
+        title: delivery.title,
+        severity: delivery.severity,
+        attempts: (delivery.attempts ?? []).map((a) => ({
+          channel: a.channelName ?? a.channelId, provider: a.provider, status: a.status,
+          attemptCount: a.attemptCount, responseCode: a.responseCode, error: a.error
+        }))
+      });
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'callback.failed', deliveryId, message: error instanceof Error ? error.message : String(error) }));
+    }
+  }
+
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => void this.drainOnce(), 750);
-    this.timer.unref();
     void this.drainOnce();
   }
 
@@ -55,47 +88,49 @@ export class DeliveryWorker {
     if (this.running) return 0;
     this.running = true;
     try {
-      const attempts = this.repository.claimDueAttempts(this.config.deliveryWorkers);
+      const attempts = await this.repository.claimDueAttempts(this.config.deliveryWorkers);
       await Promise.all(attempts.map(async (attempt) => {
-        const delivery = this.repository.getDelivery(attempt.deliveryId);
-        const channel = this.repository.getChannel(attempt.channelId);
+        const delivery = await this.repository.getDelivery(attempt.deliveryId);
+        const channel = await this.repository.getChannel(attempt.channelId);
         if (!delivery || !channel) {
-          this.repository.completeAttempt(attempt.id, { success: false, error: '投递或频道已不存在' });
+          await this.repository.completeAttempt(attempt.id, { success: false, error: '投递或频道已不存在' });
           return;
         }
         try {
           const quiet = quietUntil(channel.quietHours, delivery.severity);
           if (quiet) {
-            this.repository.deferAttempt(attempt.id, quiet.toISOString());
+            await this.repository.deferAttempt(attempt.id, quiet.toISOString());
             return;
           }
           if (this.throttled(channel)) {
-            this.repository.deferAttempt(attempt.id, new Date(Date.now() + 15_000).toISOString());
+            await this.repository.deferAttempt(attempt.id, new Date(Date.now() + 15_000).toISOString());
             return;
           }
-          if (channel.rateLimitPerMin) this.sentAt.set(channel.id, [...(this.sentAt.get(channel.id) ?? []), Date.now()]);
-          const result = await this.dispatcher.send(channel.provider, this.repository.getChannelConfig(channel.id), {
+          if (channel.rateLimitPerMin || this.config.maxSendsPerMin) this.recordSend(channel);
+          const result = await this.dispatcher.send(channel.provider, await this.repository.getChannelConfig(channel.id), {
             title: delivery.title,
             body: delivery.body,
             severity: delivery.severity,
             url: delivery.url,
-            metadata: delivery.metadata
+            metadata: { ...delivery.metadata, ...(delivery.idempotencyKey ? { idempotencyKey: delivery.idempotencyKey } : {}) }
           });
-          this.repository.completeAttempt(attempt.id, { success: true, responseCode: result.responseCode });
-          const route = delivery.targetType === 'route' ? this.repository.getRoute(delivery.targetId) : undefined;
-          if (route?.strategy === 'fallback') this.repository.skipAttempts(delivery.id, attempt.id);
+          await this.repository.completeAttempt(attempt.id, { success: true, responseCode: result.responseCode });
+          const route = delivery.targetType === 'route' ? await this.repository.getRoute(delivery.targetId) : undefined;
+          if (route?.strategy === 'fallback') await this.repository.skipAttempts(delivery.id, attempt.id);
+          await this.notifyCallback(delivery.id);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           const retryAt = attempt.attemptCount < this.config.maxDeliveryAttempts
             ? new Date(Date.now() + this.config.retryBaseMs * 2 ** (attempt.attemptCount - 1)).toISOString()
             : undefined;
           const responseCode = /^HTTP (\d+)/.exec(message)?.[1];
-          this.repository.completeAttempt(attempt.id, {
+          await this.repository.completeAttempt(attempt.id, {
             success: false,
             error: message.slice(0, 1000),
             responseCode: responseCode ? Number(responseCode) : undefined,
             retryAt
           });
+          await this.notifyCallback(delivery.id);
         }
       }));
       return attempts.length;

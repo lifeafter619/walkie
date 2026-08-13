@@ -1,16 +1,18 @@
 import { createServer } from 'node:http';
 import { loadConfig } from './config.js';
-import { RelayRepository } from './database.js';
+import { createNodeRepository } from './database-node.js';
 import { createApp } from './app.js';
 import { NotificationService } from './notifications.js';
 import { ProviderDispatcher } from './providers/dispatcher.js';
 import { DeliveryWorker } from './queue.js';
 
 const config = loadConfig();
-const repository = new RelayRepository(config.databasePath, config.masterKey);
-const notifications = new NotificationService(repository);
+const repository = await createNodeRepository(config.databasePath, config.masterKey);
 const dispatcher = new ProviderDispatcher(config);
+let workerRef: DeliveryWorker;
+const notifications = new NotificationService(repository, () => void workerRef.drainOnce());
 const worker = new DeliveryWorker(repository, dispatcher, config);
+workerRef = worker;
 const app = createApp({ config, repository, notifications, dispatcher, worker });
 const server = createServer(app);
 
@@ -24,7 +26,7 @@ const shutdown = () => {
   worker.stop();
   void app.locals.closeMcp?.();
   server.close(() => {
-    repository.close();
+    void repository.close();
     process.exit(0);
   });
 };

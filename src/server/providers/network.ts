@@ -2,6 +2,11 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import type { AppConfig } from '../config.js';
 
+export type ResolveHost = (hostname: string) => Promise<string[]>;
+
+const resolveWithLookup: ResolveHost = async (hostname) =>
+  (await lookup(hostname, { all: true })).map((entry) => entry.address);
+
 function isPrivateAddress(address: string): boolean {
   const normalized = address.toLowerCase().replace(/^::ffff:/, '');
   if (normalized === '::1' || normalized === '::' || normalized.startsWith('fc') || normalized.startsWith('fd') || normalized.startsWith('fe8') || normalized.startsWith('fe9') || normalized.startsWith('fea') || normalized.startsWith('feb')) return true;
@@ -12,7 +17,11 @@ function isPrivateAddress(address: string): boolean {
     (parts[0] === 192 && parts[1] === 168) || (parts[0] >= 224);
 }
 
-export async function assertSafeUrl(raw: string, config: Pick<AppConfig, 'allowPrivateWebhooks' | 'allowInsecureHttp'>): Promise<URL> {
+export async function assertSafeUrl(
+  raw: string,
+  config: Pick<AppConfig, 'allowPrivateWebhooks' | 'allowInsecureHttp'>,
+  resolveHost: ResolveHost = resolveWithLookup
+): Promise<URL> {
   let url: URL;
   try {
     url = new URL(raw);
@@ -24,8 +33,8 @@ export async function assertSafeUrl(raw: string, config: Pick<AppConfig, 'allowP
   if (url.username || url.password) throw new Error('通知地址不能包含 URL 凭据');
   if (!config.allowPrivateWebhooks) {
     if (url.hostname === 'localhost' || (isIP(url.hostname) && isPrivateAddress(url.hostname))) throw new Error('私网或回环通知地址已禁用');
-    const addresses = await lookup(url.hostname, { all: true });
-    if (!addresses.length || addresses.some((entry) => isPrivateAddress(entry.address))) throw new Error('通知地址解析到了私网或保留地址');
+    const addresses = await resolveHost(url.hostname);
+    if (!addresses.length || addresses.some(isPrivateAddress)) throw new Error('通知地址解析到了私网或保留地址');
   }
   return url;
 }
@@ -34,9 +43,10 @@ export async function safeFetch(
   rawUrl: string,
   init: RequestInit,
   config: Pick<AppConfig, 'allowPrivateWebhooks' | 'allowInsecureHttp'>,
-  fetcher: typeof fetch = fetch
+  fetcher: typeof fetch = fetch,
+  resolveHost: ResolveHost = resolveWithLookup
 ): Promise<{ status: number; body: string }> {
-  const url = await assertSafeUrl(rawUrl, config);
+  const url = await assertSafeUrl(rawUrl, config, resolveHost);
   const response = await fetcher(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(12_000) });
   const body = (await response.text()).slice(0, 4096);
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${body || response.statusText}`);

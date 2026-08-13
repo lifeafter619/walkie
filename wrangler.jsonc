@@ -1,0 +1,32 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "relaydock",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-08-12",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist/web",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/mcp", "/health", "/*.send", "/send/*", "/reply/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "RELAYDOCK", "class_name": "RelayDockState" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RelayDockState"] }
+  ],
+  "vars": {
+    "ALLOW_INSECURE_HTTP": "false",
+    "ALLOW_PRIVATE_WEBHOOKS": "false",
+    "DELIVERY_WORKERS": "2",
+    "MAX_DELIVERY_ATTEMPTS": "4",
+    "RETRY_BASE_MS": "2000"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

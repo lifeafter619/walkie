@@ -1,8 +1,8 @@
-import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import type {
   ApiKey,
   Channel,
+  Conversation,
   DashboardStats,
   Delivery,
   DeliveryAttempt,
@@ -14,8 +14,20 @@ import type {
 } from '../shared/types.js';
 import { createApiSecret, decryptJson, encryptJson, safeSecretEqual } from './crypto.js';
 
-type Db = Database.Database;
 type Row = Record<string, unknown>;
+
+export interface SqlRunResult { changes: number }
+export interface SqlBatchStatement { sql: string; params?: unknown[] }
+/** 异步 SQL 抽象：better-sqlite3（同步包装）、Durable Object SQLite、libSQL/Turso 共用 */
+export interface RelayDatabase {
+  close(): void | Promise<void>;
+  exec(sql: string): Promise<void>;
+  all(sql: string, params?: unknown[]): Promise<Row[]>;
+  get(sql: string, params?: unknown[]): Promise<Row | undefined>;
+  run(sql: string, params?: unknown[]): Promise<SqlRunResult>;
+  /** 事务性批量执行，全部成功或全部回滚 */
+  batch(statements: SqlBatchStatement[]): Promise<void>;
+}
 
 const now = () => new Date().toISOString();
 const json = <T>(value: unknown, fallback: T): T => {
@@ -27,21 +39,19 @@ const json = <T>(value: unknown, fallback: T): T => {
 };
 
 export class RelayRepository {
-  readonly db: Db;
+  readonly db: RelayDatabase;
 
-  constructor(databasePath: string, private readonly masterKey: Buffer) {
-    this.db = new Database(databasePath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-    this.migrate();
+  constructor(database: RelayDatabase, private readonly masterKey: Buffer) {
+    this.db = database;
   }
 
-  close(): void {
-    this.db.close();
+  close(): void | Promise<void> {
+    return this.db.close();
   }
 
-  private migrate(): void {
-    this.db.exec(`
+  /** 必须在使用前调用一次（建表 + 迁移） */
+  async init(): Promise<void> {
+    await this.db.exec(`
       CREATE TABLE IF NOT EXISTS channels (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
         provider TEXT NOT NULL, config_encrypted TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
@@ -79,10 +89,19 @@ export class RelayRepository {
         id TEXT PRIMARY KEY, actor TEXT NOT NULL, action TEXT NOT NULL,
         resource_type TEXT NOT NULL, resource_id TEXT, details TEXT NOT NULL, created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS conversations (
+        id TEXT PRIMARY KEY, api_key_id TEXT NOT NULL, delivery_id TEXT,
+        reply_token TEXT NOT NULL, question TEXT NOT NULL, options TEXT,
+        reply TEXT, reply_source TEXT, replied_at TEXT,
+        expires_at TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS conversations_pending ON conversations(replied_at, expires_at);
     `);
-    const channelColumns = new Set((this.db.prepare('PRAGMA table_info(channels)').all() as Row[]).map((row) => String(row.name)));
-    if (!channelColumns.has('rate_limit_per_min')) this.db.exec('ALTER TABLE channels ADD COLUMN rate_limit_per_min INTEGER');
-    if (!channelColumns.has('quiet_hours')) this.db.exec('ALTER TABLE channels ADD COLUMN quiet_hours TEXT');
+    const channelColumns = new Set((await this.db.all('PRAGMA table_info(channels)')).map((row) => String(row.name)));
+    if (!channelColumns.has('rate_limit_per_min')) await this.db.exec('ALTER TABLE channels ADD COLUMN rate_limit_per_min INTEGER');
+    if (!channelColumns.has('quiet_hours')) await this.db.exec('ALTER TABLE channels ADD COLUMN quiet_hours TEXT');
+    const conversationColumns = new Set((await this.db.all('PRAGMA table_info(conversations)')).map((row) => String(row.name)));
+    if (!conversationColumns.has('options')) await this.db.exec('ALTER TABLE conversations ADD COLUMN options TEXT');
   }
 
   private channelFrom(row: Row): Channel {
@@ -98,60 +117,60 @@ export class RelayRepository {
     };
   }
 
-  listChannels(): Channel[] {
-    return (this.db.prepare('SELECT * FROM channels ORDER BY name').all() as Row[]).map((row) => this.channelFrom(row));
+  async listChannels(): Promise<Channel[]> {
+    return (await this.db.all('SELECT * FROM channels ORDER BY name')).map((row) => this.channelFrom(row));
   }
 
-  getChannel(idOrSlug: string): Channel | undefined {
-    const row = this.db.prepare('SELECT * FROM channels WHERE id = ? OR slug = ?').get(idOrSlug, idOrSlug) as Row | undefined;
+  async getChannel(idOrSlug: string): Promise<Channel | undefined> {
+    const row = await this.db.get('SELECT * FROM channels WHERE id = ? OR slug = ?', [idOrSlug, idOrSlug]);
     return row ? this.channelFrom(row) : undefined;
   }
 
-  getChannelConfig(id: string): Record<string, unknown> {
-    const row = this.db.prepare('SELECT config_encrypted FROM channels WHERE id = ?').get(id) as Row | undefined;
+  async getChannelConfig(id: string): Promise<Record<string, unknown>> {
+    const row = await this.db.get('SELECT config_encrypted FROM channels WHERE id = ?', [id]);
     if (!row) throw new Error('Channel not found');
     return decryptJson(String(row.config_encrypted), this.masterKey);
   }
 
-  createChannel(input: { name: string; slug: string; provider: ProviderId; enabled?: boolean; config: Record<string, unknown>; rateLimitPerMin?: number | null; quietHours?: string | null }): Channel {
+  async createChannel(input: { name: string; slug: string; provider: ProviderId; enabled?: boolean; config: Record<string, unknown>; rateLimitPerMin?: number | null; quietHours?: string | null }): Promise<Channel> {
     const id = randomUUID();
     const timestamp = now();
-    this.db.prepare(`INSERT INTO channels
+    await this.db.run(`INSERT INTO channels
       (id,name,slug,provider,config_encrypted,enabled,rate_limit_per_min,quiet_hours,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, input.name, input.slug, input.provider, encryptJson(input.config, this.masterKey), input.enabled === false ? 0 : 1, input.rateLimitPerMin || null, input.quietHours || null, timestamp, timestamp);
-    this.audit('admin', 'channel.create', 'channel', id, { provider: input.provider });
-    return this.getChannel(id)!;
+      VALUES (?,?,?,?,?,?,?,?,?,?)`, [id, input.name, input.slug, input.provider, encryptJson(input.config, this.masterKey), input.enabled === false ? 0 : 1, input.rateLimitPerMin || null, input.quietHours || null, timestamp, timestamp]);
+    await this.audit('admin', 'channel.create', 'channel', id, { provider: input.provider });
+    return (await this.getChannel(id))!;
   }
 
-  updateChannel(id: string, input: Partial<{ name: string; slug: string; provider: ProviderId; enabled: boolean; config: Record<string, unknown>; rateLimitPerMin: number | null; quietHours: string | null }>): Channel {
-    const current = this.getChannel(id);
+  async updateChannel(id: string, input: Partial<{ name: string; slug: string; provider: ProviderId; enabled: boolean; config: Record<string, unknown>; rateLimitPerMin: number | null; quietHours: string | null }>): Promise<Channel> {
+    const current = await this.getChannel(id);
     if (!current) throw new Error('Channel not found');
-    const config = input.config ? { ...this.getChannelConfig(id), ...input.config } : this.getChannelConfig(id);
-    this.db.prepare(`UPDATE channels SET name=?,slug=?,provider=?,enabled=?,config_encrypted=?,rate_limit_per_min=?,quiet_hours=?,updated_at=? WHERE id=?`).run(
+    const config = input.config ? { ...await this.getChannelConfig(id), ...input.config } : await this.getChannelConfig(id);
+    await this.db.run(`UPDATE channels SET name=?,slug=?,provider=?,enabled=?,config_encrypted=?,rate_limit_per_min=?,quiet_hours=?,updated_at=? WHERE id=?`, [
       input.name ?? current.name, input.slug ?? current.slug, input.provider ?? current.provider,
       input.enabled ?? current.enabled ? 1 : 0, encryptJson(config, this.masterKey),
       input.rateLimitPerMin !== undefined ? input.rateLimitPerMin || null : current.rateLimitPerMin ?? null,
       input.quietHours !== undefined ? input.quietHours || null : current.quietHours ?? null,
       now(), id
-    );
-    this.audit('admin', 'channel.update', 'channel', id, {});
-    return this.getChannel(id)!;
+    ]);
+    await this.audit('admin', 'channel.update', 'channel', id, {});
+    return (await this.getChannel(id))!;
   }
 
-  setChannelTest(id: string, success: boolean, error?: string): void {
-    this.db.prepare('UPDATE channels SET last_test_status=?,last_test_error=?,updated_at=? WHERE id=?')
-      .run(success ? 'success' : 'failed', error ?? null, now(), id);
+  async setChannelTest(id: string, success: boolean, error?: string): Promise<void> {
+    await this.db.run('UPDATE channels SET last_test_status=?,last_test_error=?,updated_at=? WHERE id=?',
+      [success ? 'success' : 'failed', error ?? null, now(), id]);
   }
 
-  deleteChannel(id: string): void {
-    const used = this.db.prepare("SELECT COUNT(*) count FROM attempts WHERE channel_id=?").get(id) as { count: number };
-    const routed = this.db.prepare('SELECT COUNT(*) count FROM routes, json_each(routes.channel_ids) WHERE json_each.value=?').get(id) as { count: number };
+  async deleteChannel(id: string): Promise<void> {
+    const used = (await this.db.get("SELECT COUNT(*) count FROM attempts WHERE channel_id=?", [id])) as { count: number };
+    const routed = (await this.db.get('SELECT COUNT(*) count FROM routes, json_each(routes.channel_ids) WHERE json_each.value=?', [id])) as { count: number };
     if (used.count > 0 || routed.count > 0) {
-      this.db.prepare('UPDATE channels SET enabled=0,updated_at=? WHERE id=?').run(now(), id);
+      await this.db.run('UPDATE channels SET enabled=0,updated_at=? WHERE id=?', [now(), id]);
       return;
     }
-    this.db.prepare('DELETE FROM channels WHERE id=?').run(id);
-    this.audit('admin', 'channel.delete', 'channel', id, {});
+    await this.db.run('DELETE FROM channels WHERE id=?', [id]);
+    await this.audit('admin', 'channel.delete', 'channel', id, {});
   }
 
   private routeFrom(row: Row): Route {
@@ -162,55 +181,56 @@ export class RelayRepository {
     };
   }
 
-  listRoutes(): Route[] {
-    return (this.db.prepare('SELECT * FROM routes ORDER BY name').all() as Row[]).map((row) => this.routeFrom(row));
+  async listRoutes(): Promise<Route[]> {
+    return (await this.db.all('SELECT * FROM routes ORDER BY name')).map((row) => this.routeFrom(row));
   }
 
-  getRoute(idOrSlug: string): Route | undefined {
-    const row = this.db.prepare('SELECT * FROM routes WHERE id=? OR slug=?').get(idOrSlug, idOrSlug) as Row | undefined;
+  async getRoute(idOrSlug: string): Promise<Route | undefined> {
+    const row = await this.db.get('SELECT * FROM routes WHERE id=? OR slug=?', [idOrSlug, idOrSlug]);
     return row ? this.routeFrom(row) : undefined;
   }
 
-  createRoute(input: { name: string; slug: string; strategy: RouteStrategy; channelIds: string[]; enabled?: boolean }): Route {
+  async createRoute(input: { name: string; slug: string; strategy: RouteStrategy; channelIds: string[]; enabled?: boolean }): Promise<Route> {
     const id = randomUUID();
     const timestamp = now();
-    this.db.prepare('INSERT INTO routes (id,name,slug,strategy,channel_ids,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
-      .run(id, input.name, input.slug, input.strategy, JSON.stringify(input.channelIds), input.enabled === false ? 0 : 1, timestamp, timestamp);
-    this.audit('admin', 'route.create', 'route', id, { strategy: input.strategy });
-    return this.getRoute(id)!;
+    await this.db.run('INSERT INTO routes (id,name,slug,strategy,channel_ids,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)',
+      [id, input.name, input.slug, input.strategy, JSON.stringify(input.channelIds), input.enabled === false ? 0 : 1, timestamp, timestamp]);
+    await this.audit('admin', 'route.create', 'route', id, { strategy: input.strategy });
+    return (await this.getRoute(id))!;
   }
 
-  updateRoute(id: string, input: Partial<{ name: string; slug: string; strategy: RouteStrategy; channelIds: string[]; enabled: boolean }>): Route {
-    const current = this.getRoute(id);
+  async updateRoute(id: string, input: Partial<{ name: string; slug: string; strategy: RouteStrategy; channelIds: string[]; enabled: boolean }>): Promise<Route> {
+    const current = await this.getRoute(id);
     if (!current) throw new Error('Route not found');
-    this.db.prepare('UPDATE routes SET name=?,slug=?,strategy=?,channel_ids=?,enabled=?,updated_at=? WHERE id=?').run(
+    await this.db.run('UPDATE routes SET name=?,slug=?,strategy=?,channel_ids=?,enabled=?,updated_at=? WHERE id=?', [
       input.name ?? current.name, input.slug ?? current.slug, input.strategy ?? current.strategy,
       JSON.stringify(input.channelIds ?? current.channelIds), input.enabled ?? current.enabled ? 1 : 0, now(), id
-    );
-    this.audit('admin', 'route.update', 'route', id, {});
-    return this.getRoute(id)!;
+    ]);
+    await this.audit('admin', 'route.update', 'route', id, {});
+    return (await this.getRoute(id))!;
   }
 
-  deleteRoute(id: string): void {
-    this.db.prepare('DELETE FROM routes WHERE id=?').run(id);
-    this.audit('admin', 'route.delete', 'route', id, {});
+  async deleteRoute(id: string): Promise<void> {
+    await this.db.run('DELETE FROM routes WHERE id=?', [id]);
+    await this.audit('admin', 'route.delete', 'route', id, {});
   }
 
-  listDestinations(): Destination[] {
+  async listDestinations(): Promise<Destination[]> {
+    const [channels, routes] = await Promise.all([this.listChannels(), this.listRoutes()]);
     return [
-      ...this.listChannels().map((c): Destination => ({ id: c.id, slug: c.slug, name: c.name, kind: 'channel', provider: c.provider, enabled: c.enabled })),
-      ...this.listRoutes().map((r): Destination => ({ id: r.id, slug: r.slug, name: r.name, kind: 'route', strategy: r.strategy, enabled: r.enabled }))
+      ...channels.map((c): Destination => ({ id: c.id, slug: c.slug, name: c.name, kind: 'channel', provider: c.provider, enabled: c.enabled })),
+      ...routes.map((r): Destination => ({ id: r.id, slug: r.slug, name: r.name, kind: 'route', strategy: r.strategy, enabled: r.enabled }))
     ];
   }
 
-  createKey(input: { name: string; scopes?: string[]; destinationIds?: string[] }): { apiKey: ApiKey; secret: string } {
+  async createKey(input: { name: string; scopes?: string[]; destinationIds?: string[] }): Promise<{ apiKey: ApiKey; secret: string }> {
     const id = randomUUID();
     const generated = createApiSecret();
     const timestamp = now();
-    this.db.prepare('INSERT INTO api_keys (id,name,prefix,secret_hash,scopes,destination_ids,created_at) VALUES (?,?,?,?,?,?,?)')
-      .run(id, input.name, generated.prefix, generated.hash, JSON.stringify(input.scopes ?? ['notifications:send', 'deliveries:read']), JSON.stringify(input.destinationIds ?? []), timestamp);
-    this.audit('admin', 'api_key.create', 'api_key', id, { prefix: generated.prefix });
-    return { apiKey: this.getKey(id)!, secret: generated.secret };
+    await this.db.run('INSERT INTO api_keys (id,name,prefix,secret_hash,scopes,destination_ids,created_at) VALUES (?,?,?,?,?,?,?)',
+      [id, input.name, generated.prefix, generated.hash, JSON.stringify(input.scopes ?? ['notifications:send', 'deliveries:read']), JSON.stringify(input.destinationIds ?? []), timestamp]);
+    await this.audit('admin', 'api_key.create', 'api_key', id, { prefix: generated.prefix });
+    return { apiKey: (await this.getKey(id))!, secret: generated.secret };
   }
 
   private keyFrom(row: Row): ApiKey {
@@ -221,52 +241,54 @@ export class RelayRepository {
     };
   }
 
-  getKey(id: string): ApiKey | undefined {
-    const row = this.db.prepare('SELECT * FROM api_keys WHERE id=?').get(id) as Row | undefined;
+  async getKey(id: string): Promise<ApiKey | undefined> {
+    const row = await this.db.get('SELECT * FROM api_keys WHERE id=?', [id]);
     return row ? this.keyFrom(row) : undefined;
   }
 
-  listKeys(): ApiKey[] {
-    return (this.db.prepare('SELECT * FROM api_keys ORDER BY created_at DESC').all() as Row[]).map((row) => this.keyFrom(row));
+  async listKeys(): Promise<ApiKey[]> {
+    return (await this.db.all('SELECT * FROM api_keys ORDER BY created_at DESC')).map((row) => this.keyFrom(row));
   }
 
-  authenticateKey(secret: string): ApiKey | undefined {
+  async authenticateKey(secret: string): Promise<ApiKey | undefined> {
     const prefix = /^rdk_([a-f0-9]{8})_/.exec(secret)?.[1];
     if (!prefix) return undefined;
-    const row = this.db.prepare('SELECT * FROM api_keys WHERE prefix=? AND revoked_at IS NULL').get(prefix) as Row | undefined;
+    const row = await this.db.get('SELECT * FROM api_keys WHERE prefix=? AND revoked_at IS NULL', [prefix]);
     if (!row || !safeSecretEqual(secret, String(row.secret_hash))) return undefined;
-    this.db.prepare('UPDATE api_keys SET last_used_at=? WHERE id=?').run(now(), row.id);
+    await this.db.run('UPDATE api_keys SET last_used_at=? WHERE id=?', [now(), row.id]);
     return this.keyFrom({ ...row, last_used_at: now() });
   }
 
-  revokeKey(id: string): void {
-    this.db.prepare('UPDATE api_keys SET revoked_at=? WHERE id=?').run(now(), id);
-    this.audit('admin', 'api_key.revoke', 'api_key', id, {});
+  async revokeKey(id: string): Promise<void> {
+    await this.db.run('UPDATE api_keys SET revoked_at=? WHERE id=?', [now(), id]);
+    await this.audit('admin', 'api_key.revoke', 'api_key', id, {});
   }
 
-  createDelivery(input: {
+  async createDelivery(input: {
     targetType: 'channel' | 'route'; targetId: string; title: string; body: string; severity: Severity;
     url?: string; metadata?: Record<string, unknown>; source: string; idempotencyKey?: string; channelIds: string[];
-  }): Delivery {
+  }): Promise<Delivery> {
     if (input.idempotencyKey) {
-      const existing = this.db.prepare('SELECT id FROM deliveries WHERE source=? AND idempotency_key=?').get(input.source, input.idempotencyKey) as Row | undefined;
-      if (existing) return this.getDelivery(String(existing.id))!;
+      const existing = await this.db.get('SELECT id FROM deliveries WHERE source=? AND idempotency_key=?', [input.source, input.idempotencyKey]);
+      if (existing) return (await this.getDelivery(String(existing.id)))!;
     }
     const id = randomUUID();
     const timestamp = now();
-    const transaction = this.db.transaction(() => {
-      this.db.prepare(`INSERT INTO deliveries
-        (id,target_type,target_id,title,body,severity,url,metadata,source,status,idempotency_key,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?)`).run(
-        id, input.targetType, input.targetId, input.title, input.body, input.severity, input.url ?? null,
-        JSON.stringify(input.metadata ?? {}), input.source, input.idempotencyKey ?? null, timestamp, timestamp
-      );
-      const insertAttempt = this.db.prepare(`INSERT INTO attempts
-        (id,delivery_id,channel_id,position,status,next_attempt_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`);
-      input.channelIds.forEach((channelId, position) => insertAttempt.run(randomUUID(), id, channelId, position, 'pending', timestamp, timestamp, timestamp));
-    });
-    transaction();
-    return this.getDelivery(id)!;
+    await this.db.batch([
+      {
+        sql: `INSERT INTO deliveries
+          (id,target_type,target_id,title,body,severity,url,metadata,source,status,idempotency_key,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?)`,
+        params: [id, input.targetType, input.targetId, input.title, input.body, input.severity, input.url ?? null,
+          JSON.stringify(input.metadata ?? {}), input.source, input.idempotencyKey ?? null, timestamp, timestamp]
+      },
+      ...input.channelIds.map((channelId, position) => ({
+        sql: `INSERT INTO attempts
+          (id,delivery_id,channel_id,position,status,next_attempt_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+        params: [randomUUID(), id, channelId, position, 'pending', timestamp, timestamp, timestamp]
+      }))
+    ]);
+    return (await this.getDelivery(id))!;
   }
 
   private attemptFrom(row: Row): DeliveryAttempt {
@@ -280,13 +302,13 @@ export class RelayRepository {
     };
   }
 
-  getAttempts(deliveryId: string): DeliveryAttempt[] {
-    return (this.db.prepare(`SELECT a.*,c.name channel_name,c.provider provider FROM attempts a
-      JOIN channels c ON c.id=a.channel_id WHERE a.delivery_id=? ORDER BY a.position`).all(deliveryId) as Row[]).map((row) => this.attemptFrom(row));
+  async getAttempts(deliveryId: string): Promise<DeliveryAttempt[]> {
+    return (await this.db.all(`SELECT a.*,c.name channel_name,c.provider provider FROM attempts a
+      JOIN channels c ON c.id=a.channel_id WHERE a.delivery_id=? ORDER BY a.position`, [deliveryId])).map((row) => this.attemptFrom(row));
   }
 
-  private deliveryFrom(row: Row, withAttempts = false): Delivery {
-    const delivery: Delivery = {
+  private deliveryFrom(row: Row): Delivery {
+    return {
       id: String(row.id), targetType: row.target_type as Delivery['targetType'], targetId: String(row.target_id),
       targetName: row.target_name ? String(row.target_name) : undefined, title: String(row.title), body: String(row.body),
       severity: row.severity as Severity, url: row.url ? String(row.url) : undefined,
@@ -294,27 +316,28 @@ export class RelayRepository {
       idempotencyKey: row.idempotency_key ? String(row.idempotency_key) : undefined,
       createdAt: String(row.created_at), updatedAt: String(row.updated_at)
     };
-    if (withAttempts) delivery.attempts = this.getAttempts(delivery.id);
+  }
+
+  async getDelivery(id: string): Promise<Delivery | undefined> {
+    const row = await this.db.get(`SELECT d.*,COALESCE(c.name,r.name) target_name FROM deliveries d
+      LEFT JOIN channels c ON d.target_type='channel' AND c.id=d.target_id
+      LEFT JOIN routes r ON d.target_type='route' AND r.id=d.target_id WHERE d.id=?`, [id]);
+    if (!row) return undefined;
+    const delivery = this.deliveryFrom(row);
+    delivery.attempts = await this.getAttempts(delivery.id);
     return delivery;
   }
 
-  getDelivery(id: string): Delivery | undefined {
-    const row = this.db.prepare(`SELECT d.*,COALESCE(c.name,r.name) target_name FROM deliveries d
-      LEFT JOIN channels c ON d.target_type='channel' AND c.id=d.target_id
-      LEFT JOIN routes r ON d.target_type='route' AND r.id=d.target_id WHERE d.id=?`).get(id) as Row | undefined;
-    return row ? this.deliveryFrom(row, true) : undefined;
-  }
-
-  listDeliveries(options: { limit?: number; status?: string } = {}): Delivery[] {
+  async listDeliveries(options: { limit?: number; status?: string } = {}): Promise<Delivery[]> {
     const limit = Math.min(options.limit ?? 50, 200);
     const rows = options.status
-      ? this.db.prepare('SELECT * FROM deliveries WHERE status=? ORDER BY created_at DESC LIMIT ?').all(options.status, limit)
-      : this.db.prepare('SELECT * FROM deliveries ORDER BY created_at DESC LIMIT ?').all(limit);
-    return (rows as Row[]).map((row) => this.deliveryFrom(row));
+      ? await this.db.all('SELECT * FROM deliveries WHERE status=? ORDER BY created_at DESC LIMIT ?', [options.status, limit])
+      : await this.db.all('SELECT * FROM deliveries ORDER BY created_at DESC LIMIT ?', [limit]);
+    return rows.map((row) => this.deliveryFrom(row));
   }
 
-  claimDueAttempts(limit: number): DeliveryAttempt[] {
-    const rows = this.db.prepare(`SELECT a.*,c.name channel_name,c.provider provider FROM attempts a
+  async claimDueAttempts(limit: number): Promise<DeliveryAttempt[]> {
+    const rows = await this.db.all(`SELECT a.*,c.name channel_name,c.provider provider FROM attempts a
       JOIN channels c ON c.id=a.channel_id JOIN deliveries d ON d.id=a.delivery_id
       LEFT JOIN routes r ON d.target_type='route' AND r.id=d.target_id
       WHERE a.status IN ('pending','retrying') AND a.next_attempt_at<=? AND c.enabled=1
@@ -322,47 +345,111 @@ export class RelayRepository {
         NOT EXISTS (SELECT 1 FROM attempts won WHERE won.delivery_id=a.delivery_id AND won.status='delivered')
         AND a.position=(SELECT MIN(next.position) FROM attempts next WHERE next.delivery_id=a.delivery_id AND next.status IN ('pending','retrying'))
       ))
-      ORDER BY a.next_attempt_at,a.position LIMIT ?`).all(now(), limit) as Row[];
+      ORDER BY a.next_attempt_at,a.position LIMIT ?`, [now(), limit]);
     const claimed: DeliveryAttempt[] = [];
-    const claim = this.db.transaction(() => {
-      for (const row of rows) {
-        const result = this.db.prepare(`UPDATE attempts SET status='sending',attempt_count=attempt_count+1,updated_at=?
-          WHERE id=? AND status IN ('pending','retrying')`).run(now(), row.id);
-        if (result.changes) {
-          this.db.prepare("UPDATE deliveries SET status='processing',updated_at=? WHERE id=? AND status='queued'").run(now(), row.delivery_id);
-          claimed.push(this.attemptFrom({ ...row, status: 'sending', attempt_count: Number(row.attempt_count) + 1 }));
-        }
+    // 每行 UPDATE 带 status 守卫本身原子，无需外层事务
+    for (const row of rows) {
+      const result = await this.db.run(`UPDATE attempts SET status='sending',attempt_count=attempt_count+1,updated_at=?
+        WHERE id=? AND status IN ('pending','retrying')`, [now(), row.id]);
+      if (result.changes) {
+        await this.db.run("UPDATE deliveries SET status='processing',updated_at=? WHERE id=? AND status='queued'", [now(), row.delivery_id]);
+        claimed.push(this.attemptFrom({ ...row, status: 'sending', attempt_count: Number(row.attempt_count) + 1 }));
       }
-    });
-    claim();
+    }
     return claimed;
   }
 
-  /** 限流/静默推迟：不消耗尝试次数，回到待发送状态 */
-  deferAttempt(id: string, until: string): void {
-    this.db.prepare(`UPDATE attempts SET status='pending',attempt_count=MAX(attempt_count-1,0),next_attempt_at=?,updated_at=? WHERE id=?`).run(until, now(), id);
+  async nextDueAttempt(): Promise<string | undefined> {
+    const row = await this.db.get("SELECT MIN(next_attempt_at) next_at FROM attempts WHERE status IN ('pending','retrying')");
+    return row?.next_at ? String(row.next_at) : undefined;
   }
 
-  completeAttempt(id: string, result: { success: boolean; responseCode?: number; error?: string; retryAt?: string }): void {
-    const attempt = this.db.prepare('SELECT * FROM attempts WHERE id=?').get(id) as Row | undefined;
+  /** 终态回调只发一次：原子置位，抢到的调用方返回 true */
+  async claimCallback(deliveryId: string): Promise<boolean> {
+    const result = await this.db.run(`UPDATE deliveries SET metadata=json_set(metadata,'$.callbackSent',1)
+      WHERE id=? AND status IN ('delivered','partial','failed') AND json_extract(metadata,'$.callbackSent') IS NULL`, [deliveryId]);
+    return result.changes > 0;
+  }
+
+  private conversationFrom(row: Row): Conversation {
+    return {
+      id: String(row.id), apiKeyId: String(row.api_key_id),
+      deliveryId: row.delivery_id ? String(row.delivery_id) : undefined,
+      question: String(row.question),
+      options: row.options ? json<string[]>(row.options, []) : undefined,
+      reply: row.reply != null ? String(row.reply) : undefined,
+      replySource: row.reply_source ? String(row.reply_source) : undefined,
+      repliedAt: row.replied_at ? String(row.replied_at) : undefined,
+      expiresAt: String(row.expires_at), createdAt: String(row.created_at)
+    };
+  }
+
+  async createConversation(input: { apiKeyId: string; question: string; options?: string[]; timeoutSeconds: number }): Promise<{ conversation: Conversation; replyToken: string }> {
+    const id = randomUUID();
+    const replyToken = randomUUID().replace(/-/g, '');
+    const timestamp = now();
+    const expiresAt = new Date(Date.now() + input.timeoutSeconds * 1000).toISOString();
+    await this.db.run('INSERT INTO conversations (id,api_key_id,reply_token,question,options,expires_at,created_at) VALUES (?,?,?,?,?,?,?)',
+      [id, input.apiKeyId, replyToken, input.question, input.options?.length ? JSON.stringify(input.options) : null, expiresAt, timestamp]);
+    return { conversation: (await this.getConversation(id))!, replyToken };
+  }
+
+  async attachConversationDelivery(id: string, deliveryId: string): Promise<void> {
+    await this.db.run('UPDATE conversations SET delivery_id=? WHERE id=?', [deliveryId, id]);
+  }
+
+  async getConversation(id: string): Promise<Conversation | undefined> {
+    const row = await this.db.get('SELECT * FROM conversations WHERE id=?', [id]);
+    return row ? this.conversationFrom(row) : undefined;
+  }
+
+  /** 回复链接鉴权：token 匹配且未过期未回复。返回问题文本，供回复页展示 */
+  async getConversationForReply(id: string, replyToken: string): Promise<Conversation | undefined> {
+    const row = await this.db.get('SELECT * FROM conversations WHERE id=? AND reply_token=?', [id, replyToken]);
+    return row ? this.conversationFrom(row) : undefined;
+  }
+
+  /** 原子写入回复：已回复或已过期返回 false */
+  async replyConversation(id: string, reply: string, source: string, replyToken?: string): Promise<boolean> {
+    const result = await this.db.run(`UPDATE conversations SET reply=?,reply_source=?,replied_at=?
+      WHERE id=? AND replied_at IS NULL AND expires_at>?${replyToken !== undefined ? ' AND reply_token=?' : ''}`,
+      replyToken !== undefined ? [reply, source, now(), id, now(), replyToken] : [reply, source, now(), id, now()]);
+    if (result.changes > 0) await this.audit(source, 'conversation.reply', 'conversation', id, {});
+    return result.changes > 0;
+  }
+
+  async listConversations(options: { pendingOnly?: boolean; limit?: number } = {}): Promise<Conversation[]> {
+    const limit = Math.min(options.limit ?? 50, 200);
+    const rows = options.pendingOnly
+      ? await this.db.all('SELECT * FROM conversations WHERE replied_at IS NULL AND expires_at>? ORDER BY created_at DESC LIMIT ?', [now(), limit])
+      : await this.db.all('SELECT * FROM conversations ORDER BY created_at DESC LIMIT ?', [limit]);
+    return rows.map((row) => this.conversationFrom(row));
+  }
+
+  /** 限流/静默推迟：不消耗尝试次数，回到待发送状态 */
+  async deferAttempt(id: string, until: string): Promise<void> {
+    await this.db.run(`UPDATE attempts SET status='pending',attempt_count=MAX(attempt_count-1,0),next_attempt_at=?,updated_at=? WHERE id=?`, [until, now(), id]);
+  }
+
+  async completeAttempt(id: string, result: { success: boolean; responseCode?: number; error?: string; retryAt?: string }): Promise<void> {
+    const attempt = await this.db.get('SELECT * FROM attempts WHERE id=?', [id]);
     if (!attempt) return;
     const status = result.success ? 'delivered' : result.retryAt ? 'retrying' : 'failed';
-    this.db.prepare('UPDATE attempts SET status=?,response_code=?,error=?,next_attempt_at=?,updated_at=? WHERE id=?').run(
-      status, result.responseCode ?? null, result.error ?? null, result.retryAt ?? null, now(), id
-    );
-    this.refreshDeliveryStatus(String(attempt.delivery_id));
+    await this.db.run('UPDATE attempts SET status=?,response_code=?,error=?,next_attempt_at=?,updated_at=? WHERE id=?',
+      [status, result.responseCode ?? null, result.error ?? null, result.retryAt ?? null, now(), id]);
+    await this.refreshDeliveryStatus(String(attempt.delivery_id));
   }
 
-  skipAttempts(deliveryId: string, exceptId: string): void {
-    this.db.prepare("UPDATE attempts SET status='skipped',updated_at=? WHERE delivery_id=? AND id<>? AND status IN ('pending','retrying')")
-      .run(now(), deliveryId, exceptId);
-    this.refreshDeliveryStatus(deliveryId);
+  async skipAttempts(deliveryId: string, exceptId: string): Promise<void> {
+    await this.db.run("UPDATE attempts SET status='skipped',updated_at=? WHERE delivery_id=? AND id<>? AND status IN ('pending','retrying')",
+      [now(), deliveryId, exceptId]);
+    await this.refreshDeliveryStatus(deliveryId);
   }
 
-  private refreshDeliveryStatus(deliveryId: string): void {
-    const delivery = this.db.prepare('SELECT target_type,target_id FROM deliveries WHERE id=?').get(deliveryId) as Row;
-    const attempts = this.getAttempts(deliveryId);
-    const route = delivery.target_type === 'route' ? this.getRoute(String(delivery.target_id)) : undefined;
+  private async refreshDeliveryStatus(deliveryId: string): Promise<void> {
+    const delivery = (await this.db.get('SELECT target_type,target_id FROM deliveries WHERE id=?', [deliveryId]))!;
+    const attempts = await this.getAttempts(deliveryId);
+    const route = delivery.target_type === 'route' ? await this.getRoute(String(delivery.target_id)) : undefined;
     const delivered = attempts.filter((a) => a.status === 'delivered').length;
     const active = attempts.some((a) => ['pending', 'sending', 'retrying'].includes(a.status));
     let status: Delivery['status'];
@@ -371,26 +458,26 @@ export class RelayRepository {
     else if (delivered === attempts.length && delivered > 0) status = 'delivered';
     else if (delivered > 0) status = 'partial';
     else status = 'failed';
-    this.db.prepare('UPDATE deliveries SET status=?,updated_at=? WHERE id=?').run(status, now(), deliveryId);
+    await this.db.run('UPDATE deliveries SET status=?,updated_at=? WHERE id=?', [status, now(), deliveryId]);
   }
 
-  getDashboardStats(): DashboardStats {
-    const one = (sql: string) => Number((this.db.prepare(sql).get() as { count: number }).count);
+  async getDashboardStats(): Promise<DashboardStats> {
+    const one = async (sql: string) => Number(((await this.db.get(sql)) as { count: number }).count);
     const since = new Date(Date.now() - 86_400_000).toISOString();
-    const totals = this.db.prepare(`SELECT COUNT(*) total,
+    const totals = (await this.db.get(`SELECT COUNT(*) total,
       SUM(CASE WHEN status IN ('delivered','partial') THEN 1 ELSE 0 END) successes,
-      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed FROM deliveries WHERE created_at>=?`).get(since) as Row;
+      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed FROM deliveries WHERE created_at>=?`, [since]))!;
     const total = Number(totals.total ?? 0);
     return {
-      channels: one('SELECT COUNT(*) count FROM channels'), enabledChannels: one('SELECT COUNT(*) count FROM channels WHERE enabled=1'),
-      routes: one('SELECT COUNT(*) count FROM routes'), activeKeys: one('SELECT COUNT(*) count FROM api_keys WHERE revoked_at IS NULL'),
+      channels: await one('SELECT COUNT(*) count FROM channels'), enabledChannels: await one('SELECT COUNT(*) count FROM channels WHERE enabled=1'),
+      routes: await one('SELECT COUNT(*) count FROM routes'), activeKeys: await one('SELECT COUNT(*) count FROM api_keys WHERE revoked_at IS NULL'),
       deliveries24h: total, successRate24h: total ? Math.round(Number(totals.successes ?? 0) / total * 1000) / 10 : 100,
       failed24h: Number(totals.failed ?? 0)
     };
   }
 
-  audit(actor: string, action: string, resourceType: string, resourceId: string | undefined, details: Record<string, unknown>): void {
-    this.db.prepare('INSERT INTO audit_events (id,actor,action,resource_type,resource_id,details,created_at) VALUES (?,?,?,?,?,?,?)')
-      .run(randomUUID(), actor, action, resourceType, resourceId ?? null, JSON.stringify(details), now());
+  async audit(actor: string, action: string, resourceType: string, resourceId: string | undefined, details: Record<string, unknown>): Promise<void> {
+    await this.db.run('INSERT INTO audit_events (id,actor,action,resource_type,resource_id,details,created_at) VALUES (?,?,?,?,?,?,?)',
+      [randomUUID(), actor, action, resourceType, resourceId ?? null, JSON.stringify(details), now()]);
   }
 }

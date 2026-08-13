@@ -3,7 +3,8 @@ import request from 'supertest';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AppConfig } from '../src/server/config.js';
 import { createApp } from '../src/server/app.js';
-import { RelayRepository } from '../src/server/database.js';
+import type { RelayRepository } from '../src/server/database.js';
+import { createNodeRepository } from '../src/server/database-node.js';
 import { NotificationService } from '../src/server/notifications.js';
 import { ProviderDispatcher } from '../src/server/providers/dispatcher.js';
 import { DeliveryWorker } from '../src/server/queue.js';
@@ -11,13 +12,13 @@ import { DeliveryWorker } from '../src/server/queue.js';
 const repositories: RelayRepository[] = [];
 afterEach(() => repositories.splice(0).forEach((repository) => repository.close()));
 
-function setup(adminToken?: string) {
+async function setup(adminToken?: string) {
   const config = {
     port: 4310, host: '127.0.0.1', dataDir: '.', databasePath: ':memory:', adminToken,
     masterKey: randomBytes(32), allowPrivateWebhooks: true, allowInsecureHttp: false,
-    deliveryWorkers: 1, maxDeliveryAttempts: 1, retryBaseMs: 1, isProduction: false
+    deliveryWorkers: 1, maxSendsPerMin: 0, maxDeliveryAttempts: 1, retryBaseMs: 1, isProduction: false
   } satisfies AppConfig;
-  const repository = new RelayRepository(':memory:', config.masterKey); repositories.push(repository);
+  const repository = await createNodeRepository(':memory:', config.masterKey); repositories.push(repository);
   const notifications = new NotificationService(repository);
   const dispatcher = new ProviderDispatcher(config, async () => new Response('{}', { status: 200 }));
   const worker = new DeliveryWorker(repository, dispatcher, config);
@@ -26,7 +27,7 @@ function setup(adminToken?: string) {
 
 describe('HTTP API and MCP', () => {
   it('protects admin endpoints and does not return channel credentials', async () => {
-    const { app } = setup('a-secure-admin-token-with-32-chars');
+    const { app } = await setup('a-secure-admin-token-with-32-chars');
     await request(app).get('/api/admin/channels').expect(401);
     const auth = { Authorization: 'Bearer a-secure-admin-token-with-32-chars' };
     const created = await request(app).post('/api/admin/channels').set(auth).send({ name: 'Ops webhook', slug: 'ops-webhook', provider: 'webhook', config: { url: 'https://hooks.example.com/secret', method: 'POST', bodyTemplate: '{"body":"{{body}}"}' } }).expect(201);
@@ -35,7 +36,7 @@ describe('HTTP API and MCP', () => {
   });
 
   it('creates an Agent key once and accepts an MCP initialize handshake', async () => {
-    const { app } = setup();
+    const { app } = await setup();
     const keyResponse = await request(app).post('/api/admin/keys').send({ name: 'MCP test' }).expect(201);
     const secret = keyResponse.body.secret as string;
     expect(secret).toMatch(/^rdk_[a-f0-9]{8}_/);
@@ -80,14 +81,27 @@ describe('HTTP API and MCP', () => {
       .expect(200);
     expect(modernTools.text).toContain('list_destinations');
     expect(modernTools.text).toContain('send_notification');
+    await request(app).get('/mcp').expect('Allow', 'POST').expect(405);
+  });
+
+  it('exposes MCP tools according to Agent key scopes', async () => {
+    const { app } = await setup();
+    const { secret } = (await request(app).post('/api/admin/keys').send({ name: 'Read only', scopes: ['deliveries:read'] }).expect(201)).body;
+    const tools = await request(app).post('/mcp')
+      .set('Authorization', `Bearer ${secret}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
+      .expect(200);
+    expect(tools.text).toContain('get_delivery');
+    expect(tools.text).not.toContain('send_notification');
   });
 
   it('accepts Server酱-compatible pushes via /send/{key}.send', async () => {
-    const { app, repository } = setup();
-    const channel = repository.createChannel({ name: 'Hook', slug: 'hook', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{"t":"{{title}}"}' } });
+    const { app, repository } = await setup();
+    const channel = await repository.createChannel({ name: 'Hook', slug: 'hook', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{"t":"{{title}}"}' } });
     let secret = '';
     for (let index = 0; index < 100 && !secret.includes('-'); index += 1) {
-      secret = repository.createKey({ name: `compat-${index}`, destinationIds: [channel.id] }).secret;
+      secret = (await repository.createKey({ name: `compat-${index}`, destinationIds: [channel.id] })).secret;
     }
     expect(secret).toContain('-');
     await request(app).get('/send/rdk_00000000_bad.send?title=x').expect(401);
@@ -97,7 +111,7 @@ describe('HTTP API and MCP', () => {
     expect(get.body.data.pushid).toBeTruthy();
     const post = await request(app).post(`/${secret}.send`).type('form').send({ title: 'via form', desp: 'body' }).expect(200);
     expect(post.body.code).toBe(0);
-    const delivery = repository.getDelivery(String(get.body.data.pushid))!;
+    const delivery = (await repository.getDelivery(String(get.body.data.pushid)))!;
     expect(delivery.metadata).toMatchObject({ tags: 'a|b', via: 'serverchan-compat' });
   });
 });

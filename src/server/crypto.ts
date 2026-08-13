@@ -1,11 +1,13 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
+const base64url = (value: Uint8Array) => Buffer.from(value).toString('base64url');
+
 export function encryptJson(value: Record<string, unknown>, key: Buffer): string {
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   const encrypted = Buffer.concat([cipher.update(JSON.stringify(value), 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return ['v1', iv.toString('base64url'), tag.toString('base64url'), encrypted.toString('base64url')].join('.');
+  return ['v1', base64url(iv), base64url(tag), base64url(encrypted)].join('.');
 }
 
 export function decryptJson(payload: string, key: Buffer): Record<string, unknown> {
@@ -31,7 +33,7 @@ export function safeSecretEqual(secret: string, expectedHash: string): boolean {
 }
 
 export function createApiSecret(): { secret: string; prefix: string; hash: string } {
-  const prefix = randomBytes(4).toString('hex');
-  const secret = `rdk_${prefix}_${randomBytes(24).toString('base64url')}`;
+  const prefix = Buffer.from(randomBytes(4)).toString('hex');
+  const secret = `rdk_${prefix}_${base64url(randomBytes(24))}`;
   return { secret, prefix, hash: hashSecret(secret) };
 }

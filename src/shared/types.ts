@@ -1,4 +1,11 @@
 export type ProviderId =
+  | 'pushdeer'
+  | 'chanify'
+  | 'pushme'
+  | 'onebot'
+  | 'synology-chat'
+  | 'pagerduty'
+  | 'line'
   | 'telegram'
   | 'wecom'
   | 'feishu'
@@ -136,6 +143,22 @@ export interface NotificationInput {
   short?: string;
   metadata?: Record<string, unknown>;
   idempotencyKey?: string;
+  /** 投递到达终态后 POST 结果到该地址（SSRF 校验同 webhook） */
+  callbackUrl?: string;
+}
+
+export interface Conversation {
+  id: string;
+  apiKeyId: string;
+  deliveryId?: string;
+  question: string;
+  /** 预设选项；回复页渲染为按钮，仍可自由输入 */
+  options?: string[];
+  reply?: string;
+  replySource?: string;
+  repliedAt?: string;
+  expiresAt: string;
+  createdAt: string;
 }
 
 export interface DashboardStats {

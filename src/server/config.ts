@@ -12,6 +12,8 @@ export interface AppConfig {
   allowPrivateWebhooks: boolean;
   allowInsecureHttp: boolean;
   deliveryWorkers: number;
+  /** 全局每分钟最大推送条数，0 表示不限 */
+  maxSendsPerMin: number;
   maxDeliveryAttempts: number;
   retryBaseMs: number;
   publicUrl?: string;
@@ -44,7 +46,8 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const isProduction = process.env.NODE_ENV === 'production';
   const dataDir = path.resolve(process.env.DATA_DIR ?? './data');
   const host = process.env.HOST ?? '127.0.0.1';
-  mkdirSync(dataDir, { recursive: true });
+  // 远程数据库（Turso/libSQL，如 Vercel 部署）不需要本地数据目录
+  if (!process.env.TURSO_DATABASE_URL) mkdirSync(dataDir, { recursive: true });
   const adminToken = process.env.ADMIN_TOKEN || undefined;
   if (isProduction && !adminToken) throw new Error('ADMIN_TOKEN is required in production');
   if (adminToken && adminToken.length < 24) throw new Error('ADMIN_TOKEN must contain at least 24 characters');
@@ -60,6 +63,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     allowPrivateWebhooks: bool('ALLOW_PRIVATE_WEBHOOKS'),
     allowInsecureHttp: bool('ALLOW_INSECURE_HTTP'),
     deliveryWorkers: integer('DELIVERY_WORKERS', 2, 1, 16),
+    maxSendsPerMin: integer('MAX_SENDS_PER_MIN', 0, 0, 100000),
     maxDeliveryAttempts: integer('MAX_DELIVERY_ATTEMPTS', 4, 1, 10),
     retryBaseMs: integer('RETRY_BASE_MS', 2000, 100, 60000),
     publicUrl: process.env.PUBLIC_URL || undefined,
