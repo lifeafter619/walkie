@@ -41,4 +41,33 @@ describe('credential storage and repository', () => {
     expect(await repository.listDeliveries()).toHaveLength(1);
     repository.close();
   });
+
+  it('returns the existing delivery when concurrent idempotent inserts collide', async () => {
+    const repository = await createRepository();
+    const channel = await repository.createChannel({ name: 'Ops', slug: 'ops', provider: 'webhook', config: { url: 'https://example.com', bodyTemplate: '{}' } });
+    const input = { targetType: 'channel' as const, targetId: channel.id, title: 'x', body: 'x', severity: 'info' as const, source: 'agent:test', idempotencyKey: 'race-1', channelIds: [channel.id] };
+    const first = await repository.createDelivery(input);
+    // 模拟并发：让第二次的幂等预检查落空，走 UNIQUE 冲突恢复路径
+    const originalGet = repository.db.get.bind(repository.db);
+    let skipped = false;
+    repository.db.get = async (sql, params) => {
+      if (!skipped && sql.includes('idempotency_key=?')) { skipped = true; return undefined; }
+      return originalGet(sql, params);
+    };
+    const second = await repository.createDelivery(input);
+    expect(second.id).toBe(first.id);
+    expect(await repository.listDeliveries()).toHaveLength(1);
+    repository.close();
+  });
+
+  it('does not schedule disabled channel attempts', async () => {
+    const repository = await createRepository();
+    const channel = await repository.createChannel({ name: 'Disabled', slug: 'disabled', provider: 'webhook', config: { url: 'https://example.com', bodyTemplate: '{}' }, enabled: false });
+    const service = new NotificationService(repository);
+    await expect(service.send({ destination: channel.id, title: 'Ignored', body: 'x' }, 'test')).rejects.toThrow('目的地不存在或已禁用');
+    await repository.db.run("INSERT INTO deliveries (id,target_type,target_id,title,body,severity,metadata,source,status,created_at,updated_at) VALUES ('delivery-1','channel',?,'x','x','info','{}','test','queued',datetime('now'),datetime('now'))", [channel.id]);
+    await repository.db.run("INSERT INTO attempts (id,delivery_id,channel_id,position,status,next_attempt_at,created_at,updated_at) VALUES ('attempt-1','delivery-1',?,0,'pending',datetime('now'),datetime('now'),datetime('now'))", [channel.id]);
+    expect(await repository.nextDueAttempt()).toBeUndefined();
+    repository.close();
+  });
 });

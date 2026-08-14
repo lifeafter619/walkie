@@ -2,7 +2,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import nodemailer from 'nodemailer';
 import type { ProviderId, Severity } from '../../shared/types.js';
 import type { AppConfig } from '../config.js';
-import { safeFetch, type ResolveHost } from './network.js';
+import { assertSafeHost, safeFetch, type ResolveHost } from './network.js';
 
 export interface ProviderMessage {
   title: string;
@@ -44,13 +44,14 @@ function renderTemplate(template: string, message: ProviderMessage): string {
   const values: Record<string, unknown> = { ...message.metadata, title: message.title, body: message.body, content: message.body, severity: message.severity, url: message.url ?? '' };
   return template.replace(/{{\s*([\w.-]+)\s*}}/g, (_, key: string) => {
     const value = values[key];
-    return typeof value === 'string' ? value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n') : JSON.stringify(value ?? '');
+    // JSON.stringify 完整转义控制字符，去掉外层引号后嵌入模板
+    return typeof value === 'string' ? JSON.stringify(value).slice(1, -1) : JSON.stringify(value ?? '');
   });
 }
 
 export class ProviderDispatcher {
   constructor(
-    private readonly appConfig: AppConfig,
+    private readonly appConfig: Pick<AppConfig, 'allowPrivateWebhooks' | 'allowInsecureHttp'>,
     private readonly fetcher: typeof fetch = fetch,
     private readonly resolveHost?: ResolveHost
   ) {}
@@ -234,8 +235,12 @@ export class ProviderDispatcher {
   }
 
   private async sendSmtp(config: Record<string, unknown>, message: ProviderMessage): Promise<ProviderResult> {
+    const host = string(config, 'host');
+    // preset 仅前端 UX 层：选预设时前端已把 host/port/secure 写入 config，这里直接读即可，无需感知 preset 值
+    // SMTP 不走 safeFetch，单独做私网/回环防护，与 HTTP 渠道策略一致
+    if (!this.appConfig.allowPrivateWebhooks) await assertSafeHost(host, this.resolveHost);
     const transporter = nodemailer.createTransport({
-      host: string(config, 'host'), port: Number(config.port ?? 587), secure: Boolean(config.secure),
+      host, port: Number(config.port ?? 587), secure: Boolean(config.secure),
       auth: config.username ? { user: string(config, 'username'), pass: string(config, 'password') } : undefined,
       connectionTimeout: 12_000, socketTimeout: 12_000
     });

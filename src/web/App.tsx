@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  Activity, BellRing, Bot, Code2, LayoutDashboard, LoaderCircle, Menu,
+  Activity, BellRing, Bot, Code2, KeyRound, LayoutDashboard, LoaderCircle, Menu,
   MessageSquareText, RefreshCw, Route as RouteIcon, ServerCog, X
 } from 'lucide-react';
 import type { ApiKey, Channel, DashboardStats, Delivery, Destination, ProviderDefinition, Route, Severity } from '../shared/types';
@@ -14,9 +14,10 @@ import { Routes } from './components/Routes';
 import { Deliveries } from './components/Deliveries';
 import { Agents } from './components/Agents';
 import { Integrations } from './components/Integrations';
+import { Credentials } from './components/Credentials';
 import { SystemPage } from './components/SystemPage';
 
-type Page = 'overview' | 'channels' | 'routes' | 'deliveries' | 'agents' | 'integrations' | 'system';
+type Page = 'overview' | 'channels' | 'routes' | 'deliveries' | 'agents' | 'integrations' | 'credentials' | 'system';
 type Meta = Awaited<ReturnType<typeof api.meta>>;
 
 const nav: Array<{ id: Page; label: string; icon: typeof BellRing }> = [
@@ -26,6 +27,7 @@ const nav: Array<{ id: Page; label: string; icon: typeof BellRing }> = [
   { id: 'deliveries', label: '投递', icon: Activity },
   { id: 'agents', label: 'Agents', icon: Bot },
   { id: 'integrations', label: '接入', icon: Code2 },
+  { id: 'credentials', label: '凭据', icon: KeyRound },
   { id: 'system', label: '系统', icon: ServerCog }
 ];
 
@@ -36,6 +38,7 @@ const pageTitles: Record<Page, [string, string]> = {
   deliveries: ['投递记录', '查看消息状态和每次渠道尝试'],
   agents: ['Agent 授权', '管理 MCP 与 REST API 访问密钥'],
   integrations: ['MCP 接入', '客户端配置与远程 HTTP 端点'],
+  credentials: ['凭据管理', '轮换管理令牌与主密钥，查看 Agent 密钥'],
   system: ['系统状态', '实例端点、支持能力和安全配置']
 };
 
@@ -121,6 +124,8 @@ export default function App() {
     ? <Agents keys={keys} destinations={destinations} refresh={refresh} notify={notify} />
     : page === 'integrations'
     ? <Integrations meta={meta} notify={notify} />
+    : page === 'credentials'
+    ? <Credentials notify={notify} refresh={refresh} />
     : <SystemPage meta={meta} providers={providers} />;
 
   return (
@@ -163,7 +168,7 @@ export default function App() {
       </main>
 
       <nav className="mobile-nav">
-        {nav.filter(({ id }) => ['overview', 'channels', 'deliveries', 'agents', 'integrations'].includes(id)).map(({ id, label, icon: Icon }) => (
+        {nav.filter(({ id }) => ['overview', 'channels', 'deliveries', 'agents', 'integrations', 'credentials'].includes(id)).map(({ id, label, icon: Icon }) => (
           <button key={id} className={page === id ? 'active' : ''} onClick={() => setPage(id)}>
             <Icon size={19} /><span>{label}</span>
           </button>

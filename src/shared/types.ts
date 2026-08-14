@@ -96,6 +96,10 @@ export interface ApiKey {
   lastUsedAt?: string;
   createdAt: string;
   revokedAt?: string;
+  /** 可逆密文解出的完整密钥（仅此功能启用后创建的密钥才有） */
+  secret?: string;
+  /** 是否可查看明文（功能启用前创建的密钥仅存哈希，无法恢复） */
+  viewable: boolean;
 }
 
 export interface DeliveryAttempt {
@@ -179,4 +183,26 @@ export interface Destination {
   provider?: ProviderId;
   strategy?: RouteStrategy;
   enabled: boolean;
+}
+
+/** 管理令牌状态：来源（环境变量 / 已轮换）与是否轮换过 */
+export interface AdminTokenStatus {
+  source: 'env' | 'rotated';
+  rotated: boolean;
+  /** 轮换令牌前缀预览（rd_xxxx…），仅 rotated 时有值 */
+  prefix?: string;
+  envConfigured: boolean;
+}
+
+/** 主密钥（KEK/DEK）状态 */
+export interface MasterKeyStatus {
+  /** env MASTER_KEY(KEK) 指纹，sha256 前 8 位 */
+  kekFingerprint: string;
+  dekVersion: number;
+  rotatedAt?: string;
+}
+
+export interface CredentialStatus {
+  admin: AdminTokenStatus;
+  masterKey: MasterKeyStatus;
 }

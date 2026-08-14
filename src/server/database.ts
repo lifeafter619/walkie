@@ -1,18 +1,32 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  AdminTokenStatus,
   ApiKey,
   Channel,
   Conversation,
+  CredentialStatus,
   DashboardStats,
   Delivery,
   DeliveryAttempt,
   Destination,
+  MasterKeyStatus,
   ProviderId,
   Route,
   RouteStrategy,
   Severity
 } from '../shared/types.js';
-import { createApiSecret, decryptJson, encryptJson, safeSecretEqual } from './crypto.js';
+import {
+  adminTokenPrefix,
+  createApiSecret,
+  decryptJson,
+  encryptJson,
+  generateDek,
+  hashSecret,
+  keyFingerprint,
+  safeSecretEqual,
+  unwrapDek,
+  wrapDek
+} from './crypto.js';
 
 type Row = Record<string, unknown>;
 
@@ -40,9 +54,16 @@ const json = <T>(value: unknown, fallback: T): T => {
 
 export class RelayRepository {
   readonly db: RelayDatabase;
+  /** 数据加密密钥(DEK)：加密频道凭据与 Agent 可逆密文。构造时为空，init() 后可用。 */
+  private dek?: Buffer;
 
   constructor(database: RelayDatabase, private readonly masterKey: Buffer) {
     this.db = database;
+  }
+
+  /** 当前应使用的加密密钥：优先 DEK；DEK 未自举时退回 KEK（兼容迁移失败重试场景） */
+  private encryptionKey(): Buffer {
+    return this.dek ?? this.masterKey;
   }
 
   close(): void | Promise<void> {
@@ -96,16 +117,42 @@ export class RelayRepository {
         expires_at TEXT NOT NULL, created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS conversations_pending ON conversations(replied_at, expires_at);
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
     `);
     const channelColumns = new Set((await this.db.all('PRAGMA table_info(channels)')).map((row) => String(row.name)));
     if (!channelColumns.has('rate_limit_per_min')) await this.db.exec('ALTER TABLE channels ADD COLUMN rate_limit_per_min INTEGER');
     if (!channelColumns.has('quiet_hours')) await this.db.exec('ALTER TABLE channels ADD COLUMN quiet_hours TEXT');
     const conversationColumns = new Set((await this.db.all('PRAGMA table_info(conversations)')).map((row) => String(row.name)));
     if (!conversationColumns.has('options')) await this.db.exec('ALTER TABLE conversations ADD COLUMN options TEXT');
+    const keyColumns = new Set((await this.db.all('PRAGMA table_info(api_keys)')).map((row) => String(row.name)));
+    if (!keyColumns.has('secret_encrypted')) await this.db.exec('ALTER TABLE api_keys ADD COLUMN secret_encrypted TEXT');
+    // DEK 自举：无包裹记录则生成新 DEK 并把现存频道凭据从 KEK 迁到 DEK（原子事务）
+    const dekRow = await this.db.get("SELECT value FROM settings WHERE key='dek_wrapped'");
+    if (dekRow) {
+      this.dek = unwrapDek(String(dekRow.value), this.masterKey);
+    } else {
+      const freshDek = generateDek();
+      // 迁移前先用 KEK 读出所有频道凭据，再用新 DEK 加密写回，全部在一个事务内
+      const channels = await this.db.all('SELECT id, config_encrypted FROM channels');
+      const reencrypt = channels.map((row) => {
+        const config = decryptJson(String(row.config_encrypted), this.masterKey);
+        return { sql: 'UPDATE channels SET config_encrypted=? WHERE id=?', params: [encryptJson(config, freshDek), String(row.id)] };
+      });
+      const timestamp = now();
+      await this.db.batch([
+        ...reencrypt,
+        { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_wrapped',?,?)", params: [wrapDek(freshDek, this.masterKey), timestamp] },
+        { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_version',?,?)", params: ['1', timestamp] },
+        { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_rotated_at',?,?)", params: [timestamp, timestamp] }
+      ]);
+      this.dek = freshDek;
+    }
   }
 
   private channelFrom(row: Row): Channel {
-    const config = decryptJson(String(row.config_encrypted), this.masterKey);
+    const config = decryptJson(String(row.config_encrypted), this.encryptionKey());
     return {
       id: String(row.id), name: String(row.name), slug: String(row.slug), provider: row.provider as ProviderId,
       enabled: Boolean(row.enabled), configKeys: Object.keys(config),
@@ -129,7 +176,7 @@ export class RelayRepository {
   async getChannelConfig(id: string): Promise<Record<string, unknown>> {
     const row = await this.db.get('SELECT config_encrypted FROM channels WHERE id = ?', [id]);
     if (!row) throw new Error('Channel not found');
-    return decryptJson(String(row.config_encrypted), this.masterKey);
+    return decryptJson(String(row.config_encrypted), this.encryptionKey());
   }
 
   async createChannel(input: { name: string; slug: string; provider: ProviderId; enabled?: boolean; config: Record<string, unknown>; rateLimitPerMin?: number | null; quietHours?: string | null }): Promise<Channel> {
@@ -137,7 +184,7 @@ export class RelayRepository {
     const timestamp = now();
     await this.db.run(`INSERT INTO channels
       (id,name,slug,provider,config_encrypted,enabled,rate_limit_per_min,quiet_hours,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?)`, [id, input.name, input.slug, input.provider, encryptJson(input.config, this.masterKey), input.enabled === false ? 0 : 1, input.rateLimitPerMin || null, input.quietHours || null, timestamp, timestamp]);
+      VALUES (?,?,?,?,?,?,?,?,?,?)`, [id, input.name, input.slug, input.provider, encryptJson(input.config, this.encryptionKey()), input.enabled === false ? 0 : 1, input.rateLimitPerMin || null, input.quietHours || null, timestamp, timestamp]);
     await this.audit('admin', 'channel.create', 'channel', id, { provider: input.provider });
     return (await this.getChannel(id))!;
   }
@@ -148,7 +195,7 @@ export class RelayRepository {
     const config = input.config ? { ...await this.getChannelConfig(id), ...input.config } : await this.getChannelConfig(id);
     await this.db.run(`UPDATE channels SET name=?,slug=?,provider=?,enabled=?,config_encrypted=?,rate_limit_per_min=?,quiet_hours=?,updated_at=? WHERE id=?`, [
       input.name ?? current.name, input.slug ?? current.slug, input.provider ?? current.provider,
-      input.enabled ?? current.enabled ? 1 : 0, encryptJson(config, this.masterKey),
+      input.enabled ?? current.enabled ? 1 : 0, encryptJson(config, this.encryptionKey()),
       input.rateLimitPerMin !== undefined ? input.rateLimitPerMin || null : current.rateLimitPerMin ?? null,
       input.quietHours !== undefined ? input.quietHours || null : current.quietHours ?? null,
       now(), id
@@ -225,19 +272,38 @@ export class RelayRepository {
 
   async createKey(input: { name: string; scopes?: string[]; destinationIds?: string[] }): Promise<{ apiKey: ApiKey; secret: string }> {
     const id = randomUUID();
-    const generated = createApiSecret();
     const timestamp = now();
-    await this.db.run('INSERT INTO api_keys (id,name,prefix,secret_hash,scopes,destination_ids,created_at) VALUES (?,?,?,?,?,?,?)',
-      [id, input.name, generated.prefix, generated.hash, JSON.stringify(input.scopes ?? ['notifications:send', 'deliveries:read']), JSON.stringify(input.destinationIds ?? []), timestamp]);
-    await this.audit('admin', 'api_key.create', 'api_key', id, { prefix: generated.prefix });
-    return { apiKey: (await this.getKey(id))!, secret: generated.secret };
+    // 前缀仅 32 位，UNIQUE 碰撞时重新生成
+    for (let attempt = 0; ; attempt += 1) {
+      const generated = createApiSecret();
+      const secretEncrypted = encryptJson({ s: generated.secret }, this.encryptionKey());
+      try {
+        await this.db.run('INSERT INTO api_keys (id,name,prefix,secret_hash,secret_encrypted,scopes,destination_ids,created_at) VALUES (?,?,?,?,?,?,?,?)',
+          [id, input.name, generated.prefix, generated.hash, secretEncrypted, JSON.stringify(input.scopes ?? ['notifications:send', 'deliveries:read']), JSON.stringify(input.destinationIds ?? []), timestamp]);
+        await this.audit('admin', 'api_key.create', 'api_key', id, { prefix: generated.prefix });
+        return { apiKey: (await this.getKey(id))!, secret: generated.secret };
+      } catch (error) {
+        if (attempt < 3 && error instanceof Error && /UNIQUE constraint failed: api_keys\.prefix/.test(error.message)) continue;
+        throw error;
+      }
+    }
   }
 
   private keyFrom(row: Row): ApiKey {
+    let secret: string | undefined;
+    const encrypted = row.secret_encrypted ? String(row.secret_encrypted) : undefined;
+    if (encrypted) {
+      try {
+        secret = String(decryptJson(encrypted, this.encryptionKey()).s);
+      } catch {
+        secret = undefined; // DEK 不匹配（迁移期/异常），按不可查看处理
+      }
+    }
     return {
       id: String(row.id), name: String(row.name), prefix: String(row.prefix), scopes: json<string[]>(row.scopes, []),
       destinationIds: json<string[]>(row.destination_ids, []), lastUsedAt: row.last_used_at ? String(row.last_used_at) : undefined,
-      createdAt: String(row.created_at), revokedAt: row.revoked_at ? String(row.revoked_at) : undefined
+      createdAt: String(row.created_at), revokedAt: row.revoked_at ? String(row.revoked_at) : undefined,
+      secret, viewable: Boolean(secret)
     };
   }
 
@@ -274,20 +340,29 @@ export class RelayRepository {
     }
     const id = randomUUID();
     const timestamp = now();
-    await this.db.batch([
-      {
-        sql: `INSERT INTO deliveries
-          (id,target_type,target_id,title,body,severity,url,metadata,source,status,idempotency_key,created_at,updated_at)
-          VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?)`,
-        params: [id, input.targetType, input.targetId, input.title, input.body, input.severity, input.url ?? null,
-          JSON.stringify(input.metadata ?? {}), input.source, input.idempotencyKey ?? null, timestamp, timestamp]
-      },
-      ...input.channelIds.map((channelId, position) => ({
-        sql: `INSERT INTO attempts
-          (id,delivery_id,channel_id,position,status,next_attempt_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
-        params: [randomUUID(), id, channelId, position, 'pending', timestamp, timestamp, timestamp]
-      }))
-    ]);
+    try {
+      await this.db.batch([
+        {
+          sql: `INSERT INTO deliveries
+            (id,target_type,target_id,title,body,severity,url,metadata,source,status,idempotency_key,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?)`,
+          params: [id, input.targetType, input.targetId, input.title, input.body, input.severity, input.url ?? null,
+            JSON.stringify(input.metadata ?? {}), input.source, input.idempotencyKey ?? null, timestamp, timestamp]
+        },
+        ...input.channelIds.map((channelId, position) => ({
+          sql: `INSERT INTO attempts
+            (id,delivery_id,channel_id,position,status,next_attempt_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+          params: [randomUUID(), id, channelId, position, 'pending', timestamp, timestamp, timestamp]
+        }))
+      ]);
+    } catch (error) {
+      // 幂等键并发竞争：撞 UNIQUE 时返回先到者，而不是让调用方收到 409
+      if (input.idempotencyKey && error instanceof Error && /UNIQUE constraint failed/.test(error.message)) {
+        const existing = await this.db.get('SELECT id FROM deliveries WHERE source=? AND idempotency_key=?', [input.source, input.idempotencyKey]);
+        if (existing) return (await this.getDelivery(String(existing.id)))!;
+      }
+      throw error;
+    }
     return (await this.getDelivery(id))!;
   }
 
@@ -343,7 +418,7 @@ export class RelayRepository {
       WHERE a.status IN ('pending','retrying') AND a.next_attempt_at<=? AND c.enabled=1
       AND (r.strategy IS NULL OR r.strategy<>'fallback' OR (
         NOT EXISTS (SELECT 1 FROM attempts won WHERE won.delivery_id=a.delivery_id AND won.status='delivered')
-        AND a.position=(SELECT MIN(next.position) FROM attempts next WHERE next.delivery_id=a.delivery_id AND next.status IN ('pending','retrying'))
+        AND a.position=(SELECT MIN(next.position) FROM attempts next WHERE next.delivery_id=a.delivery_id AND next.status IN ('pending','sending','retrying'))
       ))
       ORDER BY a.next_attempt_at,a.position LIMIT ?`, [now(), limit]);
     const claimed: DeliveryAttempt[] = [];
@@ -360,7 +435,7 @@ export class RelayRepository {
   }
 
   async nextDueAttempt(): Promise<string | undefined> {
-    const row = await this.db.get("SELECT MIN(next_attempt_at) next_at FROM attempts WHERE status IN ('pending','retrying')");
+    const row = await this.db.get("SELECT MIN(a.next_attempt_at) next_at FROM attempts a JOIN channels c ON c.id=a.channel_id WHERE a.status IN ('pending','retrying') AND c.enabled=1");
     return row?.next_at ? String(row.next_at) : undefined;
   }
 
@@ -447,7 +522,8 @@ export class RelayRepository {
   }
 
   private async refreshDeliveryStatus(deliveryId: string): Promise<void> {
-    const delivery = (await this.db.get('SELECT target_type,target_id FROM deliveries WHERE id=?', [deliveryId]))!;
+    const delivery = await this.db.get('SELECT target_type,target_id FROM deliveries WHERE id=?', [deliveryId]);
+    if (!delivery) return;
     const attempts = await this.getAttempts(deliveryId);
     const route = delivery.target_type === 'route' ? await this.getRoute(String(delivery.target_id)) : undefined;
     const delivered = attempts.filter((a) => a.status === 'delivered').length;
@@ -474,6 +550,79 @@ export class RelayRepository {
       deliveries24h: total, successRate24h: total ? Math.round(Number(totals.successes ?? 0) / total * 1000) / 10 : 100,
       failed24h: Number(totals.failed ?? 0)
     };
+  }
+
+  /* ────────────────────────────────────────────────────────────
+   * 凭据管理：管理令牌轮换、主密钥(DEK)轮换、凭据状态
+   * ──────────────────────────────────────────────────────────── */
+
+  /** 读取轮换过的管理令牌哈希（比较用）；无则 undefined */
+  async getAdminTokenHash(): Promise<{ hash?: string; prefix?: string }> {
+    const row = await this.db.get("SELECT value FROM settings WHERE key='admin_token_hash'");
+    const prefixRow = await this.db.get("SELECT value FROM settings WHERE key='admin_token_prefix'");
+    return row ? { hash: String(row.value), prefix: prefixRow ? String(prefixRow.value) : undefined } : {};
+  }
+
+  /** 存储新管理令牌（哈希 + 前缀），返回前缀预览。明文由调用方返回一次后丢弃。 */
+  async setAdminToken(token: string): Promise<{ prefix: string }> {
+    const prefix = adminTokenPrefix(token);
+    const timestamp = now();
+    await this.db.batch([
+      { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('admin_token_hash',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [hashSecret(token), timestamp] },
+      { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('admin_token_prefix',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [prefix, timestamp] }
+    ]);
+    await this.audit('admin', 'credential.admin_token.rotate', 'credential', 'admin_token', {});
+    return { prefix };
+  }
+
+  /** 凭据综合状态：管理令牌来源 + 主密钥(KEK/DEK)状态 */
+  async getCredentialStatus(envAdminConfigured: boolean): Promise<CredentialStatus> {
+    const adminHash = await this.getAdminTokenHash();
+    const dekVersionRow = await this.db.get("SELECT value FROM settings WHERE key='dek_version'");
+    const rotatedAtRow = await this.db.get("SELECT value FROM settings WHERE key='dek_rotated_at'");
+    const dekVersion = dekVersionRow ? Number(dekVersionRow.value) : 1;
+    const admin: AdminTokenStatus = adminHash.hash
+      ? { source: 'rotated', rotated: true, prefix: adminHash.prefix, envConfigured: envAdminConfigured }
+      : { source: 'env', rotated: false, envConfigured: envAdminConfigured };
+    const masterKey: MasterKeyStatus = {
+      kekFingerprint: keyFingerprint(this.masterKey),
+      dekVersion,
+      rotatedAt: rotatedAtRow ? String(rotatedAtRow.value) : undefined
+    };
+    return { admin, masterKey };
+  }
+
+  /**
+   * 轮换数据加密密钥(DEK)：生成新 DEK2，逐条把频道凭据与 Agent 可逆密文
+   * 用旧 DEK 解、新 DEK2 加，单事务原子写回。env MASTER_KEY(KEK) 不变。
+   */
+  async rotateMasterKey(): Promise<{ version: number; rotatedAt: string }> {
+    if (!this.dek) throw new Error('DEK 尚未初始化');
+    const oldDek = this.dek;
+    const newDek = generateDek();
+    const timestamp = now();
+    const channels = await this.db.all('SELECT id, config_encrypted FROM channels');
+    const keys = await this.db.all('SELECT id, secret_encrypted FROM api_keys WHERE secret_encrypted IS NOT NULL');
+    const reencryptChannels = channels.map((row) => {
+      const config = decryptJson(String(row.config_encrypted), oldDek);
+      return { sql: 'UPDATE channels SET config_encrypted=? WHERE id=?', params: [encryptJson(config, newDek), String(row.id)] };
+    });
+    const reencryptKeys = keys.map((row) => {
+      const payload = decryptJson(String(row.secret_encrypted), oldDek);
+      return { sql: 'UPDATE api_keys SET secret_encrypted=? WHERE id=?', params: [encryptJson(payload, newDek), String(row.id)] };
+    });
+    const currentVersionRow = await this.db.get("SELECT value FROM settings WHERE key='dek_version'");
+    const nextVersion = (currentVersionRow ? Number(currentVersionRow.value) : 1) + 1;
+    await this.db.batch([
+      ...reencryptChannels,
+      ...reencryptKeys,
+      { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_wrapped',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [wrapDek(newDek, this.masterKey), timestamp] },
+      { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_version',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [String(nextVersion), timestamp] },
+      { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_rotated_at',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [timestamp, timestamp] }
+    ]);
+    this.dek = newDek;
+    await this.audit('admin', 'credential.master_key.rotate', 'credential', 'dek', { version: nextVersion });
+    return { version: nextVersion, rotatedAt: timestamp };
   }
 
   async audit(actor: string, action: string, resourceType: string, resourceId: string | undefined, details: Record<string, unknown>): Promise<void> {

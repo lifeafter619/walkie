@@ -6,8 +6,9 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { ZodError } from 'zod';
 import type { ApiKey, ProviderId } from '../shared/types.js';
-import { askSchema, channelSchema, keySchema, notificationSchema, routeSchema } from '../shared/schemas.js';
+import { askSchema, channelSchema, credentialTokenSchema, keySchema, notificationSchema, routeSchema } from '../shared/schemas.js';
 import type { AppConfig } from './config.js';
+import { generateAdminToken, safeSecretEqual, safeTokenEqual } from './crypto.js';
 import type { RelayRepository } from './database.js';
 import { createRelayMcpHandler } from './mcp.js';
 import { renderReplyForm, renderReplyResult } from './reply-page.js';
@@ -48,8 +49,17 @@ export function createApp(deps: AppDependencies) {
   });
   app.locals.closeMcp = () => mcpHandler.close();
 
-  const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
-    if (!config.adminToken || bearer(req) === config.adminToken || req.header('x-admin-token') === config.adminToken) return next();
+  const requireAdmin = async (req: Request, res: Response, next: NextFunction) => {
+    // env 管理令牌（本地开发未设置时跳过鉴权，保持原行为）
+    if (config.adminToken && (safeTokenEqual(bearer(req), config.adminToken) || safeTokenEqual(req.header('x-admin-token'), config.adminToken))) return next();
+    // 数据库轮换令牌：存的是 sha256 哈希，用 safeSecretEqual 比较（与 Agent Key 同模型）
+    const rotated = await repository.getAdminTokenHash();
+    if (rotated.hash) {
+      const provided = bearer(req) ?? req.header('x-admin-token');
+      if (provided && safeSecretEqual(provided, rotated.hash)) return next();
+    }
+    // 未配置任何管理令牌（本地开发）：放行，保持原 loopback 行为
+    if (!config.adminToken) return next();
     res.status(401).json({ error: '需要管理令牌' });
   };
   const requireAgent = asyncRoute(async (req: Request, res: Response, next: NextFunction) => {
@@ -69,10 +79,10 @@ export function createApp(deps: AppDependencies) {
       publicUrl, mcpEndpoint: '/mcp', mcpUrl: `${publicUrl}/mcp`
     });
   });
-  app.get('/api/admin/session', requireAdmin, (_req, res) => res.json({ authenticated: true }));
+  app.get('/api/admin/session', asyncRoute(requireAdmin), (_req, res) => res.json({ authenticated: true }));
 
   const admin = express.Router();
-  admin.use(requireAdmin);
+  admin.use(asyncRoute(requireAdmin));
   admin.get('/providers', (_req, res) => res.json({ providers: PROVIDERS }));
   admin.get('/stats', asyncRoute(async (_req, res) => res.json(await repository.getDashboardStats())));
   admin.get('/destinations', asyncRoute(async (_req, res) => res.json({ destinations: await repository.listDestinations() })));
@@ -127,6 +137,15 @@ export function createApp(deps: AppDependencies) {
     res.status(201).json(await repository.createKey(input));
   }));
   admin.post('/keys/:id/revoke', asyncRoute(async (req, res) => { await repository.revokeKey(String(req.params.id)); res.json({ success: true }); }));
+
+  admin.get('/credentials', asyncRoute(async (_req, res) => res.json(await repository.getCredentialStatus(Boolean(config.adminToken)))));
+  admin.post('/credentials/admin-token', asyncRoute(async (req, res) => {
+    const input = credentialTokenSchema.parse(req.body);
+    const token = input.token ?? generateAdminToken();
+    await repository.setAdminToken(token);
+    res.status(201).json({ token });
+  }));
+  admin.post('/credentials/master-key/rotate', asyncRoute(async (_req, res) => res.json(await repository.rotateMasterKey())));
 
   admin.get('/deliveries', asyncRoute(async (req, res) => res.json({ deliveries: await repository.listDeliveries({ limit: Number(req.query.limit ?? 100), status: typeof req.query.status === 'string' ? req.query.status : undefined }) })));
   admin.get('/deliveries/:id', asyncRoute(async (req, res) => {

@@ -4,14 +4,16 @@ import { Buffer } from 'node:buffer';
 import { ZodError } from 'zod';
 import type { AuthInfo } from '@modelcontextprotocol/server';
 import type { ApiKey, ProviderId } from '../shared/types.js';
-import { askSchema, channelSchema, keySchema, notificationSchema, routeSchema } from '../shared/schemas.js';
+import { askSchema, channelSchema, credentialTokenSchema, keySchema, notificationSchema, routeSchema } from '../shared/schemas.js';
 import { RelayRepository } from '../server/database.js';
+import { generateAdminToken, safeSecretEqual, safeTokenEqual } from '../server/crypto.js';
 import { createRelayMcpHandler } from '../server/mcp.js';
 import { renderReplyForm, renderReplyResult } from '../server/reply-page.js';
 import { NotificationService } from '../server/notifications.js';
 import { PROVIDERS, PROVIDER_MAP, validateProviderConfig } from '../server/providers/catalog.js';
 import { ProviderDispatcher } from '../server/providers/dispatcher.js';
 import { DeliveryWorker } from '../server/queue.js';
+import { BodyTooLargeError, readBody } from './body.js';
 import { DurableRelayDatabase } from './database.js';
 
 type WorkerEnv = Env & {
@@ -31,15 +33,6 @@ const integer = (value: string | undefined, fallback: number, min: number, max: 
 };
 const enabled = (value: string | undefined) => value === 'true' || value === '1';
 
-async function readBody(request: Request): Promise<Record<string, unknown>> {
-  const text = await request.text();
-  if (text.length > 262_144) throw new Error('请求体不能超过 256KB');
-  if (!text) return {};
-  const contentType = request.headers.get('content-type') ?? '';
-  if (contentType.includes('application/json')) return JSON.parse(text) as Record<string, unknown>;
-  return Object.fromEntries(new URLSearchParams(text));
-}
-
 async function resolveHost(hostname: string): Promise<string[]> {
   const [v4, v6] = await Promise.all([
     resolve4(hostname).catch(() => []),
@@ -54,7 +47,6 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
   private readonly dispatcher: ProviderDispatcher;
   private readonly worker: DeliveryWorker;
   private readonly mcp: ReturnType<typeof createRelayMcpHandler>;
-  private origin = '';
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env);
@@ -66,7 +58,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     this.dispatcher = new ProviderDispatcher({
       allowPrivateWebhooks: enabled(env.ALLOW_PRIVATE_WEBHOOKS),
       allowInsecureHttp: enabled(env.ALLOW_INSECURE_HTTP)
-    } as never, fetch, resolveHost);
+    }, fetch, resolveHost);
     this.worker = new DeliveryWorker(this.repository, this.dispatcher, {
       deliveryWorkers: integer(env.DELIVERY_WORKERS, 2, 1, 16),
       maxDeliveryAttempts: integer(env.MAX_DELIVERY_ATTEMPTS, 4, 1, 10),
@@ -74,7 +66,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       maxSendsPerMin: integer(env.MAX_SENDS_PER_MIN, 0, 0, 100_000)
     });
     this.notifications = new NotificationService(this.repository, () => ctx.waitUntil(this.drainAndSchedule()));
-    this.mcp = createRelayMcpHandler(this.repository, this.notifications, () => this.origin);
+    this.mcp = createRelayMcpHandler(this.repository, this.notifications, (request) => request ? new URL(request.url).origin : '');
   }
 
   async alarm(): Promise<void> {
@@ -87,9 +79,15 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     if (due) await this.ctx.storage.setAlarm(Math.max(Date.now() + 250, new Date(due).getTime()));
   }
 
-  private requireAdmin(request: Request): Response | undefined {
+  private async requireAdmin(request: Request): Promise<Response | undefined> {
     if (!this.env.ADMIN_TOKEN) return json({ error: 'ADMIN_TOKEN secret is required' }, 503);
-    if (bearer(request) === this.env.ADMIN_TOKEN || request.headers.get('x-admin-token') === this.env.ADMIN_TOKEN) return;
+    if (safeTokenEqual(bearer(request), this.env.ADMIN_TOKEN) || safeTokenEqual(request.headers.get('x-admin-token') ?? undefined, this.env.ADMIN_TOKEN)) return;
+    // 数据库轮换令牌：存的是 sha256 哈希，用 safeSecretEqual 比较（与 Agent Key 同模型）
+    const rotated = await this.repository.getAdminTokenHash();
+    if (rotated.hash) {
+      const provided = bearer(request) ?? request.headers.get('x-admin-token') ?? undefined;
+      if (provided && safeSecretEqual(provided, rotated.hash)) return;
+    }
     return json({ error: '需要管理令牌' }, 401);
   }
 
@@ -103,7 +101,6 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
   async fetch(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url);
-      this.origin = url.origin;
       const path = url.pathname;
       if (path === '/health' && request.method === 'GET') return json({ status: 'ok', version: '0.2.0', runtime: 'cloudflare-workers', queue: 'alarm' });
       if (path === '/api/meta' && request.method === 'GET') return json({
@@ -167,14 +164,14 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       if (compat && ['GET', 'POST'].includes(request.method)) return this.serverchan(request, compat[1]);
 
       if (!path.startsWith('/api/admin')) return json({ error: 'Not found' }, 404);
-      const denied = this.requireAdmin(request);
+      const denied = await this.requireAdmin(request);
       if (denied) return denied;
       return this.admin(request, url);
     } catch (error) {
       const message = error instanceof ZodError
         ? error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('；')
         : error instanceof Error ? error.message : '未知错误';
-      const status = /not found|不存在/i.test(message) ? 404 : /UNIQUE constraint failed/.test(message) ? 409 : 400;
+      const status = error instanceof BodyTooLargeError ? 413 : /not found|不存在/i.test(message) ? 404 : /UNIQUE constraint failed/.test(message) ? 409 : 400;
       console.error(JSON.stringify({ event: 'request.error', message }));
       return json({ error: message }, status);
     }
@@ -236,6 +233,15 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     if (path === '/api/admin/keys' && request.method === 'POST') return json(await this.repository.createKey(keySchema.parse(await readBody(request))), 201);
     const revoke = /^\/api\/admin\/keys\/([^/]+)\/revoke$/.exec(path);
     if (revoke && request.method === 'POST') { await this.repository.revokeKey(revoke[1]); return json({ success: true }); }
+
+    if (path === '/api/admin/credentials' && request.method === 'GET') return json(await this.repository.getCredentialStatus(Boolean(this.env.ADMIN_TOKEN)));
+    if (path === '/api/admin/credentials/admin-token' && request.method === 'POST') {
+      const input = credentialTokenSchema.parse(await readBody(request));
+      const token = input.token ?? generateAdminToken();
+      await this.repository.setAdminToken(token);
+      return json({ token }, 201);
+    }
+    if (path === '/api/admin/credentials/master-key/rotate' && request.method === 'POST') return json(await this.repository.rotateMasterKey());
 
     if (path === '/api/admin/deliveries' && request.method === 'GET') return json({ deliveries: await this.repository.listDeliveries({ limit: Number(url.searchParams.get('limit') ?? 100), status: url.searchParams.get('status') ?? undefined }) });
     const delivery = /^\/api\/admin\/deliveries\/([^/]+)$/.exec(path);

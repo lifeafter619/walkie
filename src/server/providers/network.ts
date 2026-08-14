@@ -13,8 +13,20 @@ function isPrivateAddress(address: string): boolean {
   const parts = normalized.split('.').map(Number);
   if (parts.length !== 4 || parts.some(Number.isNaN)) return false;
   return parts[0] === 10 || parts[0] === 127 || parts[0] === 0 ||
+    (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) ||
     (parts[0] === 169 && parts[1] === 254) || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
-    (parts[0] === 192 && parts[1] === 168) || (parts[0] >= 224);
+    (parts[0] === 192 && (parts[1] === 168 || (parts[1] === 0 && (parts[2] === 0 || parts[2] === 2)))) ||
+    (parts[0] === 198 && (parts[1] === 18 || parts[1] === 19 || (parts[1] === 51 && parts[2] === 100))) ||
+    (parts[0] === 203 && parts[1] === 0 && parts[2] === 113) || parts[0] >= 224;
+}
+
+/** 主机名（不带协议）版本的私网/回环防护，SMTP 等非 HTTP 渠道复用 */
+export async function assertSafeHost(hostname: string, resolveHost: ResolveHost = resolveWithLookup): Promise<void> {
+  if (hostname === 'localhost' || (isIP(hostname) && isPrivateAddress(hostname))) throw new Error('私网或回环通知地址已禁用');
+  if (!isIP(hostname)) {
+    const addresses = await resolveHost(hostname);
+    if (!addresses.length || addresses.some(isPrivateAddress)) throw new Error('通知地址解析到了私网或保留地址');
+  }
 }
 
 export async function assertSafeUrl(
@@ -31,11 +43,7 @@ export async function assertSafeUrl(
   if (!['https:', 'http:'].includes(url.protocol)) throw new Error('通知地址只允许 HTTP 或 HTTPS');
   if (url.protocol === 'http:' && !config.allowInsecureHttp) throw new Error('HTTP 地址已禁用，请使用 HTTPS 或设置 ALLOW_INSECURE_HTTP=true');
   if (url.username || url.password) throw new Error('通知地址不能包含 URL 凭据');
-  if (!config.allowPrivateWebhooks) {
-    if (url.hostname === 'localhost' || (isIP(url.hostname) && isPrivateAddress(url.hostname))) throw new Error('私网或回环通知地址已禁用');
-    const addresses = await resolveHost(url.hostname);
-    if (!addresses.length || addresses.some(isPrivateAddress)) throw new Error('通知地址解析到了私网或保留地址');
-  }
+  if (!config.allowPrivateWebhooks) await assertSafeHost(url.hostname, resolveHost);
   return url;
 }
 

@@ -8,7 +8,7 @@ export const channelSchema = z.object({
   enabled: z.boolean().optional(),
   config: z.record(z.string(), z.unknown()),
   rateLimitPerMin: z.number().int().min(0).max(600).nullish(),
-  quietHours: z.string().regex(/^\d{2}:\d{2}-\d{2}:\d{2}$/, '格式应为 HH:MM-HH:MM').or(z.literal('')).nullish()
+  quietHours: z.string().regex(/^\d{2}:\d{2}-\d{2}:\d{2}(@[\w/+-]+)?$/, '格式应为 HH:MM-HH:MM，可选 @时区（如 @Asia/Shanghai）').or(z.literal('')).nullish()
 });
 export const routeSchema = z.object({
   name: z.string().min(1).max(100),
@@ -43,4 +43,9 @@ export const keySchema = z.object({
   name: z.string().min(1).max(100),
   scopes: z.array(z.enum(['notifications:send', 'deliveries:read'])).min(1).optional(),
   destinationIds: z.array(z.string()).optional()
+});
+
+/** 管理令牌轮换：可选自定义令牌（≥24 字符）；缺省则服务端随机生成 */
+export const credentialTokenSchema = z.object({
+  token: z.string().min(24).max(200).optional()
 });

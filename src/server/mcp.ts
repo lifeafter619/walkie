@@ -1,4 +1,4 @@
-import { createMcpHandler, McpServer, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/server';
+import { createMcpHandler, McpServer, SUPPORTED_PROTOCOL_VERSIONS, type McpRequestContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ApiKey } from '../shared/types.js';
 import type { RelayRepository } from './database.js';
@@ -102,11 +102,11 @@ export function createRelayMcpServer(repository: RelayRepository, notifications:
   return server;
 }
 
-export function createRelayMcpHandler(repository: RelayRepository, notifications: NotificationService, publicUrl: () => string = () => '') {
-  return createMcpHandler(async ({ authInfo }) => {
+export function createRelayMcpHandler(repository: RelayRepository, notifications: NotificationService, publicUrl: (request?: Request) => string = () => '') {
+  return createMcpHandler(async ({ authInfo, requestInfo }: McpRequestContext) => {
     const apiKey = authInfo?.clientId ? await repository.getKey(authInfo.clientId) : undefined;
     if (!apiKey || apiKey.revokedAt) throw new Error('无效或已吊销的 Agent API Key');
-    return createRelayMcpServer(repository, notifications, apiKey, publicUrl());
+    return createRelayMcpServer(repository, notifications, apiKey, publicUrl(requestInfo));
   }, {
     legacy: 'stateless',
     responseMode: 'json',

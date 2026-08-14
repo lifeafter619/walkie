@@ -3,20 +3,32 @@ import type { RelayRepository } from './database.js';
 import type { ProviderDispatcher } from './providers/dispatcher.js';
 import type { Channel, Severity } from '../shared/types.js';
 
-/** 返回静默结束时刻；不在静默期返回 undefined。quietHours 形如 "22:00-08:00"，服务器本地时间 */
+/** 返回静默结束时刻；不在静默期返回 undefined。quietHours 形如 "22:00-08:00"（服务器本地时间）
+ *  或 "22:00-08:00@Asia/Shanghai"（显式 IANA 时区；Cloudflare Workers 本地时间恒为 UTC，务必带时区） */
 export function quietUntil(quietHours: string | undefined, severity: Severity, at = new Date()): Date | undefined {
   if (!quietHours || severity === 'critical') return undefined;
-  const match = /^(\d{2}):(\d{2})-(\d{2}):(\d{2})$/.exec(quietHours);
+  const match = /^(\d{2}):(\d{2})-(\d{2}):(\d{2})(?:@(.+))?$/.exec(quietHours);
   if (!match) return undefined;
-  const minutes = at.getHours() * 60 + at.getMinutes();
+  let minutes: number;
+  if (match[5]) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-GB', { timeZone: match[5], hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at);
+      const [hour, minute] = parts.split(':').map(Number);
+      minutes = hour * 60 + minute;
+    } catch {
+      return undefined; // 非法时区名，视为无静默期
+    }
+  } else {
+    minutes = at.getHours() * 60 + at.getMinutes();
+  }
   const start = Number(match[1]) * 60 + Number(match[2]);
   const end = Number(match[3]) * 60 + Number(match[4]);
   const inQuiet = start <= end ? minutes >= start && minutes < end : minutes >= start || minutes < end;
   if (!inQuiet) return undefined;
+  const untilEnd = (end - minutes + 1440) % 1440;
   const release = new Date(at);
-  release.setHours(Number(match[3]), Number(match[4]), 0, 0);
-  if (release <= at) release.setDate(release.getDate() + 1);
-  return release;
+  release.setSeconds(0, 0);
+  return new Date(release.getTime() + untilEnd * 60_000);
 }
 
 export class DeliveryWorker {

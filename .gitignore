@@ -13,3 +13,6 @@ output/
 .dev.vars
 .wrangler/
 .superpowers/
+
+# ZCode 工具会话与计划文件
+.zcode/

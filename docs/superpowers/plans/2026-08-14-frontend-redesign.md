@@ -93,8 +93,8 @@ describe('deriveAccentVars', () => {
     expect(v.accent).toBe('#c2603f');
     expect(v.accentInk).toBe('#ffffff');
     expect(v.accentSoft).toBe('rgba(194,96,63,0.14)');
-    // press is accent darkened ~0.82
-    expect(v.accentPress).toBe('#a14f33');
+    // press is accent darkened ~0.82 (194→0x9f, 96→0x4f, 63→0x34)
+    expect(v.accentPress).toBe('#9f4f34');
   });
   it('preserves the hex casing of the input', () => {
     expect(deriveAccentVars('#3D6B4F').accent).toBe('#3D6B4F');

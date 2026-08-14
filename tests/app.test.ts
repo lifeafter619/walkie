@@ -41,7 +41,9 @@ describe('HTTP API and MCP', () => {
     const secret = keyResponse.body.secret as string;
     expect(secret).toMatch(/^rdk_[a-f0-9]{8}_/);
     const listed = await request(app).get('/api/admin/keys').expect(200);
-    expect(JSON.stringify(listed.body)).not.toContain(secret);
+    // 凭据管理功能：已认证管理员可查看 Agent 密钥明文（viewable=true 且 secret 可复制）
+    expect(listed.body.keys[0].viewable).toBe(true);
+    expect(listed.body.keys[0].secret).toBe(secret);
     await request(app).post('/mcp').send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'test', version: '1.0.0' } } }).expect(401);
     const initialized = await request(app).post('/mcp')
       .set('Authorization', `Bearer ${secret}`)

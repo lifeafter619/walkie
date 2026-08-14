@@ -5,6 +5,10 @@ import { assertSafeUrl } from '../src/server/providers/network.js';
 
 const config = { allowPrivateWebhooks: true, allowInsecureHttp: false } as AppConfig;
 
+// SMTP 测试需要 mock nodemailer（sendSmtp 直连 nodemailer，不走 fetcher）
+const transportMock = { sendMail: vi.fn(async (opts: Record<string, unknown>) => ({ messageId: `<test-${opts.to}@relaydock>` })) };
+vi.mock('nodemailer', () => ({ default: { createTransport: vi.fn(() => transportMock) } }));
+
 describe('provider dispatcher', () => {
   it('builds a Telegram Bot API request', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
@@ -95,6 +99,24 @@ describe('new providers', () => {
     expect(JSON.parse(String(vi.mocked(fetcher).mock.calls[0][1]?.body))).toMatchObject({ level: 'critical', call: '1', volume: 8 });
     await dispatcher.send('feishu', { webhookUrl: 'https://open.feishu.cn/hook/x' }, { title: 'T', body: 'B', severity: 'info', metadata: {} });
     expect(JSON.parse(String(vi.mocked(fetcher).mock.calls[1][1]?.body)).card.header.template).toBe('blue');
+  });
+});
+
+describe('SMTP email', () => {
+  it('passes host/port/secure/auth/from/to to nodemailer', async () => {
+    // 清理上一次调用的记录
+    vi.mocked(transportMock.sendMail).mockClear();
+    const dispatcher = new ProviderDispatcher(config);
+    await dispatcher.send('smtp', { host: 'smtp.exmail.qq.com', port: 465, secure: true, username: 'bot@corp.com', password: 'authcode', from: 'bot@corp.com', to: 'agent@claw.163.com' }, { title: '告警', body: 'CPU 95%', severity: 'critical', metadata: {} });
+    expect(transportMock.sendMail).toHaveBeenCalledOnce();
+    const opts = vi.mocked(transportMock.sendMail).mock.calls[0][0] as Record<string, unknown>;
+    expect(opts).toMatchObject({ from: 'bot@corp.com', to: 'agent@claw.163.com', subject: '告警' });
+    expect(String(opts.text)).toContain('CPU 95%');
+  });
+
+  it('blocks private SMTP hosts when allowPrivateWebhooks is false', async () => {
+    const dispatcher = new ProviderDispatcher({ allowPrivateWebhooks: false, allowInsecureHttp: false } as AppConfig);
+    await expect(dispatcher.send('smtp', { host: '10.0.0.5', port: 25, from: 'a@b.com', to: 'c@d.com' }, { title: 'T', body: 'B', severity: 'info', metadata: {} })).rejects.toThrow('私网或回环');
   });
 });
 
