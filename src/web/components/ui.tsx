@@ -1,12 +1,12 @@
 import { useEffect, type ButtonHTMLAttributes, type ReactNode } from 'react';
 import {
-  AlertTriangle, Check, CheckCircle2, Clock3, LoaderCircle,
-  X, XCircle, type LucideIcon
+  AlertTriangle, Check, CheckCircle2, LoaderCircle, Monitor, Moon, Sun,
+  X, type LucideIcon
 } from 'lucide-react';
+import { cycleTheme, useTheme } from '../appearance';
 
 /* ────────────────────────────────────────────────────────────
- * 通用 UI 组件（从原 App.tsx 抽出，供各页面复用）。
- * 保持与原视觉一致，仅做可读性整理 + bug 修正。
+ * 通用 UI 组件。中性工具风：状态用小圆点+文字，不用彩色胶囊。
  * ──────────────────────────────────────────────────────────── */
 
 export type Toast = { id: number; kind: 'success' | 'error'; message: string };
@@ -21,7 +21,7 @@ export function Button({
 }) {
   return (
     <button className={`button button-${variant}`} {...props} disabled={loading || props.disabled}>
-      {loading ? <LoaderCircle className="spin" size={16} /> : Icon ? <Icon size={16} /> : null}
+      {loading ? <LoaderCircle className="spin" size={15} /> : Icon ? <Icon size={15} /> : null}
       {children}
     </button>
   );
@@ -32,22 +32,33 @@ export function IconButton({
 }: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: LucideIcon }) {
   return (
     <button className="icon-button" title={label} aria-label={label} {...props}>
-      <Icon size={17} />
+      <Icon size={16} />
     </button>
   );
 }
 
-export { ThemeToggle, AppearanceControls } from './AppearanceControls';
-
-export function Badge({ status }: { status: string }) {
-  const Icon: LucideIcon =
-    ['delivered', 'success'].includes(status) ? CheckCircle2
-    : status === 'failed' ? XCircle
-    : ['processing', 'sending', 'retrying'].includes(status) ? LoaderCircle
-    : Clock3;
+export function ThemeToggle() {
+  const theme = useTheme();
+  const Icon = theme === 'system' ? Monitor : theme === 'dark' ? Moon : Sun;
+  const label = theme === 'system' ? '跟随系统' : theme === 'dark' ? '暗色' : '亮色';
   return (
-    <span className={`badge badge-${status}`}>
-      <Icon size={13} className={status === 'sending' || status === 'processing' ? 'spin' : ''} />
+    <button className="icon-button" title={`主题：${label}（点击切换）`} aria-label={`主题：${label}`} onClick={cycleTheme}>
+      <Icon size={16} />
+    </button>
+  );
+}
+
+/** 状态展示：小圆点 + 文字。仅失败用红字；sending/processing 用 spinner 代替圆点。 */
+export function Badge({ status }: { status: string }) {
+  const spinning = status === 'sending' || status === 'processing';
+  const tone =
+    ['delivered', 'success'].includes(status) ? 'ok'
+    : status === 'failed' ? 'bad'
+    : ['partial', 'retrying'].includes(status) ? 'warn'
+    : spinning ? 'info' : 'idle';
+  return (
+    <span className={`status status-${tone}`}>
+      {spinning ? <LoaderCircle size={12} className="spin" /> : <i className="dot" />}
       {STATUS_LABEL[status] ?? status}
     </span>
   );
@@ -87,7 +98,7 @@ export function Modal({
 export function Empty({ icon: Icon, title, text, action }: { icon: LucideIcon; title: string; text: string; action?: ReactNode }) {
   return (
     <div className="empty">
-      <span><Icon size={22} /></span>
+      <Icon size={22} />
       <h3>{title}</h3>
       <p>{text}</p>
       {action}
@@ -100,7 +111,7 @@ export function Toasts({ toasts, dismiss }: { toasts: Toast[]; dismiss: (id: num
     <div className="toast-stack" aria-live="polite">
       {toasts.map((toast) => (
         <div className={`toast ${toast.kind}`} key={toast.id}>
-          {toast.kind === 'success' ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}
+          {toast.kind === 'success' ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}
           <span>{toast.message}</span>
           <IconButton label="关闭" icon={X} onClick={() => dismiss(toast.id)} />
         </div>

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Bot, Code2, Copy, KeyRound, Network, ShieldCheck, SquareTerminal } from 'lucide-react';
+import { Bot, Code2, Copy, KeyRound, Network, SquareTerminal } from 'lucide-react';
 import { Button, IconButton, Notify } from './ui';
 
 type Meta = {
@@ -11,7 +11,7 @@ type Meta = {
 type Client = 'codex' | 'claude' | 'cursor' | 'generic';
 
 /* ────────────────────────────────────────────────────────────
- * MCP 接入：客户端配置片段与远程端点。
+ * MCP 接入：端点 + 客户端配置片段。
  * ──────────────────────────────────────────────────────────── */
 
 export function Integrations({ meta, notify }: { meta: Meta; notify: Notify }) {
@@ -43,53 +43,53 @@ export function Integrations({ meta, notify }: { meta: Meta; notify: Notify }) {
   };
 
   return (
-    <div className="integration-layout">
-      <section className="panel endpoint-hero">
-        <div>
-          <span className="eyebrow">远程 MCP 端点</span>
-          <h2>{meta.mcpUrl}</h2>
-          <p>Bearer Agent API Key</p>
-        </div>
-        <IconButton label="复制 MCP URL" icon={Copy} onClick={() => copy(meta.mcpUrl, 'MCP URL 已复制')} />
-      </section>
+    <>
+      <header className="page-head"><h1>接入</h1></header>
 
-      <section className="panel integration-config">
-        <div className="client-tabs" role="tablist">
-          {Object.entries(snippets).map(([id, item]) => {
-            const Icon = item.icon;
-            return (
-              <button key={id} role="tab" aria-selected={client === id} className={client === id ? 'active' : ''} onClick={() => setClient(id as Client)}>
-                <Icon size={16} /><span>{item.label}</span>
-              </button>
-            );
-          })}
-        </div>
-        <div className="config-head">
-          <div><strong>{selected.label}</strong><code>{selected.path}</code></div>
-          <Button icon={Copy} onClick={() => copy(selected.content, `${selected.label} 配置已复制`)}>复制配置</Button>
-        </div>
-        <pre className="integration-code">{selected.content}</pre>
-      </section>
-
-      <aside className="integration-notes">
-        <section className="panel">
+      <div className="integration-layout">
+        <section className="panel endpoint-panel">
           <div className="section-head">
-            <div><h2>连接检查</h2><p>远程客户端所需参数</p></div>
-            <ShieldCheck size={18} />
+            <h2>MCP 端点</h2>
+            <IconButton label="复制 MCP URL" icon={Copy} onClick={() => copy(meta.mcpUrl, 'MCP URL 已复制')} />
           </div>
-          <dl className="connection-facts">
-            <div><dt>传输</dt><dd>Streamable HTTP</dd></div>
-            <div><dt>鉴权</dt><dd>Authorization: Bearer</dd></div>
-            <div><dt>会话</dt><dd>Stateless</dd></div>
-            <div><dt>端点</dt><dd><code>/mcp</code></dd></div>
-          </dl>
+          <div className="endpoint-url"><code>{meta.mcpUrl}</code></div>
+          <p className="panel-note">使用 Bearer Agent API Key 鉴权，密钥在「密钥」页创建。</p>
         </section>
-        <section className="panel env-callout">
-          <KeyRound size={18} />
-          <div><strong>RELAYDOCK_API_KEY</strong><p>在 Agents 页面创建，原始值只显示一次。</p></div>
+
+        <section className="panel integration-config">
+          <div className="client-tabs" role="tablist">
+            {Object.entries(snippets).map(([id, item]) => {
+              const Icon = item.icon;
+              return (
+                <button key={id} role="tab" aria-selected={client === id} className={client === id ? 'active' : ''} onClick={() => setClient(id as Client)}>
+                  <Icon size={15} /><span>{item.label}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="config-head">
+            <div><strong>{selected.label}</strong><code>{selected.path}</code></div>
+            <Button icon={Copy} onClick={() => copy(selected.content, `${selected.label} 配置已复制`)}>复制配置</Button>
+          </div>
+          <pre className="integration-code">{selected.content}</pre>
         </section>
-      </aside>
-    </div>
+
+        <aside className="integration-notes">
+          <section className="panel">
+            <div className="section-head"><h2>连接检查</h2></div>
+            <dl className="connection-facts">
+              <div><dt>传输</dt><dd>Streamable HTTP</dd></div>
+              <div><dt>鉴权</dt><dd>Authorization: Bearer</dd></div>
+              <div><dt>会话</dt><dd>Stateless</dd></div>
+              <div><dt>端点</dt><dd><code>/mcp</code></dd></div>
+            </dl>
+          </section>
+          <section className="panel env-callout">
+            <KeyRound size={17} />
+            <div><strong>RELAYDOCK_API_KEY</strong><p>在「密钥」页创建，原始值只显示一次。</p></div>
+          </section>
+        </aside>
+      </div>
+    </>
   );
 }
-

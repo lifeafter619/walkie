@@ -3,22 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#faf7f2" />
+    <meta name="theme-color" content="#fafafa" />
     <meta name="description" content="RelayDock notification control plane for AI agents" />
     <title>RelayDock</title>
-    <script>try{
-      var r=document.documentElement,s=localStorage.getItem('rd-theme');
-      if(s==='dark'||s==='light')r.setAttribute('data-theme',s);
-      var la=localStorage.getItem('rd-layout');
-      if(la==='sidebar'||la==='top')r.setAttribute('data-layout',la);
-      var ac=localStorage.getItem('rd-accent');
-      function pl(h){h=h.replace('#','');if(h.length===3)h=h.split('').map(function(c){return c+c}).join('');var n=parseInt(h,16)||0;return {r:(n>>16)&255,g:(n>>8)&255,b:n&255};}
-      function cl(c){var s=c/255;return s<=0.03928?s/12.92:Math.pow((s+0.055)/1.055,2.4);}
-      function lum(h){var c=pl(h);return 0.2126*cl(c.r)+0.7152*cl(c.g)+0.0722*cl(c.b);}
-      function ink(h){var a=lum(h),w=1,d=lum('#2c2823');var cr=function(x,y){var hi=x>=y?x:y,lo=x>=y?y:x;return (hi+0.05)/(lo+0.05);};return cr(a,w)>=cr(a,d)?'#ffffff':'#2c2823';}
-      function dk(h,f){var c=pl(h);return '#'+[c.r,c.g,c.b].map(function(v){var x=Math.round(v*f).toString(16);return x.length<2?'0'+x:x;}).join('');}
-      if(ac){var c=pl(ac);r.style.setProperty('--accent',ac);r.style.setProperty('--accent-ink',ink(ac));r.style.setProperty('--accent-soft','rgba('+c.r+','+c.g+','+c.b+',0.14)');r.style.setProperty('--accent-press',dk(ac,0.82));}
-    }catch(e){}</script>
+    <script>try{var s=localStorage.getItem('rd-theme');if(s==='dark'||s==='light')document.documentElement.setAttribute('data-theme',s);}catch(e){}</script>
   </head>
   <body>
     <div id="root"></div>

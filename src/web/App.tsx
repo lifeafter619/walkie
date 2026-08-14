@@ -1,23 +1,21 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  Activity, BellRing, Bot, Code2, KeyRound, LayoutDashboard, LoaderCircle, Menu,
+  Activity, BellRing, Code2, KeyRound, LayoutDashboard, LoaderCircle, Menu,
   MessageSquareText, RefreshCw, Route as RouteIcon, ServerCog, X
 } from 'lucide-react';
-import type { ApiKey, Channel, DashboardStats, Delivery, Destination, ProviderDefinition, Route, Severity } from '../shared/types';
+import type { ApiKey, Channel, DashboardStats, Delivery, Destination, ProviderDefinition, Route } from '../shared/types';
 import { api, getToken } from './api';
-import { AppearanceControls, IconButton, ThemeToggle, Toasts, type Notify, type Toast } from './components/ui';
-import { useAppearance } from './appearance';
+import { IconButton, ThemeToggle, Toasts, type Notify, type Toast } from './components/ui';
 import { Login } from './components/Login';
 import { Overview } from './components/Overview';
 import { Channels } from './components/Channels';
 import { Routes } from './components/Routes';
 import { Deliveries } from './components/Deliveries';
-import { Agents } from './components/Agents';
+import { Keys } from './components/Keys';
 import { Integrations } from './components/Integrations';
-import { Credentials } from './components/Credentials';
 import { SystemPage } from './components/SystemPage';
 
-type Page = 'overview' | 'channels' | 'routes' | 'deliveries' | 'agents' | 'integrations' | 'credentials' | 'system';
+type Page = 'overview' | 'channels' | 'routes' | 'deliveries' | 'keys' | 'integrations' | 'system';
 type Meta = Awaited<ReturnType<typeof api.meta>>;
 
 const nav: Array<{ id: Page; label: string; icon: typeof BellRing }> = [
@@ -25,22 +23,12 @@ const nav: Array<{ id: Page; label: string; icon: typeof BellRing }> = [
   { id: 'channels', label: '频道', icon: MessageSquareText },
   { id: 'routes', label: '路由', icon: RouteIcon },
   { id: 'deliveries', label: '投递', icon: Activity },
-  { id: 'agents', label: 'Agents', icon: Bot },
+  { id: 'keys', label: '密钥', icon: KeyRound },
   { id: 'integrations', label: '接入', icon: Code2 },
-  { id: 'credentials', label: '凭据', icon: KeyRound },
   { id: 'system', label: '系统', icon: ServerCog }
 ];
 
-const pageTitles: Record<Page, [string, string]> = {
-  overview: ['运行概览', '通知流量与服务健康状态'],
-  channels: ['推送频道', '配置并验证外部通知服务'],
-  routes: ['通知路由', '编排并发广播与故障转移'],
-  deliveries: ['投递记录', '查看消息状态和每次渠道尝试'],
-  agents: ['Agent 授权', '管理 MCP 与 REST API 访问密钥'],
-  integrations: ['MCP 接入', '客户端配置与远程 HTTP 端点'],
-  credentials: ['凭据管理', '轮换管理令牌与主密钥，查看 Agent 密钥'],
-  system: ['系统状态', '实例端点、支持能力和安全配置']
-};
+const mobileNav: Page[] = ['overview', 'channels', 'deliveries', 'keys', 'integrations'];
 
 export default function App() {
   const [meta, setMeta] = useState<Meta>();
@@ -57,8 +45,6 @@ export default function App() {
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [destinations, setDestinations] = useState<Destination[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
-
-  const { layout } = useAppearance();
 
   const notify: Notify = useCallback((kind, message) => {
     const id = Date.now() + Math.random();
@@ -108,7 +94,7 @@ export default function App() {
   }, [notify]);
 
   if (loading || !meta) {
-    return <div className="boot"><div className="brand-mark"><BellRing size={22} /></div><LoaderCircle className="spin" /></div>;
+    return <div className="boot"><LoaderCircle className="spin" size={20} /></div>;
   }
   if (!authenticated) return <Login meta={meta} onSuccess={loadAll} />;
 
@@ -120,55 +106,45 @@ export default function App() {
     ? <Routes routes={routes} channels={channels} refresh={refresh} notify={notify} />
     : page === 'deliveries'
     ? <Deliveries deliveries={deliveries} refresh={refreshDeliveries} notify={notify} />
-    : page === 'agents'
-    ? <Agents keys={keys} destinations={destinations} refresh={refresh} notify={notify} />
+    : page === 'keys'
+    ? <Keys keys={keys} destinations={destinations} refresh={refresh} notify={notify} />
     : page === 'integrations'
     ? <Integrations meta={meta} notify={notify} />
-    : page === 'credentials'
-    ? <Credentials notify={notify} refresh={refresh} />
     : <SystemPage meta={meta} providers={providers} />;
 
   return (
     <div className="app-shell">
       <aside className={menu ? 'open' : ''}>
         <div className="brand">
-          <span className="brand-mark"><BellRing size={20} /></span>
-          <div><strong>RelayDock</strong><small>通知控制台</small></div>
+          <span className="brand-mark"><BellRing size={14} /></span>
+          <strong>RelayDock</strong>
           <IconButton label="关闭菜单" icon={X} onClick={() => setMenu(false)} />
         </div>
         <nav>
           {nav.map(({ id, label, icon: Icon }) => (
             <button key={id} className={page === id ? 'active' : ''} onClick={() => { setPage(id); setMenu(false); }}>
-              <Icon size={18} /><span>{label}</span>
+              <Icon size={16} /><span>{label}</span>
               {id === 'deliveries' && stats?.failed24h ? <i>{stats.failed24h}</i> : null}
             </button>
           ))}
         </nav>
-        <AppearanceControls />
+        <div className="side-footer">
+          <ThemeToggle />
+          <IconButton label="刷新数据" icon={RefreshCw} onClick={refresh} />
+        </div>
       </aside>
       {menu && <div className="nav-backdrop" onClick={() => setMenu(false)} />}
 
       <main className="workspace">
-        <header className="topbar">
+        <header className="mobile-top">
           <IconButton label="打开菜单" icon={Menu} onClick={() => setMenu(true)} />
-          <div><h1>{pageTitles[page][0]}</h1><p>{pageTitles[page][1]}</p></div>
-          <div className="top-actions">
-            <nav className="top-nav">
-              {nav.map(({ id, label, icon: Icon }) => (
-                <button key={id} className={page === id ? 'active' : ''} onClick={() => setPage(id)}>
-                  <span>{label}</span>
-                </button>
-              ))}
-            </nav>
-            <ThemeToggle />
-            <IconButton label="刷新数据" icon={RefreshCw} onClick={refresh} />
-          </div>
+          <span className="mobile-brand">RelayDock</span>
         </header>
         <div className="page-content">{content}</div>
       </main>
 
       <nav className="mobile-nav">
-        {nav.filter(({ id }) => ['overview', 'channels', 'deliveries', 'agents', 'integrations', 'credentials'].includes(id)).map(({ id, label, icon: Icon }) => (
+        {nav.filter(({ id }) => mobileNav.includes(id)).map(({ id, label, icon: Icon }) => (
           <button key={id} className={page === id ? 'active' : ''} onClick={() => setPage(id)}>
             <Icon size={19} /><span>{label}</span>
           </button>
@@ -179,5 +155,3 @@ export default function App() {
     </div>
   );
 }
-
-export type { Severity };

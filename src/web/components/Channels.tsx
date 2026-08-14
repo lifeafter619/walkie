@@ -226,10 +226,15 @@ export function Channels({
 
   return (
     <>
+      <header className="page-head">
+        <h1>频道</h1>
+        <Button variant="primary" icon={Plus} onClick={() => setEditing('new')}>添加频道</Button>
+      </header>
+
       <div className="toolbar">
         <div className="filters">
           <div className="search">
-            <Search size={16} />
+            <Search size={15} />
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索频道" />
           </div>
           <select value={category} onChange={(event) => setCategory(event.target.value)} aria-label="渠道分类">
@@ -241,7 +246,6 @@ export function Channels({
             <option value="universal">通用</option>
           </select>
         </div>
-        <Button variant="primary" icon={Plus} onClick={() => setEditing('new')}>添加频道</Button>
       </div>
 
       <section className="panel">

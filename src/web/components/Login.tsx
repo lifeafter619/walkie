@@ -30,10 +30,9 @@ export function Login({ meta, onSuccess }: { meta: Meta; onSuccess: () => void }
   return (
     <main className="login-shell">
       <section className="login-panel">
-        <div className="brand-mark large"><BellRing size={25} /></div>
-        <p className="eyebrow">RelayDock 管理控制台</p>
-        <h1>连接通知控制台</h1>
-        <p className="login-copy">输入该实例的管理令牌。</p>
+        <div className="brand-mark"><BellRing size={14} /></div>
+        <h1>RelayDock</h1>
+        <p className="login-copy">输入管理令牌进入控制台。</p>
         <form onSubmit={submit}>
           <label>
             管理令牌

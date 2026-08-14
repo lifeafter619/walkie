@@ -78,10 +78,15 @@ export function Deliveries({
 
   return (
     <>
+      <header className="page-head">
+        <h1>投递</h1>
+        <IconButton label="刷新" icon={RefreshCw} onClick={() => refresh(status)} />
+      </header>
+
       <div className="toolbar">
         <div className="filters">
           <div className="search">
-            <Search size={16} />
+            <Search size={15} />
             <input placeholder="搜索标题或 ID" value={query} onChange={(event) => setQuery(event.target.value)} />
           </div>
           <select value={status} onChange={(event) => changeStatus(event.target.value)} aria-label="投递状态">
@@ -93,7 +98,6 @@ export function Deliveries({
             <option value="failed">失败</option>
           </select>
         </div>
-        <IconButton label="刷新" icon={RefreshCw} onClick={() => refresh(status)} />
       </div>
 
       <section className="panel">
@@ -111,7 +115,7 @@ export function Deliveries({
                   </td>
                   <td>{item.targetName ?? item.targetId.slice(0, 8)}</td>
                   <td><span className={`severity severity-${item.severity}`}>{SEVERITY_LABEL[item.severity]}</span></td>
-                  <td><code>{item.source === 'admin' ? '控制台' : 'Agent'}</code></td>
+                  <td>{item.source === 'admin' ? '控制台' : 'Agent'}</td>
                   <td><Badge status={item.status} /></td>
                   <td>{formatDate(item.createdAt)}</td>
                   <td><ChevronRight size={16} /></td>

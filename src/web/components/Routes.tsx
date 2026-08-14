@@ -143,19 +143,18 @@ export function Routes({
 
   return (
     <>
-      <div className="toolbar">
-        <div className="toolbar-copy">
-          <strong>{routes.length} 条路由</strong>
-          <span>一个稳定标识符可映射多个推送频道</span>
+      <header className="page-head">
+        <div>
+          <h1>路由</h1>
+          <p className="page-sub">{routes.length} 条路由 · 一个稳定标识符可映射多个推送频道</p>
         </div>
         <Button variant="primary" icon={Plus} onClick={() => setEditing('new')} disabled={!channels.length}>新建路由</Button>
-      </div>
+      </header>
 
       {routes.length ? (
         <div className="route-list">
           {routes.map((route) => (
             <section className="route-row" key={route.id}>
-              <div className={`route-strategy ${route.strategy}`}><RouteIcon size={20} /></div>
               <div className="route-identity"><h3>{route.name}</h3><code>{route.slug}</code></div>
               <div className="route-flow">
                 <span>{route.strategy === 'fanout' ? '并发广播' : '故障转移'}</span>

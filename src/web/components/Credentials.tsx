@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { AlertTriangle, Check, Copy, KeyRound, LoaderCircle, RefreshCw, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Check, Copy, LoaderCircle, RefreshCw, ShieldCheck } from 'lucide-react';
 import type { CredentialStatus } from '../../shared/types';
 import { api } from '../api';
 import { Button, IconButton, Modal, type Notify, formatDate } from './ui';
 
 /* ────────────────────────────────────────────────────────────
- * 凭据管理：管理令牌轮换、主密钥(KEK/DEK)轮换。
+ * 实例凭据区块（「密钥」页下半）：管理令牌轮换、主密钥(KEK/DEK)轮换。
  *
  * 关键约束（诚实声明，写入 UI）：
  * - env ADMIN_TOKEN / MASTER_KEY 是不可变环境密钥，面板无法改写它们本身；
@@ -14,7 +14,7 @@ import { Button, IconButton, Modal, type Notify, formatDate } from './ui';
  *   env MASTER_KEY(KEK) 不变，仍需 wrangler secret 才能改根密钥。
  * ──────────────────────────────────────────────────────────── */
 
-export function Credentials({ notify, refresh }: { notify: Notify; refresh: () => void }) {
+export function CredentialPanels({ notify, refresh }: { notify: Notify; refresh: () => void }) {
   const [status, setStatus] = useState<CredentialStatus>();
   const [busy, setBusy] = useState(false);
   const [customToken, setCustomToken] = useState('');
@@ -62,15 +62,13 @@ export function Credentials({ notify, refresh }: { notify: Notify; refresh: () =
     notify('success', '已复制');
   };
 
-  if (!status) return <div className="boot"><LoaderCircle className="spin" /></div>;
+  if (!status) return <div className="modal-loading"><LoaderCircle className="spin" /></div>;
 
   return (
     <>
       <section className="panel">
-        <div className="section-head">
-          <div><h2>管理令牌</h2><p>用于访问本控制台与所有 /api/admin 接口</p></div>
-          <KeyRound size={18} />
-        </div>
+        <div className="section-head"><h2>管理令牌</h2></div>
+        <p className="panel-note">用于访问本控制台与所有 <code>/api/admin</code> 接口。</p>
         <dl className="cred-meta">
           <div>
             <dt>当前来源</dt>
@@ -113,10 +111,7 @@ export function Credentials({ notify, refresh }: { notify: Notify; refresh: () =
       </section>
 
       <section className="panel">
-        <div className="section-head">
-          <div><h2>主密钥（数据加密密钥）</h2><p>加密频道凭据与 Agent 密钥的 DEK</p></div>
-          <ShieldCheck size={18} />
-        </div>
+        <div className="section-head"><h2>主密钥（数据加密密钥）</h2></div>
         <dl className="cred-meta">
           <div><dt>根密钥指纹(KEK)</dt><dd><code>sha256:{status.masterKey.kekFingerprint}</code></dd></div>
           <div><dt>DEK 版本</dt><dd><code>v{status.masterKey.dekVersion}</code></dd></div>

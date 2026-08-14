@@ -3,9 +3,10 @@ import { AlertTriangle, Bot, Check, Copy, Eye, EyeOff, KeyRound, Plus, Power } f
 import type { ApiKey, Destination } from '../../shared/types';
 import { api } from '../api';
 import { Badge, Button, Empty, IconButton, Modal, Notify, formatDate } from './ui';
+import { CredentialPanels } from './Credentials';
 
 /* ────────────────────────────────────────────────────────────
- * Agent 授权：创建/吊销 API Key，权限与目的地白名单。
+ * 密钥页：Agent API Key（创建/查看/吊销）+ 实例凭据（管理令牌/主密钥）。
  * ──────────────────────────────────────────────────────────── */
 
 export function KeyForm({
@@ -112,7 +113,7 @@ export function KeyForm({
   );
 }
 
-export function Agents({
+export function Keys({
   keys, destinations, refresh, notify
 }: {
   keys: ApiKey[];
@@ -140,14 +141,14 @@ export function Agents({
   };
 
   return (
-    <>
-      <div className="toolbar">
-        <div className="toolbar-copy">
-          <strong>{keys.filter((key) => !key.revokedAt).length} 个有效密钥</strong>
-          <span>鉴权用哈希，明文以加密形式存储，可随时查看复制</span>
+    <div className="stack">
+      <header className="page-head">
+        <div>
+          <h1>密钥</h1>
+          <p className="page-sub">{keys.filter((key) => !key.revokedAt).length} 个有效 Agent 密钥 · 哈希鉴权，明文加密存储，可随时查看复制</p>
         </div>
         <Button variant="primary" icon={Plus} onClick={() => setCreating(true)}>创建密钥</Button>
-      </div>
+      </header>
 
       <section className="panel">
         <div className="table-wrap">
@@ -160,7 +161,7 @@ export function Agents({
                 <Fragment key={key.id}>
                   <tr className={key.revokedAt ? 'disabled-row' : ''}>
                     <td>
-                      <strong className="table-title with-icon"><Bot size={16} />{key.name}</strong>
+                      <strong className="table-title">{key.name}</strong>
                       <span className="muted-row">创建于 {formatDate(key.createdAt)}</span>
                     </td>
                     <td><code>rdk_{key.prefix}_••••</code></td>
@@ -203,7 +204,9 @@ export function Agents({
         </div>
       </section>
 
+      <CredentialPanels notify={notify} refresh={refresh} />
+
       {creating && <KeyForm destinations={destinations} close={() => setCreating(false)} saved={refresh} notify={notify} />}
-    </>
+    </div>
   );
 }

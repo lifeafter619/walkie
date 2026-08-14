@@ -61,7 +61,7 @@ const BRAND_HEX: Record<ProviderId, string> = {
 };
 
 export function providerBrand(provider: ProviderId): { hex: string } {
-  return { hex: BRAND_HEX[provider] ?? '6b6353' };
+  return { hex: BRAND_HEX[provider] ?? 'a1a1aa' };
 }
 
 export function ProviderIcon({ provider, name, size = 22 }: { provider: ProviderId; name?: string; size?: number }) {
