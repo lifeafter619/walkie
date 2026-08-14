@@ -37,7 +37,7 @@ export function IconButton({
   );
 }
 
-export { ThemeToggle } from './AppearanceControls';
+export { ThemeToggle, AppearanceControls } from './AppearanceControls';
 
 export function Badge({ status }: { status: string }) {
   const Icon: LucideIcon =

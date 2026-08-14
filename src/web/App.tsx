@@ -5,7 +5,8 @@ import {
 } from 'lucide-react';
 import type { ApiKey, Channel, DashboardStats, Delivery, Destination, ProviderDefinition, Route, Severity } from '../shared/types';
 import { api, getToken } from './api';
-import { IconButton, ThemeToggle, Toasts, type Notify, type Toast } from './components/ui';
+import { AppearanceControls, IconButton, ThemeToggle, Toasts, type Notify, type Toast } from './components/ui';
+import { useAppearance } from './appearance';
 import { Login } from './components/Login';
 import { Overview } from './components/Overview';
 import { Channels } from './components/Channels';
@@ -53,6 +54,8 @@ export default function App() {
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [destinations, setDestinations] = useState<Destination[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
+
+  const { layout } = useAppearance();
 
   const notify: Notify = useCallback((kind, message) => {
     const id = Date.now() + Math.random();
@@ -125,7 +128,7 @@ export default function App() {
       <aside className={menu ? 'open' : ''}>
         <div className="brand">
           <span className="brand-mark"><BellRing size={20} /></span>
-          <div><strong>RelayDock</strong><small>NOTIFICATION FABRIC</small></div>
+          <div><strong>RelayDock</strong><small>通知控制台</small></div>
           <IconButton label="关闭菜单" icon={X} onClick={() => setMenu(false)} />
         </div>
         <nav>
@@ -136,6 +139,7 @@ export default function App() {
             </button>
           ))}
         </nav>
+        <AppearanceControls />
       </aside>
       {menu && <div className="nav-backdrop" onClick={() => setMenu(false)} />}
 
@@ -144,6 +148,13 @@ export default function App() {
           <IconButton label="打开菜单" icon={Menu} onClick={() => setMenu(true)} />
           <div><h1>{pageTitles[page][0]}</h1><p>{pageTitles[page][1]}</p></div>
           <div className="top-actions">
+            <nav className="top-nav">
+              {nav.map(({ id, label, icon: Icon }) => (
+                <button key={id} className={page === id ? 'active' : ''} onClick={() => setPage(id)}>
+                  <span>{label}</span>
+                </button>
+              ))}
+            </nav>
             <ThemeToggle />
             <IconButton label="刷新数据" icon={RefreshCw} onClick={refresh} />
           </div>
