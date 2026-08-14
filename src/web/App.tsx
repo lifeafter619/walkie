@@ -4,7 +4,7 @@ import {
   MessageSquareText, RefreshCw, Route as RouteIcon, ServerCog, X
 } from 'lucide-react';
 import type { ApiKey, Channel, DashboardStats, Delivery, Destination, ProviderDefinition, Route } from '../shared/types';
-import { api, getToken } from './api';
+import { api, ApiError, getToken } from './api';
 import { IconButton, ThemeToggle, Toasts, type Notify, type Toast } from './components/ui';
 import { Login } from './components/Login';
 import { Overview } from './components/Overview';
@@ -67,7 +67,7 @@ export default function App() {
       setProviders(providerData.providers);
       setAuthenticated(true);
     } catch (error) {
-      if ((error instanceof Error ? error.message : '').includes('令牌')) setAuthenticated(false);
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) setAuthenticated(false);
       else notify('error', error instanceof Error ? error.message : '加载失败');
     } finally {
       setLoading(false);

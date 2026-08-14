@@ -4,7 +4,7 @@ export class DurableRelayDatabase implements RelayDatabase {
   constructor(private readonly storage: DurableObjectStorage) {}
 
   close(): void {}
-  async exec(sql: string): Promise<void> { this.storage.sql.exec(sql); }
+  async exec(sql: string): Promise<void> { this.storage.sql.exec(sql).toArray(); }
   async all(sql: string, params: unknown[] = []) {
     return this.storage.sql.exec(sql, ...params).toArray() as Record<string, unknown>[];
   }

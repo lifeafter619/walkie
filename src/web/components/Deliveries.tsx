@@ -13,6 +13,7 @@ export function DeliveryDetail({ id, close, notify }: { id: string; close: () =>
   const [delivery, setDelivery] = useState<Delivery>();
 
   useEffect(() => {
+    setDelivery(undefined);
     api.delivery(id).then(setDelivery).catch((error: Error) => notify('error', error.message));
   }, [id, notify]);
 

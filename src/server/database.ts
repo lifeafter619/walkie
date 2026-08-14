@@ -56,6 +56,8 @@ export class RelayRepository {
   readonly db: RelayDatabase;
   /** 数据加密密钥(DEK)：加密频道凭据与 Agent 可逆密文。构造时为空，init() 后可用。 */
   private dek?: Buffer;
+  /** 写锁：DEK 轮换期间串行化所有会读写加密字段的操作，防止快照与提交之间的并发写入用旧 DEK 加密 */
+  private writeChain: Promise<void> = Promise.resolve();
 
   constructor(database: RelayDatabase, private readonly masterKey: Buffer) {
     this.db = database;
@@ -64,6 +66,15 @@ export class RelayRepository {
   /** 当前应使用的加密密钥：优先 DEK；DEK 未自举时退回 KEK（兼容迁移失败重试场景） */
   private encryptionKey(): Buffer {
     return this.dek ?? this.masterKey;
+  }
+
+  /** 串行化会读写加密字段的操作（createChannel/createKey/rotateMasterKey/init DEK自举），
+   *  防止 DEK 轮换的快照-提交间隙内并发写入用旧 DEK 加密导致数据不可解密。 */
+  private withWriteLock<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.writeChain.then(task, task);
+    // 失败不阻断后续锁；成功则接续
+    this.writeChain = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   close(): void | Promise<void> {
@@ -180,28 +191,32 @@ export class RelayRepository {
   }
 
   async createChannel(input: { name: string; slug: string; provider: ProviderId; enabled?: boolean; config: Record<string, unknown>; rateLimitPerMin?: number | null; quietHours?: string | null }): Promise<Channel> {
-    const id = randomUUID();
-    const timestamp = now();
-    await this.db.run(`INSERT INTO channels
-      (id,name,slug,provider,config_encrypted,enabled,rate_limit_per_min,quiet_hours,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?)`, [id, input.name, input.slug, input.provider, encryptJson(input.config, this.encryptionKey()), input.enabled === false ? 0 : 1, input.rateLimitPerMin || null, input.quietHours || null, timestamp, timestamp]);
-    await this.audit('admin', 'channel.create', 'channel', id, { provider: input.provider });
-    return (await this.getChannel(id))!;
+    return this.withWriteLock(async () => {
+      const id = randomUUID();
+      const timestamp = now();
+      await this.db.run(`INSERT INTO channels
+        (id,name,slug,provider,config_encrypted,enabled,rate_limit_per_min,quiet_hours,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`, [id, input.name, input.slug, input.provider, encryptJson(input.config, this.encryptionKey()), input.enabled === false ? 0 : 1, input.rateLimitPerMin || null, input.quietHours || null, timestamp, timestamp]);
+      await this.audit('admin', 'channel.create', 'channel', id, { provider: input.provider });
+      return (await this.getChannel(id))!;
+    });
   }
 
   async updateChannel(id: string, input: Partial<{ name: string; slug: string; provider: ProviderId; enabled: boolean; config: Record<string, unknown>; rateLimitPerMin: number | null; quietHours: string | null }>): Promise<Channel> {
-    const current = await this.getChannel(id);
-    if (!current) throw new Error('Channel not found');
-    const config = input.config ? { ...await this.getChannelConfig(id), ...input.config } : await this.getChannelConfig(id);
-    await this.db.run(`UPDATE channels SET name=?,slug=?,provider=?,enabled=?,config_encrypted=?,rate_limit_per_min=?,quiet_hours=?,updated_at=? WHERE id=?`, [
-      input.name ?? current.name, input.slug ?? current.slug, input.provider ?? current.provider,
-      input.enabled ?? current.enabled ? 1 : 0, encryptJson(config, this.encryptionKey()),
-      input.rateLimitPerMin !== undefined ? input.rateLimitPerMin || null : current.rateLimitPerMin ?? null,
-      input.quietHours !== undefined ? input.quietHours || null : current.quietHours ?? null,
-      now(), id
-    ]);
-    await this.audit('admin', 'channel.update', 'channel', id, {});
-    return (await this.getChannel(id))!;
+    return this.withWriteLock(async () => {
+      const current = await this.getChannel(id);
+      if (!current) throw new Error('Channel not found');
+      const config = input.config ? { ...await this.getChannelConfig(id), ...input.config } : await this.getChannelConfig(id);
+      await this.db.run(`UPDATE channels SET name=?,slug=?,provider=?,enabled=?,config_encrypted=?,rate_limit_per_min=?,quiet_hours=?,updated_at=? WHERE id=?`, [
+        input.name ?? current.name, input.slug ?? current.slug, input.provider ?? current.provider,
+        input.enabled ?? current.enabled ? 1 : 0, encryptJson(config, this.encryptionKey()),
+        input.rateLimitPerMin !== undefined ? input.rateLimitPerMin || null : current.rateLimitPerMin ?? null,
+        input.quietHours !== undefined ? input.quietHours || null : current.quietHours ?? null,
+        now(), id
+      ]);
+      await this.audit('admin', 'channel.update', 'channel', id, {});
+      return (await this.getChannel(id))!;
+    });
   }
 
   async setChannelTest(id: string, success: boolean, error?: string): Promise<void> {
@@ -271,22 +286,24 @@ export class RelayRepository {
   }
 
   async createKey(input: { name: string; scopes?: string[]; destinationIds?: string[] }): Promise<{ apiKey: ApiKey; secret: string }> {
-    const id = randomUUID();
-    const timestamp = now();
-    // 前缀仅 32 位，UNIQUE 碰撞时重新生成
-    for (let attempt = 0; ; attempt += 1) {
-      const generated = createApiSecret();
-      const secretEncrypted = encryptJson({ s: generated.secret }, this.encryptionKey());
-      try {
-        await this.db.run('INSERT INTO api_keys (id,name,prefix,secret_hash,secret_encrypted,scopes,destination_ids,created_at) VALUES (?,?,?,?,?,?,?,?)',
-          [id, input.name, generated.prefix, generated.hash, secretEncrypted, JSON.stringify(input.scopes ?? ['notifications:send', 'deliveries:read']), JSON.stringify(input.destinationIds ?? []), timestamp]);
-        await this.audit('admin', 'api_key.create', 'api_key', id, { prefix: generated.prefix });
-        return { apiKey: (await this.getKey(id))!, secret: generated.secret };
-      } catch (error) {
-        if (attempt < 3 && error instanceof Error && /UNIQUE constraint failed: api_keys\.prefix/.test(error.message)) continue;
-        throw error;
+    return this.withWriteLock(async () => {
+      const id = randomUUID();
+      const timestamp = now();
+      // 前缀仅 32 位，UNIQUE 碰撞时重新生成
+      for (let attempt = 0; ; attempt += 1) {
+        const generated = createApiSecret();
+        const secretEncrypted = encryptJson({ s: generated.secret }, this.encryptionKey());
+        try {
+          await this.db.run('INSERT INTO api_keys (id,name,prefix,secret_hash,secret_encrypted,scopes,destination_ids,created_at) VALUES (?,?,?,?,?,?,?,?)',
+            [id, input.name, generated.prefix, generated.hash, secretEncrypted, JSON.stringify(input.scopes ?? ['notifications:send', 'deliveries:read']), JSON.stringify(input.destinationIds ?? []), timestamp]);
+          await this.audit('admin', 'api_key.create', 'api_key', id, { prefix: generated.prefix });
+          return { apiKey: (await this.getKey(id))!, secret: generated.secret };
+        } catch (error) {
+          if (attempt < 3 && error instanceof Error && /UNIQUE constraint failed: api_keys\.prefix/.test(error.message)) continue;
+          throw error;
+        }
       }
-    }
+    });
   }
 
   private keyFrom(row: Row): ApiKey {
@@ -411,7 +428,26 @@ export class RelayRepository {
     return rows.map((row) => this.deliveryFrom(row));
   }
 
-  async claimDueAttempts(limit: number): Promise<DeliveryAttempt[]> {
+  /**
+   * 回收因 worker 崩溃/超时而滞留在 'sending' 状态的尝试。
+   * 超过阈值（5分钟）未完结的 sending 视为滞留：尝试次数未达上限则退回 pending 等待重试，
+   * 否则直接失败，避免长期阻塞 fallback 链。
+   */
+  private async reclaimStuckSending(maxAttempts = 4): Promise<void> {
+    const cutoff = new Date(Date.now() - 5 * 60_000).toISOString();
+    const stuck = await this.db.all("SELECT id,delivery_id,attempt_count FROM attempts WHERE status='sending' AND updated_at<?", [cutoff]);
+    if (stuck.length === 0) return;
+    const ts = now();
+    for (const row of stuck) {
+      const retryable = Number(row.attempt_count) < maxAttempts;
+      await this.db.run("UPDATE attempts SET status=?,next_attempt_at=?,updated_at=? WHERE id=? AND status='sending'",
+        [retryable ? 'pending' : 'failed', retryable ? ts : null, ts, String(row.id)]);
+      await this.refreshDeliveryStatus(String(row.delivery_id));
+    }
+  }
+
+  async claimDueAttempts(limit: number, maxAttempts = 4): Promise<DeliveryAttempt[]> {
+    await this.reclaimStuckSending(maxAttempts);
     const rows = await this.db.all(`SELECT a.*,c.name channel_name,c.provider provider FROM attempts a
       JOIN channels c ON c.id=a.channel_id JOIN deliveries d ON d.id=a.delivery_id
       LEFT JOIN routes r ON d.target_type='route' AND r.id=d.target_id
@@ -501,9 +537,12 @@ export class RelayRepository {
     return rows.map((row) => this.conversationFrom(row));
   }
 
-  /** 限流/静默推迟：不消耗尝试次数，回到待发送状态 */
-  async deferAttempt(id: string, until: string): Promise<void> {
-    await this.db.run(`UPDATE attempts SET status='pending',attempt_count=MAX(attempt_count-1,0),next_attempt_at=?,updated_at=? WHERE id=?`, [until, now(), id]);
+  /** 限流/静默推迟：回到待发送状态。
+   *  consumeAttempt=false（静默期）：不消耗尝试次数（attempt_count 减回 claimDueAttempts 的 +1）。
+   *  consumeAttempt=true（限流）：保留 attempt_count 增长，避免持续限流导致无限 defer 循环。 */
+  async deferAttempt(id: string, until: string, consumeAttempt = false): Promise<void> {
+    const countExpr = consumeAttempt ? 'attempt_count' : 'MAX(attempt_count-1,0)';
+    await this.db.run(`UPDATE attempts SET status='pending',attempt_count=${countExpr},next_attempt_at=?,updated_at=? WHERE id=?`, [until, now(), id]);
   }
 
   async completeAttempt(id: string, result: { success: boolean; responseCode?: number; error?: string; retryAt?: string }): Promise<void> {
@@ -597,32 +636,34 @@ export class RelayRepository {
    * 用旧 DEK 解、新 DEK2 加，单事务原子写回。env MASTER_KEY(KEK) 不变。
    */
   async rotateMasterKey(): Promise<{ version: number; rotatedAt: string }> {
-    if (!this.dek) throw new Error('DEK 尚未初始化');
-    const oldDek = this.dek;
-    const newDek = generateDek();
-    const timestamp = now();
-    const channels = await this.db.all('SELECT id, config_encrypted FROM channels');
-    const keys = await this.db.all('SELECT id, secret_encrypted FROM api_keys WHERE secret_encrypted IS NOT NULL');
-    const reencryptChannels = channels.map((row) => {
-      const config = decryptJson(String(row.config_encrypted), oldDek);
-      return { sql: 'UPDATE channels SET config_encrypted=? WHERE id=?', params: [encryptJson(config, newDek), String(row.id)] };
+    return this.withWriteLock(async () => {
+      if (!this.dek) throw new Error('DEK 尚未初始化');
+      const oldDek = this.dek;
+      const newDek = generateDek();
+      const timestamp = now();
+      const channels = await this.db.all('SELECT id, config_encrypted FROM channels');
+      const keys = await this.db.all('SELECT id, secret_encrypted FROM api_keys WHERE secret_encrypted IS NOT NULL');
+      const reencryptChannels = channels.map((row) => {
+        const config = decryptJson(String(row.config_encrypted), oldDek);
+        return { sql: 'UPDATE channels SET config_encrypted=? WHERE id=?', params: [encryptJson(config, newDek), String(row.id)] };
+      });
+      const reencryptKeys = keys.map((row) => {
+        const payload = decryptJson(String(row.secret_encrypted), oldDek);
+        return { sql: 'UPDATE api_keys SET secret_encrypted=? WHERE id=?', params: [encryptJson(payload, newDek), String(row.id)] };
+      });
+      const currentVersionRow = await this.db.get("SELECT value FROM settings WHERE key='dek_version'");
+      const nextVersion = (currentVersionRow ? Number(currentVersionRow.value) : 1) + 1;
+      await this.db.batch([
+        ...reencryptChannels,
+        ...reencryptKeys,
+        { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_wrapped',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [wrapDek(newDek, this.masterKey), timestamp] },
+        { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_version',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [String(nextVersion), timestamp] },
+        { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_rotated_at',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [timestamp, timestamp] }
+      ]);
+      this.dek = newDek;
+      await this.audit('admin', 'credential.master_key.rotate', 'credential', 'dek', { version: nextVersion });
+      return { version: nextVersion, rotatedAt: timestamp };
     });
-    const reencryptKeys = keys.map((row) => {
-      const payload = decryptJson(String(row.secret_encrypted), oldDek);
-      return { sql: 'UPDATE api_keys SET secret_encrypted=? WHERE id=?', params: [encryptJson(payload, newDek), String(row.id)] };
-    });
-    const currentVersionRow = await this.db.get("SELECT value FROM settings WHERE key='dek_version'");
-    const nextVersion = (currentVersionRow ? Number(currentVersionRow.value) : 1) + 1;
-    await this.db.batch([
-      ...reencryptChannels,
-      ...reencryptKeys,
-      { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_wrapped',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [wrapDek(newDek, this.masterKey), timestamp] },
-      { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_version',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [String(nextVersion), timestamp] },
-      { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_rotated_at',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [timestamp, timestamp] }
-    ]);
-    this.dek = newDek;
-    await this.audit('admin', 'credential.master_key.rotate', 'credential', 'dek', { version: nextVersion });
-    return { version: nextVersion, rotatedAt: timestamp };
   }
 
   async audit(actor: string, action: string, resourceType: string, resourceId: string | undefined, details: Record<string, unknown>): Promise<void> {

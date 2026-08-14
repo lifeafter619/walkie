@@ -58,8 +58,8 @@ export function createApp(deps: AppDependencies) {
       const provided = bearer(req) ?? req.header('x-admin-token');
       if (provided && safeSecretEqual(provided, rotated.hash)) return next();
     }
-    // 未配置任何管理令牌（本地开发）：放行，保持原 loopback 行为
-    if (!config.adminToken) return next();
+    // 未配置任何管理令牌（本地开发，仅 loopback）：放行，保持原行为
+    if (!config.adminToken && !rotated.hash) return next();
     res.status(401).json({ error: '需要管理令牌' });
   };
   const requireAgent = asyncRoute(async (req: Request, res: Response, next: NextFunction) => {

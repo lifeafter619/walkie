@@ -273,6 +273,7 @@ td code { color: var(--muted); }
 .cred-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; padding: 14px 16px; }
 .cred-form input { flex: 1 1 260px; }
 .cred-note { display: flex; align-items: flex-start; gap: 8px; padding: 0 16px 14px; color: var(--muted); font-size: 12px; line-height: 1.55; margin: 0; }
+.cred-note > span { min-width: 0; flex: 1; }
 .cred-note code { color: var(--ink-2); }
 .cred-note svg { flex-shrink: 0; margin-top: 2px; }
 

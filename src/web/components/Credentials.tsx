@@ -58,8 +58,12 @@ export function CredentialPanels({ notify, refresh }: { notify: Notify; refresh:
   };
 
   const copy = async (value: string) => {
-    await navigator.clipboard.writeText(value);
-    notify('success', '已复制');
+    try {
+      await navigator.clipboard.writeText(value);
+      notify('success', '已复制');
+    } catch {
+      notify('error', '复制失败，请手动选择文本');
+    }
   };
 
   if (!status) return <div className="modal-loading"><LoaderCircle className="spin" /></div>;
@@ -105,7 +109,7 @@ export function CredentialPanels({ notify, refresh }: { notify: Notify; refresh:
         {status.admin.envConfigured && (
           <p className="cred-note warning-text">
             <AlertTriangle size={14} />
-            环境变量中的管理令牌仍然有效。如需彻底弃用旧令牌，请在重新部署时移除 ADMIN_TOKEN。
+            <span>环境变量中的管理令牌仍然有效。如需彻底弃用旧令牌，请在重新部署时移除 ADMIN_TOKEN。</span>
           </p>
         )}
       </section>
@@ -123,8 +127,8 @@ export function CredentialPanels({ notify, refresh }: { notify: Notify; refresh:
           </Button>
         </div>
         <p className="cred-note">
-          轮换会生成新的 DEK 并用其重新加密所有频道凭据与 Agent 密钥（单次原子事务，耗时短暂）。
-          根密钥(KEK)即环境变量 MASTER_KEY 不变，仍需 <code>wrangler secret put MASTER_KEY</code> 才能更改。
+          <span>轮换会生成新的 DEK 并用其重新加密所有频道凭据与 Agent 密钥（单次原子事务，耗时短暂）。
+          根密钥(KEK)即环境变量 MASTER_KEY 不变，仍需 <code>wrangler secret put MASTER_KEY</code> 才能更改。</span>
         </p>
       </section>
 

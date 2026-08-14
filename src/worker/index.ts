@@ -74,7 +74,8 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
   }
 
   private async drainAndSchedule(): Promise<void> {
-    await this.worker.drainOnce();
+    try { await this.worker.drainOnce(); }
+    catch (error) { console.error(JSON.stringify({ event: 'drain.error', message: error instanceof Error ? error.message : String(error) })); }
     const due = await this.repository.nextDueAttempt();
     if (due) await this.ctx.storage.setAlarm(Math.max(Date.now() + 250, new Date(due).getTime()));
   }
@@ -104,7 +105,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       const path = url.pathname;
       if (path === '/health' && request.method === 'GET') return json({ status: 'ok', version: '0.2.0', runtime: 'cloudflare-workers', queue: 'alarm' });
       if (path === '/api/meta' && request.method === 'GET') return json({
-        name: 'RelayDock', version: '0.2.0', runtime: 'cloudflare-workers', adminAuthRequired: true,
+        name: 'RelayDock', version: '0.2.0', runtime: 'cloudflare-workers', adminAuthRequired: Boolean(this.env.ADMIN_TOKEN),
         publicUrl: url.origin, mcpEndpoint: '/mcp', mcpUrl: `${url.origin}/mcp`
       });
 
@@ -282,13 +283,17 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     if (!title && !desp) return json({ code: 40003, message: 'title 或 desp 至少填写一项', data: {} }, 400);
     const destination = String(params.destination ?? '').trim() || (apiKey.destinationIds.length === 1 ? apiKey.destinationIds[0] : '');
     if (!destination) return json({ code: 40002, message: '请用 destination 参数指定目的地，或为该 Key 只配置一个目的地', data: {} }, 400);
-    const delivery = await this.notifications.send({
-      destination, title: (title || desp).slice(0, 200), body: (desp || title).slice(0, 20_000), severity: 'info',
-      tags: typeof params.tags === 'string' ? params.tags.slice(0, 200) : undefined,
-      short: typeof params.short === 'string' ? params.short.slice(0, 200) : undefined,
-      metadata: { via: 'serverchan-compat' }
-    }, `agent:${apiKey.id}`, apiKey);
-    return json({ code: 0, message: '', data: { pushid: delivery.id, readkey: '', error: 'SUCCESS', errno: 0 } });
+    try {
+      const delivery = await this.notifications.send({
+        destination, title: (title || desp).slice(0, 200), body: (desp || title).slice(0, 20_000), severity: 'info',
+        tags: typeof params.tags === 'string' ? params.tags.slice(0, 200) : undefined,
+        short: typeof params.short === 'string' ? params.short.slice(0, 200) : undefined,
+        metadata: { via: 'serverchan-compat' }
+      }, `agent:${apiKey.id}`, apiKey);
+      return json({ code: 0, message: '', data: { pushid: delivery.id, readkey: '', error: 'SUCCESS', errno: 0 } });
+    } catch (error) {
+      return json({ code: 40004, message: error instanceof Error ? error.message : '发送失败', data: {} }, 400);
+    }
   }
 }
 

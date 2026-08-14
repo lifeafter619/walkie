@@ -58,8 +58,9 @@ export class DeliveryWorker {
   }
 
   private recordSend(channel: Channel): void {
-    if (this.config.maxSendsPerMin) this.sentAt.set('*', [...(this.sentAt.get('*') ?? []), Date.now()]);
-    if (channel.rateLimitPerMin) this.sentAt.set(channel.id, [...(this.sentAt.get(channel.id) ?? []), Date.now()]);
+    const cutoff = Date.now() - 60_000;
+    if (this.config.maxSendsPerMin) this.sentAt.set('*', [...(this.sentAt.get('*') ?? []).filter((t) => t > cutoff), Date.now()]);
+    if (channel.rateLimitPerMin) this.sentAt.set(channel.id, [...(this.sentAt.get(channel.id) ?? []).filter((t) => t > cutoff), Date.now()]);
   }
 
   /** 投递到达终态且带 callbackUrl 时，POST 最终结果（只发一次，SSRF 校验同 webhook） */
@@ -100,7 +101,7 @@ export class DeliveryWorker {
     if (this.running) return 0;
     this.running = true;
     try {
-      const attempts = await this.repository.claimDueAttempts(this.config.deliveryWorkers);
+      const attempts = await this.repository.claimDueAttempts(this.config.deliveryWorkers, this.config.maxDeliveryAttempts);
       await Promise.all(attempts.map(async (attempt) => {
         const delivery = await this.repository.getDelivery(attempt.deliveryId);
         const channel = await this.repository.getChannel(attempt.channelId);
@@ -115,7 +116,13 @@ export class DeliveryWorker {
             return;
           }
           if (this.throttled(channel)) {
-            await this.repository.deferAttempt(attempt.id, new Date(Date.now() + 15_000).toISOString());
+            // 持续被限流时消耗尝试次数（consumeAttempt=true），避免无限 defer 循环；达到上限则失败
+            if (attempt.attemptCount >= this.config.maxDeliveryAttempts) {
+              await this.repository.completeAttempt(attempt.id, { success: false, error: '频道持续限流，已达最大尝试次数' });
+              await this.notifyCallback(delivery.id);
+            } else {
+              await this.repository.deferAttempt(attempt.id, new Date(Date.now() + 15_000).toISOString(), true);
+            }
             return;
           }
           if (channel.rateLimitPerMin || this.config.maxSendsPerMin) this.recordSend(channel);

@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { RefreshCw, Send } from 'lucide-react';
 import type { DashboardStats, Delivery, Destination, Severity } from '../../shared/types';
 import { api } from '../api';
@@ -17,7 +17,7 @@ export function Overview({
   const [busy, setBusy] = useState(false);
 
   // 只在「已启用」的目的地里挑默认值，且避免重复赋值
-  const enabledDestinations = destinations.filter((d) => d.enabled);
+  const enabledDestinations = useMemo(() => destinations.filter((d) => d.enabled), [destinations]);
   useEffect(() => {
     if (!form.destination && enabledDestinations[0]) {
       setForm((old) => ({ ...old, destination: enabledDestinations[0].id }));

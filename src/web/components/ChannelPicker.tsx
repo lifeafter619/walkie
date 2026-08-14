@@ -119,7 +119,7 @@ export function ChannelPicker({
           ))}
           {!filtered.length && (
             <div className="picker-empty">
-              没有匹配的渠道。{query && <>试试调整搜索词“<code>{query}</code>”。</>}
+              <span>没有匹配的渠道。{query && <>试试调整搜索词“<code>{query}</code>”。</>}</span>
             </div>
           )}
         </div>

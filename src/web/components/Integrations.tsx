@@ -38,8 +38,12 @@ export function Integrations({ meta, notify }: { meta: Meta; notify: Notify }) {
 
   const selected = snippets[client];
   const copy = async (value: string, message: string) => {
-    await navigator.clipboard.writeText(value);
-    notify('success', message);
+    try {
+      await navigator.clipboard.writeText(value);
+      notify('success', message);
+    } catch {
+      notify('error', '复制失败，请手动选择文本');
+    }
   };
 
   return (

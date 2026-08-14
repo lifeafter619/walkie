@@ -4,6 +4,10 @@ const TOKEN_KEY = 'relaydock_admin_token';
 export const getToken = () => localStorage.getItem(TOKEN_KEY) ?? '';
 export const setToken = (token: string) => token ? localStorage.setItem(TOKEN_KEY, token) : localStorage.removeItem(TOKEN_KEY);
 
+export class ApiError extends Error {
+  constructor(public status: number, message: string) { super(message); }
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getToken();
   const response = await fetch(path, {
@@ -12,7 +16,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   });
   if (response.status === 204) return undefined as T;
   const payload = await response.json().catch(() => ({})) as { error?: string };
-  if (!response.ok) throw new Error(payload.error || `请求失败（${response.status}）`);
+  if (!response.ok) throw new ApiError(response.status, payload.error || `请求失败（${response.status}）`);
   return payload as T;
 }
 

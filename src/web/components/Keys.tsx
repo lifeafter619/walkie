@@ -39,8 +39,12 @@ export function KeyForm({
   };
 
   const copy = async () => {
-    await navigator.clipboard.writeText(secret);
-    notify('success', '密钥已复制');
+    try {
+      await navigator.clipboard.writeText(secret);
+      notify('success', '密钥已复制');
+    } catch {
+      notify('error', '复制失败，请手动选择文本');
+    }
   };
 
   const SCOPE_OPTIONS = [
@@ -136,8 +140,12 @@ export function Keys({
   };
 
   const copySecret = async (secret: string) => {
-    await navigator.clipboard.writeText(secret);
-    notify('success', '密钥已复制');
+    try {
+      await navigator.clipboard.writeText(secret);
+      notify('success', '密钥已复制');
+    } catch {
+      notify('error', '复制失败，请手动选择文本');
+    }
   };
 
   return (
