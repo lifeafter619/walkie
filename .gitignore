@@ -12,3 +12,4 @@ output/
 .claude/settings.local.json
 .dev.vars
 .wrangler/
+.superpowers/
