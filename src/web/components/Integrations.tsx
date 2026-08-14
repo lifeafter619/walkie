@@ -46,7 +46,7 @@ export function Integrations({ meta, notify }: { meta: Meta; notify: Notify }) {
     <div className="integration-layout">
       <section className="panel endpoint-hero">
         <div>
-          <span className="eyebrow">STREAMABLE HTTP</span>
+          <span className="eyebrow">远程 MCP 端点</span>
           <h2>{meta.mcpUrl}</h2>
           <p>Bearer Agent API Key</p>
         </div>
