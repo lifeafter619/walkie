@@ -287,7 +287,7 @@ export function Channels({
                     </td>
                     <td>
                       <div className="row-actions">
-                        <IconButton label="发送测试" icon={busyId === channel.id + 'test' ? LoaderCircle : TestTube2} onClick={() => act(channel, 'test')} />
+                        <IconButton label="发送测试" icon={busyId === channel.id + 'test' ? LoaderCircle : TestTube2} spin={busyId === channel.id + 'test'} disabled={busyId !== ''} onClick={() => act(channel, 'test')} />
                         <IconButton label="编辑" icon={Edit3} onClick={() => setEditing(channel)} />
                         <IconButton label="删除" icon={Trash2} onClick={() => act(channel, 'delete')} />
                       </div>

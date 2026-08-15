@@ -28,11 +28,11 @@ export function Button({
 }
 
 export function IconButton({
-  label, icon: Icon, ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: LucideIcon }) {
+  label, icon: Icon, spin, ...props
+}: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: LucideIcon; spin?: boolean }) {
   return (
     <button className="icon-button" title={label} aria-label={label} {...props}>
-      <Icon size={16} />
+      <Icon size={16} className={spin ? 'spin' : undefined} />
     </button>
   );
 }
@@ -52,7 +52,7 @@ export function ThemeToggle() {
 export function Badge({ status }: { status: string }) {
   const spinning = status === 'sending' || status === 'processing';
   const tone =
-    ['delivered', 'success'].includes(status) ? 'ok'
+    ['delivered', 'success', 'replied'].includes(status) ? 'ok'
     : status === 'failed' ? 'bad'
     : ['partial', 'retrying'].includes(status) ? 'warn'
     : spinning ? 'info' : 'idle';
@@ -67,7 +67,7 @@ export function Badge({ status }: { status: string }) {
 export const STATUS_LABEL: Record<string, string> = {
   queued: '排队中', processing: '发送中', delivered: '已送达', partial: '部分送达', failed: '失败',
   pending: '等待', sending: '发送中', retrying: '重试中', skipped: '已跳过',
-  success: '正常', revoked: '已吊销'
+  success: '正常', revoked: '已吊销', replied: '已回复', expired: '已过期'
 };
 
 export const SEVERITY_LABEL: Record<'info' | 'success' | 'warning' | 'critical', string> = {
@@ -120,12 +120,15 @@ export function Toasts({ toasts, dismiss }: { toasts: Toast[]; dismiss: (id: num
   );
 }
 
-export const formatDate = (date?: string) =>
-  date
-    ? new Intl.DateTimeFormat('zh-CN', {
-        month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false
-      }).format(new Date(date))
-    : '—';
+export const formatDate = (date?: string) => {
+  if (!date) return '—';
+  const parsed = new Date(date);
+  const sameYear = parsed.getFullYear() === new Date().getFullYear();
+  return new Intl.DateTimeFormat('zh-CN', {
+    ...(sameYear ? {} : { year: 'numeric' }),
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false
+  }).format(parsed);
+};
 
 export const slugify = (value: string) =>
   value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80);

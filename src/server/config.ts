@@ -50,7 +50,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   if (!process.env.TURSO_DATABASE_URL) mkdirSync(dataDir, { recursive: true });
   const adminToken = process.env.ADMIN_TOKEN || undefined;
   if (isProduction && !adminToken) throw new Error('ADMIN_TOKEN is required in production');
-  if (adminToken && adminToken.length < 24) throw new Error('ADMIN_TOKEN must contain at least 24 characters');
+  if (adminToken && adminToken.length < 8) throw new Error('ADMIN_TOKEN must contain at least 8 characters');
   if (!adminToken && !['127.0.0.1', 'localhost', '::1'].includes(host)) throw new Error('ADMIN_TOKEN is required when binding to a non-loopback host');
   if (!adminToken) console.warn('[relaydock] ADMIN_TOKEN 未设置，管理接口对本机开放且无鉴权（仅限本地开发；反向代理暴露端口前务必设置）');
 

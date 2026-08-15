@@ -21,6 +21,7 @@ export function KeyForm({
   const [scopes, setScopes] = useState(['notifications:send', 'deliveries:read']);
   const [restricted, setRestricted] = useState(false);
   const [ids, setIds] = useState<string[]>([]);
+  const [customSecret, setCustomSecret] = useState('');
   const [busy, setBusy] = useState(false);
   const [secret, setSecret] = useState('');
 
@@ -28,7 +29,10 @@ export function KeyForm({
     event.preventDefault();
     setBusy(true);
     try {
-      const result = await api.createKey({ name, scopes, destinationIds: restricted ? ids : [] });
+      const result = await api.createKey({
+        name, scopes, destinationIds: restricted ? ids : [],
+        ...(customSecret ? { secret: customSecret } : {})
+      });
       setSecret(result.secret);
       saved();
     } catch (error) {
@@ -77,6 +81,17 @@ export function KeyForm({
         <form className="modal-body" onSubmit={create}>
           <label>名称
             <input autoFocus value={name} onChange={(event) => setName(event.target.value)} required placeholder="CI 发布 Agent" />
+          </label>
+          <label>自定义密钥<span className="optional">可选，留空自动生成</span>
+            <input
+              value={customSecret}
+              onChange={(event) => setCustomSecret(event.target.value)}
+              placeholder="像密码一样随意设置，Agent 直接用它鉴权"
+              pattern="[!-~]{8,200}"
+              title="至少 8 个字符，仅限字母、数字和符号（不含空格）"
+              autoComplete="off"
+            />
+            <small>至少 8 个字符（字母/数字/符号，不含空格）。留空则生成随机 rdk_ 密钥。</small>
           </label>
           <div>
             <div className="field-label">权限范围</div>
@@ -153,7 +168,7 @@ export function Keys({
       <header className="page-head">
         <div>
           <h1>密钥</h1>
-          <p className="page-sub">{keys.filter((key) => !key.revokedAt).length} 个有效 Agent 密钥 · 哈希鉴权，明文加密存储，可随时查看复制</p>
+          <p className="page-sub">{keys.filter((key) => !key.revokedAt).length} 个有效 Agent 密钥 · 可自定义或随机生成，随时查看复制</p>
         </div>
         <Button variant="primary" icon={Plus} onClick={() => setCreating(true)}>创建密钥</Button>
       </header>
@@ -172,7 +187,7 @@ export function Keys({
                       <strong className="table-title">{key.name}</strong>
                       <span className="muted-row">创建于 {formatDate(key.createdAt)}</span>
                     </td>
-                    <td><code>rdk_{key.prefix}_••••</code></td>
+                    <td><code>{key.secret && !key.secret.startsWith('rdk_') ? '自定义密钥' : `rdk_${key.prefix}_••••`}</code></td>
                     <td>
                       <div className="scope-pills">
                         {key.scopes.map((scope) => <span key={scope}>{scope === 'notifications:send' ? '发送' : '读取'}</span>)}

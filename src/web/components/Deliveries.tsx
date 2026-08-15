@@ -65,7 +65,7 @@ export function Deliveries({
   deliveries, refresh, notify
 }: {
   deliveries: Delivery[];
-  refresh: (status?: string) => void;
+  refresh: (status?: string, quiet?: boolean) => void;
   notify: Notify;
 }) {
   const [status, setStatus] = useState('');
@@ -73,9 +73,17 @@ export function Deliveries({
   const [query, setQuery] = useState('');
 
   const filtered = deliveries.filter((item) =>
-    `${item.title} ${item.targetName} ${item.id}`.toLowerCase().includes(query.toLowerCase())
+    `${item.title} ${item.targetName ?? ''} ${item.id}`.toLowerCase().includes(query.toLowerCase())
   );
   const changeStatus = (next: string) => { setStatus(next); refresh(next); };
+
+  // 有未终结投递时每 5 秒静默刷新，全部到终态后自动停止
+  const hasActive = deliveries.some((item) => item.status === 'queued' || item.status === 'processing');
+  useEffect(() => {
+    if (!hasActive) return;
+    const timer = window.setInterval(() => refresh(status, true), 5000);
+    return () => window.clearInterval(timer);
+  }, [hasActive, status, refresh]);
 
   return (
     <>

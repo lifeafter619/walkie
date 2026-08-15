@@ -1,4 +1,4 @@
-import type { ApiKey, Channel, CredentialStatus, DashboardStats, Delivery, Destination, ProviderDefinition, Route } from '../shared/types';
+import type { ApiKey, Channel, Conversation, CredentialStatus, DashboardStats, Delivery, Destination, ProviderDefinition, Route } from '../shared/types';
 
 const TOKEN_KEY = 'relaydock_admin_token';
 export const getToken = () => localStorage.getItem(TOKEN_KEY) ?? '';
@@ -41,6 +41,8 @@ export const api = {
   deliveries: (status = '') => request<{ deliveries: Delivery[] }>(`/api/admin/deliveries${status ? `?status=${status}` : ''}`),
   delivery: (id: string) => request<Delivery>(`/api/admin/deliveries/${id}`),
   send: (body: unknown) => request<Delivery>('/api/admin/send', { method: 'POST', body: JSON.stringify(body) }),
+  conversations: (pending = false) => request<{ conversations: Conversation[] }>(`/api/admin/conversations${pending ? '?pending=1' : ''}`),
+  replyConversation: (id: string, reply: string) => request<{ success: boolean }>(`/api/admin/conversations/${id}/reply`, { method: 'POST', body: JSON.stringify({ reply }) }),
   credentials: () => request<CredentialStatus>('/api/admin/credentials'),
   rotateAdminToken: (body: unknown) => request<{ token: string }>('/api/admin/credentials/admin-token', { method: 'POST', body: JSON.stringify(body) }),
   rotateMasterKey: () => request<{ version: number; rotatedAt: string }>('/api/admin/credentials/master-key/rotate', { method: 'POST' })

@@ -254,6 +254,26 @@ td code { color: var(--muted); }
 .route-node { min-height: 26px; border: 1px solid var(--line); border-radius: 999px; padding: 0 9px 0 4px; display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 11px; background: var(--surface-alt); }
 .route-node i, .order-index { width: 17px; height: 17px; border-radius: 5px; display: inline-grid; place-items: center; font-style: normal; font-size: 10px; color: var(--ink-2); background: var(--hover); }
 
+/* ── 会话 ── */
+.conv-list { display: grid; gap: 10px; }
+.conv-card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: grid; gap: 10px; }
+.conv-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.conv-q { margin: 0; flex: 1; min-width: 0; font-size: 13px; font-weight: 500; color: var(--ink); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.conv-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 11px; }
+.conv-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.conv-options button { min-height: 28px; padding: 0 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink-2); font-size: 12px; transition: border-color .14s, color .14s; }
+.conv-options button:hover:not(:disabled) { border-color: var(--link); color: var(--link); }
+.conv-reply-form { display: flex; gap: 8px; }
+.conv-reply-form input { flex: 1; min-width: 0; }
+.conv-reply-form .icon-button { border: 1px solid var(--line); }
+.conv-answer { padding: 10px 12px; border-radius: 6px; background: var(--surface-alt); border: 1px solid var(--line-soft); color: var(--ink-2); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.segments-2 { grid-template-columns: 1fr 1fr; width: 180px; }
+
+/* 侧栏/底栏待回复角标 */
+.app-shell > aside nav button i.nav-pending { min-width: 17px; height: 17px; padding: 0 5px; border-radius: 9px; display: inline-grid; place-items: center; background: var(--warning); color: #fff; font-size: 10px; font-weight: 600; }
+.mobile-tab-icon { position: relative; display: inline-grid; place-items: center; }
+.mobile-dot { position: absolute; top: -2px; right: -4px; width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
+
 /* ── 系统页 / 凭据定义列表 ── */
 .system-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .system-grid .panel { min-width: 0; }

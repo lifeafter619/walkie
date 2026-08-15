@@ -32,19 +32,19 @@ export function Login({ meta, onSuccess }: { meta: Meta; onSuccess: () => void }
       <section className="login-panel">
         <div className="brand-mark"><BellRing size={14} /></div>
         <h1>RelayDock</h1>
-        <p className="login-copy">输入管理令牌进入控制台。</p>
+        <p className="login-copy">输入管理密码进入控制台。</p>
         <form onSubmit={submit}>
           <label>
-            管理令牌
+            管理密码
             <div className="password-input">
               <input
                 autoComplete="current-password" autoFocus
                 type={show ? 'text' : 'password'}
                 value={token}
                 onChange={(event) => setValue(event.target.value)}
-                placeholder="ADMIN_TOKEN" required
+                placeholder="管理密码" required
               />
-              <IconButton type="button" label={show ? '隐藏令牌' : '显示令牌'} icon={show ? EyeOff : Eye} onClick={() => setShow(!show)} />
+              <IconButton type="button" label={show ? '隐藏密码' : '显示密码'} icon={show ? EyeOff : Eye} onClick={() => setShow(!show)} />
             </div>
           </label>
           {error && (

@@ -30,6 +30,16 @@ describe('credential storage and repository', () => {
     repository.close();
   });
 
+  it('supports user-chosen key secrets and rejects duplicates', async () => {
+    const repository = await createRepository();
+    const custom = await repository.createKey({ name: 'Custom agent', secret: 'my-own-password-123' });
+    expect(custom.secret).toBe('my-own-password-123');
+    expect((await repository.authenticateKey('my-own-password-123'))?.id).toBe(custom.apiKey.id);
+    expect(await repository.authenticateKey('my-own-password-124')).toBeUndefined();
+    await expect(repository.createKey({ name: 'Dup', secret: 'my-own-password-123' })).rejects.toThrow('已被其他 Agent Key 使用');
+    repository.close();
+  });
+
   it('deduplicates deliveries by source and idempotency key', async () => {
     const repository = await createRepository();
     const channel = await repository.createChannel({ name: 'Ops', slug: 'ops', provider: 'webhook', config: { url: 'https://example.com', bodyTemplate: '{}' } });

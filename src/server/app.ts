@@ -60,7 +60,7 @@ export function createApp(deps: AppDependencies) {
     }
     // 未配置任何管理令牌（本地开发，仅 loopback）：放行，保持原行为
     if (!config.adminToken && !rotated.hash) return next();
-    res.status(401).json({ error: '需要管理令牌' });
+    res.status(401).json({ error: '管理密码不正确' });
   };
   const requireAgent = asyncRoute(async (req: Request, res: Response, next: NextFunction) => {
     const secret = bearer(req);
@@ -72,13 +72,15 @@ export function createApp(deps: AppDependencies) {
   });
 
   app.get('/health', (_req, res) => res.json({ status: 'ok', version: '0.2.0', queue: 'running' }));
-  app.get('/api/meta', (req, res) => {
+  app.get('/api/meta', asyncRoute(async (req, res) => {
     const publicUrl = (config.publicUrl ?? `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+    const rotated = await repository.getAdminTokenHash();
     res.json({
-      name: 'RelayDock', version: '0.2.0', runtime: 'node', adminAuthRequired: Boolean(config.adminToken),
+      name: 'RelayDock', version: '0.2.0', runtime: 'node',
+      adminAuthRequired: Boolean(config.adminToken) || Boolean(rotated.hash),
       publicUrl, mcpEndpoint: '/mcp', mcpUrl: `${publicUrl}/mcp`
     });
-  });
+  }));
   app.get('/api/admin/session', asyncRoute(requireAdmin), (_req, res) => res.json({ authenticated: true }));
 
   const admin = express.Router();
@@ -204,7 +206,9 @@ export function createApp(deps: AppDependencies) {
   // Server酱兼容入口：GET/POST /{key}.send 或 /send/{key}.send，key 为 Agent API Key。
   // 参数 title/text、desp、tags、short 与 Server酱³ 一致；destination 指定目的地（Key 白名单只有一个时可省略）。
   const serverchanCompat = asyncRoute(async (req: Request, res: Response) => {
-    const apiKey = await repository.authenticateKey(String(req.params[0]));
+    let compatKey = String(req.params[0]);
+    try { compatKey = decodeURIComponent(compatKey); } catch { /* 保留原样 */ }
+    const apiKey = await repository.authenticateKey(compatKey);
     if (!apiKey) return res.status(401).json({ code: 40001, message: '无效或已吊销的 SendKey', data: {} });
     const params: Record<string, unknown> = { ...req.query, ...(req.body && typeof req.body === 'object' ? req.body : {}) };
     const title = String(params.title ?? params.text ?? '').trim();
@@ -228,8 +232,8 @@ export function createApp(deps: AppDependencies) {
       res.status(400).json({ code: 40004, message: error instanceof Error ? error.message : '发送失败', data: {} });
     }
   });
-  app.get(/^\/(?:send\/)?(rdk_[a-f0-9]{8}_[A-Za-z0-9_-]+)\.send$/, serverchanCompat);
-  app.post(/^\/(?:send\/)?(rdk_[a-f0-9]{8}_[A-Za-z0-9_-]+)\.send$/, serverchanCompat);
+  app.get(/^\/(?:send\/)?([^/]+)\.send$/, serverchanCompat);
+  app.post(/^\/(?:send\/)?([^/]+)\.send$/, serverchanCompat);
 
   app.post('/mcp', requireAgent, asyncRoute(async (req, res) => {
     await nodeMcpHandler(req, res, req.body);

@@ -23,7 +23,6 @@ import {
   generateDek,
   hashSecret,
   keyFingerprint,
-  safeSecretEqual,
   unwrapDek,
   wrapDek
 } from './crypto.js';
@@ -44,6 +43,9 @@ export interface RelayDatabase {
 }
 
 const now = () => new Date().toISOString();
+/** 查询 limit 参数消毒：非法/非正数回退默认值，封顶 cap */
+const clampLimit = (value: number | undefined, fallback: number, cap: number): number =>
+  Number.isFinite(value) && (value as number) > 0 ? Math.min(Math.floor(value as number), cap) : fallback;
 const json = <T>(value: unknown, fallback: T): T => {
   try {
     return typeof value === 'string' ? JSON.parse(value) as T : fallback;
@@ -139,6 +141,8 @@ export class RelayRepository {
     if (!conversationColumns.has('options')) await this.db.exec('ALTER TABLE conversations ADD COLUMN options TEXT');
     const keyColumns = new Set((await this.db.all('PRAGMA table_info(api_keys)')).map((row) => String(row.name)));
     if (!keyColumns.has('secret_encrypted')) await this.db.exec('ALTER TABLE api_keys ADD COLUMN secret_encrypted TEXT');
+    // 密钥按哈希直查（支持自定义密钥），哈希必须唯一；历史数据全是随机值，无碰撞
+    await this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS api_keys_secret_hash ON api_keys(secret_hash)');
     // DEK 自举：无包裹记录则生成新 DEK 并把现存频道凭据从 KEK 迁到 DEK（原子事务）
     const dekRow = await this.db.get("SELECT value FROM settings WHERE key='dek_wrapped'");
     if (dekRow) {
@@ -285,13 +289,15 @@ export class RelayRepository {
     ];
   }
 
-  async createKey(input: { name: string; scopes?: string[]; destinationIds?: string[] }): Promise<{ apiKey: ApiKey; secret: string }> {
+  async createKey(input: { name: string; scopes?: string[]; destinationIds?: string[]; secret?: string }): Promise<{ apiKey: ApiKey; secret: string }> {
     return this.withWriteLock(async () => {
       const id = randomUUID();
       const timestamp = now();
-      // 前缀仅 32 位，UNIQUE 碰撞时重新生成
+      // 生成密钥前缀仅 32 位，UNIQUE 碰撞时重新生成；自定义密钥前缀取哈希前 8 位（仅展示用）
       for (let attempt = 0; ; attempt += 1) {
-        const generated = createApiSecret();
+        const generated = input.secret
+          ? { secret: input.secret, prefix: hashSecret(input.secret).slice(0, 8), hash: hashSecret(input.secret) }
+          : createApiSecret();
         const secretEncrypted = encryptJson({ s: generated.secret }, this.encryptionKey());
         try {
           await this.db.run('INSERT INTO api_keys (id,name,prefix,secret_hash,secret_encrypted,scopes,destination_ids,created_at) VALUES (?,?,?,?,?,?,?,?)',
@@ -299,7 +305,12 @@ export class RelayRepository {
           await this.audit('admin', 'api_key.create', 'api_key', id, { prefix: generated.prefix });
           return { apiKey: (await this.getKey(id))!, secret: generated.secret };
         } catch (error) {
-          if (attempt < 3 && error instanceof Error && /UNIQUE constraint failed: api_keys\.prefix/.test(error.message)) continue;
+          const message = error instanceof Error ? error.message : '';
+          if (/UNIQUE constraint failed: api_keys\.secret_hash/.test(message)) throw new Error('该密钥已被其他 Agent Key 使用（含已吊销的），请换一个');
+          if (/UNIQUE constraint failed: api_keys\.prefix/.test(message)) {
+            if (!input.secret && attempt < 3) continue;
+            throw new Error('密钥前缀冲突，请换一个自定义密钥');
+          }
           throw error;
         }
       }
@@ -333,11 +344,11 @@ export class RelayRepository {
     return (await this.db.all('SELECT * FROM api_keys ORDER BY created_at DESC')).map((row) => this.keyFrom(row));
   }
 
+  /** 密钥鉴权：按 sha256 哈希直查（唯一索引），生成密钥与自定义密钥统一处理 */
   async authenticateKey(secret: string): Promise<ApiKey | undefined> {
-    const prefix = /^rdk_([a-f0-9]{8})_/.exec(secret)?.[1];
-    if (!prefix) return undefined;
-    const row = await this.db.get('SELECT * FROM api_keys WHERE prefix=? AND revoked_at IS NULL', [prefix]);
-    if (!row || !safeSecretEqual(secret, String(row.secret_hash))) return undefined;
+    if (!secret) return undefined;
+    const row = await this.db.get('SELECT * FROM api_keys WHERE secret_hash=? AND revoked_at IS NULL', [hashSecret(secret)]);
+    if (!row) return undefined;
     await this.db.run('UPDATE api_keys SET last_used_at=? WHERE id=?', [now(), row.id]);
     return this.keyFrom({ ...row, last_used_at: now() });
   }
@@ -421,7 +432,7 @@ export class RelayRepository {
   }
 
   async listDeliveries(options: { limit?: number; status?: string } = {}): Promise<Delivery[]> {
-    const limit = Math.min(options.limit ?? 50, 200);
+    const limit = clampLimit(options.limit, 50, 200);
     const rows = options.status
       ? await this.db.all('SELECT * FROM deliveries WHERE status=? ORDER BY created_at DESC LIMIT ?', [options.status, limit])
       : await this.db.all('SELECT * FROM deliveries ORDER BY created_at DESC LIMIT ?', [limit]);
@@ -530,7 +541,7 @@ export class RelayRepository {
   }
 
   async listConversations(options: { pendingOnly?: boolean; limit?: number } = {}): Promise<Conversation[]> {
-    const limit = Math.min(options.limit ?? 50, 200);
+    const limit = clampLimit(options.limit, 50, 200);
     const rows = options.pendingOnly
       ? await this.db.all('SELECT * FROM conversations WHERE replied_at IS NULL AND expires_at>? ORDER BY created_at DESC LIMIT ?', [now(), limit])
       : await this.db.all('SELECT * FROM conversations ORDER BY created_at DESC LIMIT ?', [limit]);

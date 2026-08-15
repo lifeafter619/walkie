@@ -55,19 +55,9 @@ export async function safeFetch(
   resolveHost: ResolveHost = resolveWithLookup
 ): Promise<{ status: number; body: string }> {
   const url = await assertSafeUrl(rawUrl, config, resolveHost);
-  let fetchUrl: string | URL = url;
-  // 防御 DNS rebinding：用解析出的安全 IP 替换主机名，并通过 Host 头保留原始主机，
-  // 避免 fetch 内部再次解析 DNS 时被攻击者切换到私网地址。
-  if (!config.allowPrivateWebhooks && !isIP(url.hostname) && url.protocol === 'https:') {
-    const addresses = await resolveHost(url.hostname);
-    if (!addresses.length || addresses.some(isPrivateAddress)) throw new Error('通知地址解析到了私网或保留地址');
-    fetchUrl = new URL(url.toString());
-    fetchUrl.hostname = addresses[0];
-    const headers = new Headers(init.headers);
-    if (!headers.has('Host')) headers.set('Host', url.host);
-    init = { ...init, headers };
-  }
-  const response = await fetcher(fetchUrl, { ...init, redirect: 'error', signal: AbortSignal.timeout(12_000) });
+  // ponytail: 解析校验与实际 fetch 之间存在 DNS TOCTOU 窗口（rebinding）。不能用「解析出 IP 后改写主机名」防御：
+  // HTTPS 的 TLS SNI/证书校验必须用原始主机名，改写成 IP 会让所有 HTTPS 发送握手失败。真正钉死 IP 需自定义连接层。
+  const response = await fetcher(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(12_000) });
   const body = (await response.text()).slice(0, 4096);
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${body || response.statusText}`);
   try {

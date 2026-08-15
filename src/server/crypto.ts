@@ -72,7 +72,7 @@ export function unwrapDek(wrapped: string, kek: Buffer): Buffer {
 
 const ADMIN_TOKEN_PREFIX = 'rd_';
 
-/** 生成管理令牌：rd_ + 24 字节 base64url（≥24 字符，满足 config 约束） */
+/** 生成管理密码：rd_ + 24 字节 base64url（远超 8 字符下限） */
 export function generateAdminToken(): string {
   return `${ADMIN_TOKEN_PREFIX}${base64url(randomBytes(24))}`;
 }

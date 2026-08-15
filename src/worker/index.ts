@@ -81,15 +81,14 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
   }
 
   private async requireAdmin(request: Request): Promise<Response | undefined> {
-    if (!this.env.ADMIN_TOKEN) return json({ error: 'ADMIN_TOKEN secret is required' }, 503);
-    if (safeTokenEqual(bearer(request), this.env.ADMIN_TOKEN) || safeTokenEqual(request.headers.get('x-admin-token') ?? undefined, this.env.ADMIN_TOKEN)) return;
-    // 数据库轮换令牌：存的是 sha256 哈希，用 safeSecretEqual 比较（与 Agent Key 同模型）
+    const provided = bearer(request) ?? request.headers.get('x-admin-token') ?? undefined;
+    if (this.env.ADMIN_TOKEN && provided && safeTokenEqual(provided, this.env.ADMIN_TOKEN)) return;
+    // 数据库轮换令牌：存的是 sha256 哈希，用 safeSecretEqual 比较（与 Agent Key 同模型）。
+    // env ADMIN_TOKEN 缺失时轮换令牌也必须可用，否则轮换后重新部署会把管理员锁死。
     const rotated = await this.repository.getAdminTokenHash();
-    if (rotated.hash) {
-      const provided = bearer(request) ?? request.headers.get('x-admin-token') ?? undefined;
-      if (provided && safeSecretEqual(provided, rotated.hash)) return;
-    }
-    return json({ error: '需要管理令牌' }, 401);
+    if (rotated.hash && provided && safeSecretEqual(provided, rotated.hash)) return;
+    if (!this.env.ADMIN_TOKEN && !rotated.hash) return json({ error: 'ADMIN_TOKEN secret is required' }, 503);
+    return json({ error: '管理密码不正确' }, 401);
   }
 
   private async authenticateAgent(request: Request): Promise<{ apiKey: ApiKey; authInfo: AuthInfo } | Response> {
@@ -104,10 +103,14 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       const url = new URL(request.url);
       const path = url.pathname;
       if (path === '/health' && request.method === 'GET') return json({ status: 'ok', version: '0.2.0', runtime: 'cloudflare-workers', queue: 'alarm' });
-      if (path === '/api/meta' && request.method === 'GET') return json({
-        name: 'RelayDock', version: '0.2.0', runtime: 'cloudflare-workers', adminAuthRequired: Boolean(this.env.ADMIN_TOKEN),
-        publicUrl: url.origin, mcpEndpoint: '/mcp', mcpUrl: `${url.origin}/mcp`
-      });
+      if (path === '/api/meta' && request.method === 'GET') {
+        const rotated = await this.repository.getAdminTokenHash();
+        return json({
+          name: 'RelayDock', version: '0.2.0', runtime: 'cloudflare-workers',
+          adminAuthRequired: Boolean(this.env.ADMIN_TOKEN) || Boolean(rotated.hash),
+          publicUrl: url.origin, mcpEndpoint: '/mcp', mcpUrl: `${url.origin}/mcp`
+        });
+      }
 
       if (path === '/mcp') {
         if (request.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: { allow: 'POST' } });
@@ -161,8 +164,12 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
         }
       }
 
-      const compat = /^\/(?:send\/)?(rdk_[a-f0-9]{8}_[A-Za-z0-9_-]+)\.send$/.exec(path);
-      if (compat && ['GET', 'POST'].includes(request.method)) return this.serverchan(request, compat[1]);
+      const compat = /^\/(?:send\/)?([^/]+)\.send$/.exec(path);
+      if (compat && ['GET', 'POST'].includes(request.method)) {
+        let key = compat[1];
+        try { key = decodeURIComponent(key); } catch { /* 保留原样 */ }
+        return this.serverchan(request, key);
+      }
 
       if (!path.startsWith('/api/admin')) return json({ error: 'Not found' }, 404);
       const denied = await this.requireAdmin(request);
@@ -271,7 +278,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
 
   private async assertChannels(ids: string[]): Promise<void> {
     const channels = new Set((await this.repository.listChannels()).map((item) => item.id));
-    if (ids.some((id) => !channels.has(id))) throw new Error('路由包含不存在的频道');
+    if (ids.some((id) => !channels.has(id))) throw new Error('路由包含无效的频道');
   }
 
   private async serverchan(request: Request, secret: string): Promise<Response> {
@@ -300,7 +307,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
 export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const path = new URL(request.url).pathname;
-    if (path === '/health' || path === '/mcp' || path.startsWith('/api/') || path.startsWith('/reply/') || /^\/(?:send\/)?rdk_.*\.send$/.test(path)) {
+    if (path === '/health' || path === '/mcp' || path.startsWith('/api/') || path.startsWith('/reply/') || /^\/(?:send\/)?[^/]+\.send$/.test(path)) {
       return env.RELAYDOCK.getByName('default').fetch(request);
     }
     return env.ASSETS.fetch(request);

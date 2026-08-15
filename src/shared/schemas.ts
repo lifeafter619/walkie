@@ -39,13 +39,18 @@ export const askSchema = z.object({
   timeoutSeconds: z.number().int().min(30).max(86_400).optional()
 });
 
+/** 自定义密钥/密码通用规则：≥8 位可见 ASCII（要放进 Authorization 头，不能含空格与非 ASCII） */
+const secretSchema = z.string().min(8, '至少 8 个字符').max(200).regex(/^[\x21-\x7e]+$/, '仅支持字母、数字和符号（不含空格）');
+
 export const keySchema = z.object({
   name: z.string().min(1).max(100),
   scopes: z.array(z.enum(['notifications:send', 'deliveries:read'])).min(1).optional(),
-  destinationIds: z.array(z.string()).optional()
+  destinationIds: z.array(z.string()).optional(),
+  /** 自定义密钥（像密码一样随意设置）；缺省则服务端生成随机 rdk_ 密钥 */
+  secret: secretSchema.optional()
 });
 
-/** 管理令牌轮换：可选自定义令牌（≥24 字符）；缺省则服务端随机生成 */
+/** 管理密码设置：可自定义（≥8 字符）；缺省则服务端随机生成 */
 export const credentialTokenSchema = z.object({
-  token: z.string().min(24).max(200).optional()
+  token: secretSchema.optional()
 });
