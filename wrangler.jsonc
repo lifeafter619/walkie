@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "relaydock",
+  "name": "walkie",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-08-12",
   "compatibility_flags": ["nodejs_compat"],
@@ -12,7 +12,8 @@
   },
   "durable_objects": {
     "bindings": [
-      { "name": "RELAYDOCK", "class_name": "RelayDockState" }
+      // class_name 与已应用的 v1 迁移绑定存量数据，项目更名后保持不变
+      { "name": "WALKIE", "class_name": "RelayDockState" }
     ]
   },
   "migrations": [

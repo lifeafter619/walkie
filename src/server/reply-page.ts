@@ -3,7 +3,7 @@ const escapeHtml = (value: string) =>
 
 const page = (body: string) => `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex"><title>RelayDock</title>
+<meta name="robots" content="noindex"><title>Walkie</title>
 <style>
 :root{color-scheme:light dark;
   --bg:#f5f7f6;--surface:#ffffff;--line:#e2e7e4;--ink:#1c2523;--muted:#6d7a75;
@@ -44,7 +44,7 @@ textarea:focus{border-color:var(--accent)}
 </style>
 <script>try{var t=localStorage.rdTheme;if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
 </head><body><main>
-<header><h1>RelayDock</h1><button id="mode" type="button" aria-label="切换明暗" onclick="
+<header><h1>Walkie</h1><button id="mode" type="button" aria-label="切换明暗" onclick="
   var d=document.documentElement,dark=d.dataset.theme?d.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
   d.dataset.theme=dark?'light':'dark';try{localStorage.rdTheme=d.dataset.theme}catch(e){}">◐</button></header>
 ${body}

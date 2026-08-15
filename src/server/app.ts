@@ -71,12 +71,12 @@ export function createApp(deps: AppDependencies) {
     next();
   });
 
-  app.get('/health', (_req, res) => res.json({ status: 'ok', version: '0.2.0', queue: 'running' }));
+  app.get('/health', (_req, res) => res.json({ status: 'ok', version: '0.3.0', queue: 'running' }));
   app.get('/api/meta', asyncRoute(async (req, res) => {
     const publicUrl = (config.publicUrl ?? `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
     const rotated = await repository.getAdminTokenHash();
     res.json({
-      name: 'RelayDock', version: '0.2.0', runtime: 'node',
+      name: 'Walkie', version: '0.3.0', runtime: 'node',
       adminAuthRequired: Boolean(config.adminToken) || Boolean(rotated.hash),
       publicUrl, mcpEndpoint: '/mcp', mcpUrl: `${publicUrl}/mcp`
     });
@@ -108,7 +108,7 @@ export function createApp(deps: AppDependencies) {
     const channel = await repository.getChannel(String(req.params.id));
     if (!channel) return res.status(404).json({ error: '频道不存在' });
     try {
-      await dispatcher.send(channel.provider, await repository.getChannelConfig(channel.id), { title: 'RelayDock 测试通知', body: '频道连接正常，可以接收 Agent 通知。', severity: 'success', metadata: {} });
+      await dispatcher.send(channel.provider, await repository.getChannelConfig(channel.id), { title: 'Walkie 测试通知', body: '频道连接正常，可以接收 Agent 通知。', severity: 'success', metadata: {} });
       await repository.setChannelTest(channel.id, true);
       res.json({ success: true });
     } catch (error) {

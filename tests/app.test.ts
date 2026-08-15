@@ -50,7 +50,7 @@ describe('HTTP API and MCP', () => {
       .set('Accept', 'application/json, text/event-stream')
       .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'test', version: '1.0.0' } } })
       .expect(200);
-    expect(initialized.text).toContain('RelayDock');
+    expect(initialized.text).toContain('Walkie');
     const tools = await request(app).post('/mcp')
       .set('Authorization', `Bearer ${secret}`)
       .set('Accept', 'application/json, text/event-stream')

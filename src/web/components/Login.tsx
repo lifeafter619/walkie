@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { AlertTriangle, BellRing, Eye, EyeOff, LockKeyhole } from 'lucide-react';
+import { AlertTriangle, Eye, EyeOff, LockKeyhole, Radio } from 'lucide-react';
 import { api, getToken, setToken } from '../api';
 import { Button, IconButton } from './ui';
 
@@ -30,8 +30,8 @@ export function Login({ meta, onSuccess }: { meta: Meta; onSuccess: () => void }
   return (
     <main className="login-shell">
       <section className="login-panel">
-        <div className="brand-mark"><BellRing size={14} /></div>
-        <h1>RelayDock</h1>
+        <div className="brand-mark"><Radio size={14} /></div>
+        <h1>Walkie</h1>
         <p className="login-copy">输入管理密码进入控制台。</p>
         <form onSubmit={submit}>
           <label>
@@ -52,7 +52,7 @@ export function Login({ meta, onSuccess }: { meta: Meta; onSuccess: () => void }
           )}
           <Button type="submit" variant="primary" loading={busy} icon={LockKeyhole}>进入控制台</Button>
         </form>
-        <footer>RelayDock {meta.version}</footer>
+        <footer>Walkie {meta.version}</footer>
       </section>
     </main>
   );

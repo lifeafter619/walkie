@@ -1,6 +1,6 @@
 import type { ApiKey, Channel, Conversation, CredentialStatus, DashboardStats, Delivery, Destination, ProviderDefinition, Route } from '../shared/types';
 
-const TOKEN_KEY = 'relaydock_admin_token';
+const TOKEN_KEY = 'walkie_admin_token';
 export const getToken = () => localStorage.getItem(TOKEN_KEY) ?? '';
 export const setToken = (token: string) => token ? localStorage.setItem(TOKEN_KEY, token) : localStorage.removeItem(TOKEN_KEY);
 

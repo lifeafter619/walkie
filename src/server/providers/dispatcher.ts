@@ -140,7 +140,7 @@ export class ProviderDispatcher {
       case 'bark':
         return { url: `${string(config, 'server').replace(/\/$/, '')}/push`, init: this.json({
           device_key: string(config, 'deviceKey'), title: message.title, body: message.body,
-          group: string(config, 'group') || 'RelayDock',
+          group: string(config, 'group') || 'Walkie',
           level: message.severity === 'critical' ? 'critical' : message.severity === 'warning' ? 'timeSensitive' : 'active',
           ...(message.severity === 'critical' && config.criticalVolume !== undefined && config.criticalVolume !== '' ? { volume: Number(config.criticalVolume) } : {}),
           ...(config.sound ? { sound: string(config, 'sound') } : {}),
@@ -154,7 +154,7 @@ export class ProviderDispatcher {
         // Server酱³ sendkey 形如 sctp{uid}t...，走 {uid}.push.ft07.com；否则走 Turbo sctapi.ftqq.com
         const sc3 = /^sctp(\d+)t/.exec(sendKey);
         if (sc3) {
-          const tags = typeof message.metadata.tags === 'string' && message.metadata.tags ? message.metadata.tags : `RelayDock|${message.severity}`;
+          const tags = typeof message.metadata.tags === 'string' && message.metadata.tags ? message.metadata.tags : `Walkie|${message.severity}`;
           const short = typeof message.metadata.short === 'string' && message.metadata.short ? message.metadata.short : undefined;
           return { url: `https://${sc3[1]}.push.ft07.com/send/${encodeURIComponent(sendKey)}.send`, init: this.json({ title: message.title, desp, tags, ...(short ? { short } : {}) }) };
         }
@@ -222,7 +222,7 @@ export class ProviderDispatcher {
           ...(message.metadata.idempotencyKey ? { dedup_key: String(message.metadata.idempotencyKey) } : {}),
           payload: {
             summary: `${message.title}: ${message.body}`.slice(0, 1024),
-            source: string(config, 'source') || 'relaydock',
+            source: string(config, 'source') || 'walkie',
             severity: ({ critical: 'critical', warning: 'warning', info: 'info', success: 'info' } as const)[message.severity]
           },
           ...(message.url ? { links: [{ href: message.url, text: message.title }] } : {})

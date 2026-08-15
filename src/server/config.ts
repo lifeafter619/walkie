@@ -39,7 +39,7 @@ function resolveMasterKey(isProduction: boolean): Buffer {
     throw new Error('MASTER_KEY must be a base64-encoded 32-byte key');
   }
   if (isProduction) throw new Error('MASTER_KEY is required in production');
-  return createHash('sha256').update('relaydock-local-development-key').digest();
+  return createHash('sha256').update('walkie-local-development-key').digest();
 }
 
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -52,13 +52,13 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   if (isProduction && !adminToken) throw new Error('ADMIN_TOKEN is required in production');
   if (adminToken && adminToken.length < 8) throw new Error('ADMIN_TOKEN must contain at least 8 characters');
   if (!adminToken && !['127.0.0.1', 'localhost', '::1'].includes(host)) throw new Error('ADMIN_TOKEN is required when binding to a non-loopback host');
-  if (!adminToken) console.warn('[relaydock] ADMIN_TOKEN 未设置，管理接口对本机开放且无鉴权（仅限本地开发；反向代理暴露端口前务必设置）');
+  if (!adminToken) console.warn('[walkie] ADMIN_TOKEN 未设置，管理接口对本机开放且无鉴权（仅限本地开发；反向代理暴露端口前务必设置）');
 
   return {
     port: integer('PORT', 4310, 1, 65535),
     host,
     dataDir,
-    databasePath: path.join(dataDir, 'relaydock.db'),
+    databasePath: path.join(dataDir, 'walkie.db'),
     adminToken,
     masterKey: resolveMasterKey(isProduction),
     allowPrivateWebhooks: bool('ALLOW_PRIVATE_WEBHOOKS'),

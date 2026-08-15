@@ -13,7 +13,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function createRelayMcpServer(repository: RelayRepository, notifications: NotificationService, apiKey: ApiKey, publicUrl = ''): McpServer {
   const server = new McpServer(
-    { name: 'RelayDock', version: '0.2.0' },
+    { name: 'Walkie', version: '0.3.0' },
     {
       supportedProtocolVersions: ['2026-07-28', ...SUPPORTED_PROTOCOL_VERSIONS],
       instructions: 'Use list_destinations before sending. Call send_notification with an allowed destination slug or ID, then use get_delivery with the returned deliveryId when delivery status is needed. To ask the human a question, call ask_user, then poll check_reply with the returned conversationId until status is replied or the deadline passes. Never invent destination IDs.'

@@ -6,7 +6,7 @@ import { assertSafeUrl } from '../src/server/providers/network.js';
 const config = { allowPrivateWebhooks: true, allowInsecureHttp: false } as AppConfig;
 
 // SMTP 测试需要 mock nodemailer（sendSmtp 直连 nodemailer，不走 fetcher）
-const transportMock = { sendMail: vi.fn(async (opts: Record<string, unknown>) => ({ messageId: `<test-${opts.to}@relaydock>` })) };
+const transportMock = { sendMail: vi.fn(async (opts: Record<string, unknown>) => ({ messageId: `<test-${opts.to}@walkie>` })) };
 vi.mock('nodemailer', () => ({ default: { createTransport: vi.fn(() => transportMock) } }));
 
 describe('provider dispatcher', () => {

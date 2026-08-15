@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  Activity, BellRing, Code2, KeyRound, LayoutDashboard, LoaderCircle, Menu,
+  Activity, Code2, KeyRound, LayoutDashboard, LoaderCircle, Radio, Menu,
   MessageCircleQuestion, MessageSquareText, RefreshCw, Route as RouteIcon, ServerCog, X
 } from 'lucide-react';
 import type { ApiKey, Channel, DashboardStats, Delivery, Destination, ProviderDefinition, Route } from '../shared/types';
@@ -19,7 +19,7 @@ import { SystemPage } from './components/SystemPage';
 type Page = 'overview' | 'channels' | 'routes' | 'deliveries' | 'conversations' | 'keys' | 'integrations' | 'system';
 type Meta = Awaited<ReturnType<typeof api.meta>>;
 
-const nav: Array<{ id: Page; label: string; icon: typeof BellRing }> = [
+const nav: Array<{ id: Page; label: string; icon: typeof Radio }> = [
   { id: 'overview', label: '概览', icon: LayoutDashboard },
   { id: 'channels', label: '频道', icon: MessageSquareText },
   { id: 'routes', label: '路由', icon: RouteIcon },
@@ -141,8 +141,8 @@ export default function App() {
     <div className="app-shell">
       <aside className={menu ? 'open' : ''}>
         <div className="brand">
-          <span className="brand-mark"><BellRing size={14} /></span>
-          <strong>RelayDock</strong>
+          <span className="brand-mark"><Radio size={14} /></span>
+          <strong>Walkie</strong>
           <IconButton label="关闭菜单" icon={X} onClick={() => setMenu(false)} />
         </div>
         <nav>
@@ -164,7 +164,7 @@ export default function App() {
       <main className="workspace">
         <header className="mobile-top">
           <IconButton label="打开菜单" icon={Menu} onClick={() => setMenu(true)} />
-          <span className="mobile-brand">RelayDock</span>
+          <span className="mobile-brand">Walkie</span>
         </header>
         <div className="page-content">{content}</div>
       </main>

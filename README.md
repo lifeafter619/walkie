@@ -1,345 +1,269 @@
-# RelayDock
+<div align="center">
 
-> The notification control plane built for AI agents.
+# 📻 Walkie
 
-![License](https://img.shields.io/badge/license-MIT-blue) ![Node](https://img.shields.io/badge/node-%E2%89%A522-brightgreen) ![Deploy](https://img.shields.io/badge/deploy-Docker%20%7C%20Cloudflare%20Workers%20%7C%20Vercel-orange) ![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-8A2BE2)
+**AI Agent 与你之间的双向对讲机**
 
-RelayDock 是一个面向 AI Agent 的自托管通知控制面。Agent 通过 MCP 或 REST API 提交结构化通知，RelayDock 负责凭据隔离、路由编排、异步重试、投递审计，并把消息送到团队已有的协作与推送平台。
+Agent 干完活呼叫你、拿不准主意时问你，你在任何设备上按下回复——一条 MCP 连接搞定。
 
-它吸收了 [Message Pusher](https://github.com/songquanpeng/message-pusher) 的三个关键思路：大量内置渠道、频道群组、可扩展自定义请求；同时针对 Agent 使用场景加入 MCP、细粒度 API Key、目的地白名单、幂等与 SSRF 防护。
+[![License](https://img.shields.io/badge/license-MIT-22c55e)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.3.0-black)](package.json)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6366f1)](https://modelcontextprotocol.io)
 
-## 核心能力
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare%20Workers-F38020?logo=cloudflareworkers&logoColor=white)](#一cloudflare-workers推荐)
+[![Vercel](https://img.shields.io/badge/Vercel-000000?logo=vercel&logoColor=white)](#二vercel--turso)
+[![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](#三docker--docker-compose)
+[![Self-hosted](https://img.shields.io/badge/私有部署-Node.js-475569)](#四企业--私有网络部署)
 
-- React 管理面板：概览、快速发送、频道、路由、投递详情、Agent Key 与系统状态；明暗主题跟随系统并可手动切换。
-- MCP Streamable HTTP：`list_destinations`、`list_routes`、`send_notification`、`get_delivery`、`ask_user`、`check_reply`。
-- 双向确认：Agent 用 `ask_user` 把问题推到手机，人从任意渠道打开一次性回复链接作答，`check_reply` 长轮询取回答案——Agent 可以远程等人拍板再继续。
-- Server 酱兼容入口：`/send/{AgentKey}.send`，2000+ 已集成 Server 酱的软件可直接把 RelayDock 当推送后端。
-- 路由策略：`fanout` 并发广播；`fallback` 按顺序尝试，首次成功后停止。
-- 投递治理：每频道限流（次/分钟）、静默时段（critical 穿透）、消息 `tags` 与卡片简述 `short` 透传。
-- SQLite 持久队列：指数退避、失败恢复、幂等键、每频道 Attempt 与审计事件。
-- 安全边界：AES-256-GCM 凭据加密、Agent Key 哈希存储、scope、目的地白名单、默认阻止 HTTP/私网 webhook。
-- 单体部署：一个 Node.js 进程和一个 SQLite 文件，无需 Redis 或外部数据库。
-- 三种部署形态：Docker/Node 单体（本地 SQLite）、Cloudflare Workers（SQLite-backed Durable Object + alarm 重试）、Vercel（Turso/libSQL + Cron 重试），同一套面板、MCP 与 REST。
+</div>
 
-## 为什么是 RelayDock
+---
 
-现有工具各占一角：message-pusher/Apprise 有渠道广度但没有 MCP 与 Agent 凭据隔离；ntfy/Gotify 有 token 模型但只推自家客户端；MCP 通知类小工具全是无状态 stdio 薄包装——bot token 直接塞给 Agent，没有队列、审计和 UI。RelayDock 把四件事放进同一个自托管进程：
+AI Agent 跑长任务时，你不想盯着终端。Walkie 是一个自托管的通知控制平面：
 
-| | Apprise / message-pusher | ntfy / Gotify | MCP 通知小工具 | RelayDock |
-|---|---|---|---|---|
-| 渠道广度 | ✅ | 自有客户端 | 3~5 个 | ✅ 25+ |
-| 持久队列/重试/fallback | ❌（目标挂了即丢） | 部分 | ❌ | ✅ SQLite 队列 |
-| MCP 原生接入 | ❌ | ❌ | ✅ | ✅ Streamable HTTP |
-| Agent 级 Key/白名单/审计/幂等 | ❌ | 部分 | ❌ | ✅ |
+- **Agent → 你**：构建完成、部署失败、审批请求，推送到 Telegram、企业微信、飞书、Bark、ntfy……30+ 渠道任选；
+- **你 → Agent**：Agent 调用 `ask_user` 把问题推到你手机，你点开一次性链接（或直接在控制台）回复，Agent 拿到答案继续干活；
+- **一个入口**：MCP（Streamable HTTP）、REST API、Server酱兼容 URL 三种接入方式，凭据加密存储，全部跑在你自己的基础设施上。
 
-## 支持渠道
+## 核心特性
 
-| 类别 | 内置适配器 |
-|---|---|
-| 聊天协作 | Telegram、企业微信、飞书/Lark、钉钉、Slack、Discord、Microsoft Teams、Google Chat、Mattermost、Rocket.Chat、Zulip、Webex、Matrix、QQ (OneBot/NapCat)、Synology Chat、LINE |
-| 移动推送 | ntfy、Gotify、Pushover、Pushbullet、Bark、Server 酱（Turbo 与 Server酱³ 按 SendKey 自动识别）、PushDeer、Chanify、PushMe、PushPlus、WxPusher、息知、Qmsg 酱 |
-| 邮件与短信 | SMTP、Twilio SMS |
-| 通用扩展 | Generic Webhook、Apprise API（可继续连接 100+ 服务）、PagerDuty (Events v2) |
+- 📡 **30+ 通知渠道**——聊天（Telegram / 企业微信 / 飞书 / 钉钉 / Slack / Discord / Teams / Google Chat / Matrix / QQ(OneBot) / LINE…）、推送（Bark / ntfy / Gotify / Pushover / Server酱 / PushPlus / WxPusher…）、邮件 SMTP、短信 Twilio、PagerDuty、Apprise、通用 Webhook
+- 🔁 **双向会话**——`ask_user` 提问 + 一次性回复链接 + 控制台会话页直接回复，`check_reply` 长轮询取答案
+- 🧭 **路由**——多个频道组成「并发广播」或「故障转移链」，一个稳定标识符对外
+- 🔑 **密钥即密码**——Agent Key 和管理密码都可以自定义成任意想要的值（≥8 位），也可一键随机生成
+- 🪝 **投递回调**——`callbackUrl` 在投递到达终态时回推结果
+- ⏱️ **限流与静默时段**——按频道每分钟限流；`22:00-08:00@Asia/Shanghai` 静默期延后发送，critical 穿透
+- 🔒 **安全默认**——凭据 AES-256-GCM 加密（KEK/DEK 两级密钥，可在线轮换）、密钥哈希存储、SSRF 防护（默认禁私网/HTTP）、scope 与目的地白名单
+- 📱 **控制台**——响应式管理面板，暗色模式，移动端可用
 
-渠道高级参数：Telegram `parse_mode`/话题线程、ntfy 优先级/Tags、Bark 铃声/图标/critical 持续响铃与音量、Pushover 铃声、飞书卡片标题色（可固定或按 severity 自动）、Gotify critical 自动提升优先级等，均在频道表单按渠道展示。
+## 快速开始
 
-## 本地开发
+四种部署方式，选一种即可。部署完成后打开站点，用管理密码登录，添加频道 → 创建 Agent Key → 在「接入」页复制 MCP 配置。
 
-要求 Node.js 22 或更高版本。当前工程在 Node.js 24 上验证。
+### 一、Cloudflare Workers（推荐）
 
-```powershell
+免费额度足够个人使用；数据存 Durable Objects SQLite，无需外部数据库。
+
+```bash
+git clone https://github.com/<你的用户名>/walkie.git && cd walkie
 npm ci
-npm run dev
-```
+npx wrangler login
 
-另开一个终端启动前端开发服务器：
+# 生成 32 字节根密钥（Windows 无 openssl 时：
+#   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"）
+openssl rand -base64 32 | npx wrangler secret put MASTER_KEY
 
-```powershell
-npm run dev:web
-```
-
-打开 `http://127.0.0.1:5173`。默认只监听回环地址；本地未设置 `ADMIN_TOKEN` 时管理 API 免鉴权。
-
-生产构建：
-
-```powershell
-npm run build
-$env:NODE_ENV = 'production'
-$env:ADMIN_TOKEN = 'replace-with-at-least-24-random-characters'
-$env:MASTER_KEY = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
-npm start
-```
-
-生产模式必须提供 `ADMIN_TOKEN` 与 32 字节 Base64 `MASTER_KEY`。更换已有实例的 `MASTER_KEY` 会导致历史频道凭据无法解密。
-
-## Docker Compose
-
-先设置两个环境变量，再启动：
-
-```powershell
-$env:ADMIN_TOKEN = 'replace-with-at-least-24-random-characters'
-$env:MASTER_KEY = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
-docker compose up -d --build
-```
-
-面板位于 `http://127.0.0.1:4310`，数据保存在 `relaydock-data` volume。
-
-## Cloudflare Workers 完整部署
-
-Workers 版本包含完整管理面板、远程 HTTP MCP、REST、Agent Key、频道、路由、投递记录和后台重试，不需要额外数据库。状态存储在名为 `default` 的 SQLite-backed Durable Object 中。
-
-要求：已安装并登录 Wrangler。首次部署前设置两个 secret：
-
-```powershell
+# 设置管理密码（≥8 位，登录控制台用；之后可在面板里随时改）
 npx wrangler secret put ADMIN_TOKEN
-npx wrangler secret put MASTER_KEY
-```
 
-- `ADMIN_TOKEN`：至少 24 个字符，用于登录管理面板。
-- `MASTER_KEY`：32 字节随机值的 Base64 文本。可用 PowerShell 生成：
-
-```powershell
-[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
-```
-
-然后部署：
-
-```powershell
 npm run deploy:cf
 ```
 
-Wrangler 会构建 React 面板、部署 Worker、创建 Durable Object migration，并输出 `https://<worker>.workers.dev`。远程 MCP 地址就是：
+部署完成后访问 `https://walkie.<你的子域>.workers.dev`。
 
-```text
-https://<worker>.workers.dev/mcp
+> 推送到 GitHub 后，可以给仓库加一键部署按钮：
+> `https://deploy.workers.cloudflare.com/?url=https://github.com/<你的用户名>/walkie`
+
+### 二、Vercel + Turso
+
+Serverless 部署，状态存 [Turso](https://turso.tech)（libSQL），队列由请求内投递 + Vercel Cron 兜底重试。
+
+1. 创建 Turso 数据库，拿到 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN`；
+2. 导入本仓库到 Vercel（`vercel.json` 已带构建与 Cron 配置）；
+3. 配置环境变量：
+
+| 变量 | 说明 |
+| --- | --- |
+| `TURSO_DATABASE_URL` | `libsql://…` 数据库地址 |
+| `TURSO_AUTH_TOKEN` | Turso 访问令牌 |
+| `ADMIN_TOKEN` | 管理密码（≥8 位） |
+| `MASTER_KEY` | base64 的 32 字节根密钥 |
+| `CRON_SECRET` | 保护 `/api/cron/drain` 的随机串（Vercel 自动注入到 Cron 请求头） |
+| `PUBLIC_URL` | 站点最终地址，如 `https://walkie.example.com`（用于回复链接） |
+
+4. 部署。Cron 每 10 分钟兜底排空一次重试队列（`vercel.json` 可调）。
+
+> 一键部署链接：`https://vercel.com/new/clone?repository-url=https://github.com/<你的用户名>/walkie`
+
+### 三、Docker / Docker Compose
+
+单容器 + 本地 SQLite 卷，适合 NAS 与家庭服务器。
+
+```bash
+ADMIN_TOKEN='你的管理密码' \
+MASTER_KEY="$(openssl rand -base64 32)" \
+docker compose up -d --build
 ```
 
-本地验证 Workers 运行时：
+- 默认只绑定 `127.0.0.1:4310`，用 Nginx/Caddy 反代并终结 TLS 后再对外；
+- 数据在 `walkie-data` 卷（`/app/data/walkie.db`），**备份时连同 `MASTER_KEY` 一起保存**，两者缺一不可恢复。
 
-```powershell
-# 在未提交的 .dev.vars 中填写 ADMIN_TOKEN 和 MASTER_KEY
-npm run dev:cf
+Caddy 反代两行即可：
+
+```
+walkie.example.com {
+    reverse_proxy 127.0.0.1:4310
+}
 ```
 
-Workers 的 HTTP 渠道与 Node 版共用适配器。SMTP 必须使用 Cloudflare Workers 允许的 TCP 端口，不能使用端口 `25`；推荐 `465` 或 `587`。默认仍禁止明文 HTTP 和私网目标。
+### 四、企业 / 私有网络部署
 
-## Vercel 部署
+裸机 Node.js，适合需要触达内网服务（自建 Gotify、OneBot QQ 机器人、内网 Webhook）的场景。
 
-Vercel Functions 没有持久文件系统，RelayDock 在 Vercel 上使用 [Turso](https://turso.tech)（libSQL）作为存储：投递在请求内完成首发（`waitUntil` 保证响应后跑完），失败重试由 Vercel Cron 每 10 分钟扫队列兜底（`vercel.json` 可调；Hobby 计划 Cron 最短每天一次，重试会更慢）。
+```bash
+# Node.js ≥ 22
+git clone https://github.com/<你的用户名>/walkie.git && cd walkie
+npm ci && npm run build
 
-1. 创建 Turso 数据库，拿到 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN`。
-2. Vercel 项目导入本仓库，设置环境变量：
+NODE_ENV=production \
+HOST=0.0.0.0 PORT=4310 \
+ADMIN_TOKEN='你的管理密码' \
+MASTER_KEY="$(openssl rand -base64 32)" \
+ALLOW_PRIVATE_WEBHOOKS=true \
+node dist/server/index.js
+```
 
-   | 变量 | 说明 |
-   |---|---|
-   | `TURSO_DATABASE_URL` | `libsql://<db>.turso.io` |
-   | `TURSO_AUTH_TOKEN` | Turso 数据库令牌 |
-   | `ADMIN_TOKEN` | ≥24 字符管理令牌 |
-   | `MASTER_KEY` | 32 字节 Base64 主密钥 |
-   | `CRON_SECRET` | 保护 `/api/cron/drain` 的随机值（Vercel Cron 自动携带） |
+systemd 单元示例：
 
-3. 部署即可；入口为 `api/index.ts`，面板与 MCP 与其他形态完全一致。
+```ini
+[Unit]
+Description=Walkie notification control plane
+After=network-online.target
 
-## MCP 接入
+[Service]
+User=walkie
+WorkingDirectory=/opt/walkie
+EnvironmentFile=/opt/walkie/.env
+ExecStart=/usr/bin/node dist/server/index.js
+Restart=on-failure
 
-在面板的 **Agents** 页面创建 API Key。原始 Key 只显示一次；RelayDock 数据库只保存哈希。
+[Install]
+WantedBy=multi-user.target
+```
 
-管理面板的 **接入** 页面可直接复制 Codex、Claude Code、Cursor 与通用客户端配置。所有客户端都连接同一个 Streamable HTTP 地址：`https://<domain>/mcp`。
+内网注意事项：
 
-通用 MCP 客户端配置：
+- `ALLOW_PRIVATE_WEBHOOKS=true` 允许通知发往私网地址（OneBot、内网 Apprise 等必需）；
+- 目标服务只有 HTTP 时再加 `ALLOW_INSECURE_HTTP=true`；
+- 对外暴露前务必经反向代理加 TLS，并保持 `ADMIN_TOKEN` 已设置——绑定非回环地址且未设管理密码时进程会拒绝启动。
 
-```json
+## 接入你的 Agent
+
+在控制台「密钥」页创建 Agent Key（可自定义成好记的密码，或用随机生成的 `rdk_` 密钥），然后任选一种方式：
+
+### MCP（推荐）
+
+`https://你的域名/mcp`，Streamable HTTP + Bearer 鉴权。控制台「接入」页可直接复制以下配置：
+
+```jsonc
+// Claude Code — .mcp.json
 {
   "mcpServers": {
-    "relaydock": {
+    "walkie": {
       "type": "http",
-      "url": "https://notify.example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer ${RELAYDOCK_API_KEY}"
-      }
+      "url": "https://你的域名/mcp",
+      "headers": { "Authorization": "Bearer ${WALKIE_API_KEY}" }
     }
   }
 }
 ```
-
-典型调用顺序：
-
-1. `list_destinations` 获取该 Agent 有权使用的 ID/slug。
-2. `send_notification` 提交 `destination`、`title`、`body`、`severity`，可选 `url`、`metadata`、`idempotencyKey`。
-3. `get_delivery` 用返回的 `deliveryId` 查询每个渠道的最终状态。
-4. 需要人工决策时：`ask_user` 提交 `destination` 与 `question`（可带 `options` 预设选项，回复页渲染为按钮，也支持自由输入），拿到 `conversationId`；轮询 `check_reply`（服务端长轮询最多 25 秒/次）直到 `status` 为 `replied`，`reply` 即人的回答。问题会推送到渠道并附一次性回复链接，手机浏览器打开即可作答，无需安装任何客户端；回复链接有效期由 `timeoutSeconds` 控制（默认 1 小时）。REST 等价接口：`POST /api/v1/ask` 与 `GET /api/v1/conversations/{id}`；管理面板也可通过 `GET /api/admin/conversations?pending=1` 与 `POST /api/admin/conversations/{id}/reply` 代答。
-
-Agent 不能提交 webhook URL 或平台凭据，只能引用管理员预先配置并授权的目的地。
-
-### Codex
-
-Codex CLI、桌面端和 IDE 扩展共享 `~/.codex/config.toml`；可信项目也可以使用 `.codex/config.toml`：
 
 ```toml
-[mcp_servers.relaydock]
-url = "https://notify.example.com/mcp"
-bearer_token_env_var = "RELAYDOCK_API_KEY"
-default_tools_approval_mode = "writes"
+# Codex — ~/.codex/config.toml
+[mcp_servers.walkie]
+url = "https://你的域名/mcp"
+bearer_token_env_var = "WALKIE_API_KEY"
 ```
 
-在启动 Codex 的环境中设置 `RELAYDOCK_API_KEY`，然后用 `/mcp` 检查连接。不要把原始 Key 写进项目配置。
+| MCP 工具 | 作用 |
+| --- | --- |
+| `list_destinations` | 列出该 Key 可用的频道与路由 |
+| `send_notification` | 发送通知，返回 deliveryId |
+| `get_delivery` | 查询投递的总体与分渠道状态 |
+| `ask_user` | 向人类提问，推送一次性回复链接 |
+| `check_reply` | 长轮询等待人类回复 |
+| `list_routes` | 列出可用路由 |
 
-### Claude Code
+### REST API
 
-项目根目录 `.mcp.json`：
-
-```json
-{
-  "mcpServers": {
-    "relaydock": {
-      "type": "http",
-      "url": "https://notify.example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer ${RELAYDOCK_API_KEY}"
-      }
-    }
-  }
-}
+```bash
+curl -X POST https://你的域名/api/v1/notify \
+  -H "Authorization: Bearer <AgentKey>" \
+  -H "content-type: application/json" \
+  -d '{"destination":"prod-alerts","title":"部署完成","body":"v2.4.0 已上线","severity":"success"}'
 ```
 
-也可以用 CLI：
+`POST /api/v1/ask` 提问、`GET /api/v1/conversations/:id` 取回复、`GET /api/v1/deliveries/:id` 查投递。
 
-```powershell
-claude mcp add --transport http relaydock https://notify.example.com/mcp --header "Authorization: Bearer $env:RELAYDOCK_API_KEY"
+### Server酱兼容
+
+任何支持 Server酱的现有工具可以零改造切过来，把推送地址换成：
+
+```
+https://你的域名/send/<AgentKey>.send
 ```
 
-### Cursor
+支持 `title` / `desp` / `tags` / `short` 参数；Key 配置了多个目的地时用 `destination` 参数指定。
 
-项目配置 `.cursor/mcp.json`：
+## 双向确认是怎么工作的
 
-```json
-{
-  "mcpServers": {
-    "relaydock": {
-      "url": "https://notify.example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer ${env:RELAYDOCK_API_KEY}"
-      }
-    }
-  }
-}
+```
+Agent ── ask_user("要不要回滚？", 选项) ──► Walkie
+Walkie ── 推送问题 + 一次性链接 ──► 你的手机（任意已配置渠道）
+你     ── 点选项或输入回复（或直接在控制台「会话」页回） ──► Walkie
+Agent  ── check_reply 长轮询 ──► 拿到答案，继续执行
 ```
 
-### 自研 Agent
+链接一次有效、到期作废（30 秒 ~ 24 小时可调），无需给回复者任何账号。
 
-使用任意 MCP SDK 的 Streamable HTTP client，向 `/mcp` 发送 `Authorization: Bearer <Agent API Key>`。RelayDock 是无状态 MCP 服务，不要求粘性会话；客户端应同时接受 `application/json` 和 `text/event-stream`。典型调用顺序是 `list_destinations` → `send_notification` → `get_delivery`。
+## 环境变量参考
 
-## REST API
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `ADMIN_TOKEN` | — | 管理密码（≥8 位）。生产必填；之后可在面板改，env 值与面板密码并存 |
+| `MASTER_KEY` | — | base64 的 32 字节根密钥(KEK)，加密所有渠道凭据。生产必填，**丢失即无法解密数据** |
+| `PORT` / `HOST` | `4310` / `127.0.0.1` | 监听地址（Node 部署） |
+| `DATA_DIR` | `./data` | SQLite 数据目录（Node 部署） |
+| `ALLOW_PRIVATE_WEBHOOKS` | `false` | 允许通知发往私网/回环地址 |
+| `ALLOW_INSECURE_HTTP` | `false` | 允许 HTTP 通知地址 |
+| `DELIVERY_WORKERS` | `2` | 每轮并发投递数 |
+| `MAX_SENDS_PER_MIN` | `0` | 全局每分钟发送上限，0 不限 |
+| `MAX_DELIVERY_ATTEMPTS` | `4` | 单渠道最大尝试次数（指数退避） |
+| `RETRY_BASE_MS` | `2000` | 重试退避基数 |
+| `PUBLIC_URL` | — | 站点对外地址（回复链接、MCP 配置展示用） |
+| `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | — | 使用 Turso/libSQL 远程数据库（Vercel 部署） |
+| `CRON_SECRET` | — | Vercel Cron 鉴权 |
 
-Agent API 使用同一个 Bearer Key：
+## 安全模型
 
-```http
-POST /api/v1/notify
-Authorization: Bearer rdk_xxxxxxxx_xxxxxxxxxxxxxxxxx
-Content-Type: application/json
+- 渠道凭据 AES-256-GCM 加密落盘；两级密钥（env `MASTER_KEY` 为 KEK，数据密钥 DEK 可在控制台在线轮换并原子重加密）；
+- Agent Key 与管理密码只存 sha256 哈希做鉴权；Agent Key 另存一份加密副本供面板查看复制；
+- 出站通知默认拒绝私网/回环/保留地址与明文 HTTP（SSRF 防护），重定向一律拒绝；
+- 每个 Agent Key 可限定 scope（发送/读取）与目的地白名单，一键吊销；
+- 回复链接带一次性 token，回复后立即失效；所有敏感操作写审计表。
 
-{
-  "destination": "prod-incidents",
-  "title": "数据库连接池耗尽",
-  "body": "checkout-service 已连续 5 分钟超过阈值",
-  "severity": "critical",
-  "url": "https://monitor.example.com/incidents/1842",
-  "metadata": { "service": "checkout-service", "region": "ap-southeast-1" },
-  "idempotencyKey": "incident-1842-open"
-}
-```
+## 常见问题
 
-查询状态：
+**忘记管理密码？** 重新 `wrangler secret put ADMIN_TOKEN`（或改环境变量后重启）设置一个新的 env 密码，登录后可在面板再改。
 
-```http
-GET /api/v1/deliveries/{deliveryId}
-Authorization: Bearer rdk_xxxxxxxx_xxxxxxxxxxxxxxxxx
-```
+**换设备后 Agent Key 丢了？** 「密钥」页可直接查看并复制（明文加密存储）；也可以吊销后重建。
 
-`POST /api/v1/notify` 还接受可选的 `tags`（竖线分隔标签）、`short`（卡片简述）与 `callbackUrl`：投递到达终态（delivered/partial/failed）后，RelayDock 会向 `callbackUrl` POST 一次最终结果（含每渠道状态），Agent 无需轮询即可获知推送成败。MCP 的 `send_notification` 同样支持 `callbackUrl`。
+**Cloudflare 上 SMTP 能用吗？** Workers 的 `nodejs_compat` 提供 TCP socket 支持，多数 465/587 SMTP 服务可用；不可用时建议改用 HTTP 类渠道或在 Node/Docker 部署里发信。
 
-## Server 酱兼容入口
+**通知没到？** 「投递」页看每个渠道的尝试记录与错误信息；「频道」页有一键测试。
 
-任何已集成 Server 酱的软件（Check酱、各类监控脚本等）只需把 API 地址换成 RelayDock，SendKey 填 Agent API Key：
+## 开发
 
-```text
-GET/POST https://notify.example.com/send/rdk_xxxxxxxx_xxxxxxxxxxxxxxxxx.send?title=标题&desp=正文
-```
-
-- 参数与 Server酱³ 一致：`title`/`text`、`desp`、`tags`、`short`；支持 Query、表单和 JSON。
-- 目的地：Key 白名单只配置了一个目的地时自动使用；否则加 `destination=<slug>` 参数。
-- 响应为 Server 酱风格 `{ "code": 0, "data": { "pushid": "..." } }`，`pushid` 即 deliveryId。
-
-## 投递治理
-
-每个频道可单独配置：
-
-- **每分钟限流**：超出的消息自动延后重新排队，不计入重试次数。
-- **静默时段**：如 `22:00-08:00`（服务器本地时间），静默期内消息延后到时段结束发送；`critical` 级别照常送达。
-- **长消息分片**：超过渠道正文上限（Telegram 4096、企业微信 4K 字节等）自动按换行切分为多条，标题附 `(1/n)` 序号，链接只挂最后一条。
-
-## 配置
-
-| 环境变量 | 默认值 | 说明 |
-|---|---:|---|
-| `HOST` | `127.0.0.1` | 监听地址；非回环地址必须设置管理令牌 |
-| `PORT` | `4310` | HTTP 端口 |
-| `DATA_DIR` | `./data` | SQLite 数据目录 |
-| `ADMIN_TOKEN` | 无 | 管理面板/API Bearer Token，生产必填且至少 24 字符 |
-| `MASTER_KEY` | 本地开发键 | 32 字节 Base64 加密主密钥，生产必填 |
-| `ALLOW_PRIVATE_WEBHOOKS` | `false` | 允许解析到私网/回环地址的目标 |
-| `ALLOW_INSECURE_HTTP` | `false` | 允许明文 HTTP 目标 |
-| `DELIVERY_WORKERS` | `2` | 每轮并发投递数，范围 1–16 |
-| `MAX_SENDS_PER_MIN` | `0` | 全局每分钟最大推送条数，0 不限 |
-| `MAX_DELIVERY_ATTEMPTS` | `4` | 单频道最大尝试次数，范围 1–10 |
-| `RETRY_BASE_MS` | `2000` | 指数退避基准时间 |
-| `PUBLIC_URL` | 请求来源 | Node/Docker 对外规范地址，面板据此生成 MCP 配置 |
-| `TURSO_DATABASE_URL` | 无 | 设置后改用 Turso/libSQL 远程库（Vercel 部署必填） |
-| `TURSO_AUTH_TOKEN` | 无 | Turso 数据库令牌 |
-| `CRON_SECRET` | 无 | Vercel Cron 调用 `/api/cron/drain` 的鉴权令牌 |
-
-## 架构
-
-```text
-AI Agent ── MCP / REST ──┐
-                         ├── Express API ── SQLite
-管理员 ── React 面板 ────┘        │
-                                  └── Delivery Worker ── Provider adapters
-```
-
-MCP 使用无 session 的 Streamable HTTP transport；每个请求创建轻量 `McpServer`。Node/Docker 使用 WAL SQLite 和进程级投递循环；Cloudflare Workers 使用 SQLite-backed Durable Object 串行化状态，并由 alarm 恢复到期重试。
-
-## Roadmap
-
-按对 Agent 场景的价值排序（欢迎 PR）：
-
-- [x] 投递终态回调 `callbackUrl`、全局限流 `MAX_SENDS_PER_MIN`
-- [x] 渠道扩充至 30+（QQ/OneBot、PushDeer、Chanify、PushMe、Synology Chat、PagerDuty、LINE）与渠道级优先级/铃声/颜色参数
-- [ ] severity 规则路由：`critical` 自动 fanout 到多渠道
-- [ ] 飞书/企业微信应用消息（token 交换，可私聊指定人）、WhatsApp Cloud API
-- [x] 长消息按渠道上限自动分片（Telegram/企业微信/钉钉/Discord 等，分片带序号）
-- [ ] Markdown 跨渠道降级（Telegram MarkdownV2 / 飞书卡片 / 纯文本）
-- [ ] 附件与图片透传（Bark/ntfy/Telegram）
-- [x] 双向确认 `ask_user`/`check_reply`：一次性回复链接，任意渠道可用
-- [ ] 时间窗 digest 聚合，防高频 Agent 通知轰炸
-- [ ] 英文 README 与在线演示实例
-
-## 当前限制
-
-- 第一版只支持文本、Markdown、链接和基础卡片，不处理附件上传、图片二进制或平台交互回调。
-- 使用静态 Bearer Agent Key，尚未实现 MCP OAuth/动态客户端注册。
-- 自定义 Webhook 的地址在请求前检查 DNS，但未做出站代理级 IP 固定；高安全环境应配合网络 egress policy。
-- SQLite 适合单机和中等通知吞吐；多地域高可用需要外部数据库与专用队列后端。
-- Cloudflare Workers 部署当前固定为一个 Durable Object 实例，语义与单机版一致；它不是多活分片架构。
-- `@modelcontextprotocol/node@2.0.0` 当前通过 `@hono/node-server` 带有一个 Windows 静态文件路径穿越的上游中危审计项。RelayDock 不使用该静态文件实现，面板由 Express 托管；仍应在上游发布修复后升级。
-
-## 验证
-
-```powershell
-npm test
+```bash
+npm ci
+npm run dev        # API（Node, 端口 4310）
+npm run dev:web    # 控制台（Vite）
+npm test           # vitest
 npm run typecheck
-npm run build
 ```
+
+架构：`src/server`（Express + 队列 + 渠道调度，Node/Vercel/Workers 共用核心）、`src/worker`（Cloudflare Durable Object 入口）、`src/web`（React 控制台）、`api/`（Vercel 入口）。添加新渠道见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## License
 

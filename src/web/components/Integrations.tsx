@@ -20,15 +20,15 @@ export function Integrations({ meta, notify }: { meta: Meta; notify: Notify }) {
   const snippets = {
     codex: {
       label: 'Codex', path: '~/.codex/config.toml', icon: SquareTerminal,
-      content: `[mcp_servers.relaydock]\nurl = "${meta.mcpUrl}"\nbearer_token_env_var = "RELAYDOCK_API_KEY"\ndefault_tools_approval_mode = "writes"`
+      content: `[mcp_servers.walkie]\nurl = "${meta.mcpUrl}"\nbearer_token_env_var = "WALKIE_API_KEY"\ndefault_tools_approval_mode = "writes"`
     },
     claude: {
       label: 'Claude Code', path: '.mcp.json', icon: Bot,
-      content: JSON.stringify({ mcpServers: { relaydock: { type: 'http', url: meta.mcpUrl, headers: { Authorization: 'Bearer ${RELAYDOCK_API_KEY}' } } } }, null, 2)
+      content: JSON.stringify({ mcpServers: { walkie: { type: 'http', url: meta.mcpUrl, headers: { Authorization: 'Bearer ${WALKIE_API_KEY}' } } } }, null, 2)
     },
     cursor: {
       label: 'Cursor', path: '.cursor/mcp.json', icon: Code2,
-      content: JSON.stringify({ mcpServers: { relaydock: { url: meta.mcpUrl, headers: { Authorization: 'Bearer ${env:RELAYDOCK_API_KEY}' } } } }, null, 2)
+      content: JSON.stringify({ mcpServers: { walkie: { url: meta.mcpUrl, headers: { Authorization: 'Bearer ${env:WALKIE_API_KEY}' } } } }, null, 2)
     },
     generic: {
       label: '通用 MCP', path: 'Streamable HTTP', icon: Network,
@@ -90,7 +90,7 @@ export function Integrations({ meta, notify }: { meta: Meta; notify: Notify }) {
           </section>
           <section className="panel env-callout">
             <KeyRound size={17} />
-            <div><strong>RELAYDOCK_API_KEY</strong><p>在「密钥」页创建，原始值只显示一次。</p></div>
+            <div><strong>WALKIE_API_KEY</strong><p>在「密钥」页创建，原始值只显示一次。</p></div>
           </section>
         </aside>
       </div>

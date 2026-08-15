@@ -94,7 +94,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
   private async authenticateAgent(request: Request): Promise<{ apiKey: ApiKey; authInfo: AuthInfo } | Response> {
     const token = bearer(request);
     const apiKey = token ? await this.repository.authenticateKey(token) : undefined;
-    if (!token || !apiKey) return json({ error: '无效或已吊销的 Agent API Key' }, 401, { 'www-authenticate': 'Bearer realm="RelayDock"' });
+    if (!token || !apiKey) return json({ error: '无效或已吊销的 Agent API Key' }, 401, { 'www-authenticate': 'Bearer realm="Walkie"' });
     return { apiKey, authInfo: { token, clientId: apiKey.id, scopes: apiKey.scopes } };
   }
 
@@ -102,11 +102,11 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     try {
       const url = new URL(request.url);
       const path = url.pathname;
-      if (path === '/health' && request.method === 'GET') return json({ status: 'ok', version: '0.2.0', runtime: 'cloudflare-workers', queue: 'alarm' });
+      if (path === '/health' && request.method === 'GET') return json({ status: 'ok', version: '0.3.0', runtime: 'cloudflare-workers', queue: 'alarm' });
       if (path === '/api/meta' && request.method === 'GET') {
         const rotated = await this.repository.getAdminTokenHash();
         return json({
-          name: 'RelayDock', version: '0.2.0', runtime: 'cloudflare-workers',
+          name: 'Walkie', version: '0.3.0', runtime: 'cloudflare-workers',
           adminAuthRequired: Boolean(this.env.ADMIN_TOKEN) || Boolean(rotated.hash),
           publicUrl: url.origin, mcpEndpoint: '/mcp', mcpUrl: `${url.origin}/mcp`
         });
@@ -213,7 +213,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       const item = await this.repository.getChannel(testChannel[1]);
       if (!item) return json({ error: '频道不存在' }, 404);
       try {
-        await this.dispatcher.send(item.provider, await this.repository.getChannelConfig(item.id), { title: 'RelayDock 测试通知', body: '频道连接正常，可以接收 Agent 通知。', severity: 'success', metadata: {} });
+        await this.dispatcher.send(item.provider, await this.repository.getChannelConfig(item.id), { title: 'Walkie 测试通知', body: '频道连接正常，可以接收 Agent 通知。', severity: 'success', metadata: {} });
         await this.repository.setChannelTest(item.id, true);
         return json({ success: true });
       } catch (error) {
@@ -308,7 +308,7 @@ export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const path = new URL(request.url).pathname;
     if (path === '/health' || path === '/mcp' || path.startsWith('/api/') || path.startsWith('/reply/') || /^\/(?:send\/)?[^/]+\.send$/.test(path)) {
-      return env.RELAYDOCK.getByName('default').fetch(request);
+      return env.WALKIE.getByName('default').fetch(request);
     }
     return env.ASSETS.fetch(request);
   }

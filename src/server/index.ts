@@ -18,7 +18,7 @@ const server = createServer(app);
 
 worker.start();
 server.listen(config.port, config.host, () => {
-  console.log(`RelayDock listening on http://${config.host}:${config.port}`);
+  console.log(`Walkie listening on http://${config.host}:${config.port}`);
   if (!config.adminToken) console.log('Local development mode: admin API does not require a token.');
 });
 
