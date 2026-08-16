@@ -222,7 +222,10 @@ export function Keys({
                       <strong className="table-title">{key.name}</strong>
                       <span className="muted-row">创建于 {formatDate(key.createdAt)}</span>
                     </td>
-                    <td><code>{key.secret && !key.secret.startsWith('rdk_') ? '自定义密钥' : `rdk_${key.prefix}_••••`}</code></td>
+                    <td><code>{key.secret
+                      // 随机密钥由服务端生成，格式恒为 rdk_<prefix>_…；自定义密钥即便以 rdk_ 开头也匹配不上（prefix 是哈希）
+                      ? (key.secret.startsWith(`rdk_${key.prefix}_`) ? `rdk_${key.prefix}_••••` : '自定义密钥')
+                      : `rdk_${key.prefix}_••••`}</code></td>
                     <td>
                       <div className="scope-pills">
                         {key.scopes.map((scope) => <span key={scope}>{scope === 'notifications:send' ? '发送' : '读取'}</span>)}

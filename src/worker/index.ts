@@ -180,7 +180,12 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
         if (request.method === 'POST') {
           const bodyParams = await readBody(request);
           const text = String(bodyParams.reply ?? bodyParams.replyText ?? '').trim().slice(0, 4000);
-          if (!text) return html(renderReplyResult('gone'), 400);
+          if (!text) {
+            // 空提交时链接仍有效，重新渲染表单并提示，而不是误报「链接已失效」把人劝退（与 Node 版一致）
+            const conversation = await this.repository.getConversationForReply(reply[1], reply[2]);
+            const usable = conversation && !conversation.repliedAt && conversation.expiresAt > new Date().toISOString();
+            return html(usable ? renderReplyForm(conversation.question, conversation.options, '回复内容不能为空，请输入后再发送。') : renderReplyResult('gone'), usable ? 400 : 410);
+          }
           const accepted = await this.repository.replyConversation(reply[1], text, 'reply-link', reply[2]);
           return html(renderReplyResult(accepted ? 'done' : 'gone'), accepted ? 200 : 410);
         }
@@ -291,7 +296,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`;
       try {
         const response = await fetch(apiUrl, { headers: { 'user-agent': 'walkie-update-checker', accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(10_000) });
-        if (!response.ok) return json({ currentVersion: VERSION, latestVersion: VERSION, hasUpdate: false, canApply: false, applyHint: `无法获取版本信息（HTTP ${response.status}）。` });
+        if (!response.ok) return json({ currentVersion: VERSION, latestVersion: VERSION, hasUpdate: false, canApply: false, applyHint: `无法获取版本信息（HTTP ${response.status}）。请确认 UPDATE_REPO 环境变量是否正确指向 GitHub 仓库。` });
         const release = await response.json() as { tag_name: string; html_url: string; body?: string };
         const latestVersion = release.tag_name.replace(/^v/, '');
         const hasUpdate = isNewerVersion(latestVersion, VERSION);

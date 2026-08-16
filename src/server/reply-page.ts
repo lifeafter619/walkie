@@ -46,11 +46,11 @@ textarea:focus{border-color:var(--accent)}
 .state h2{font-size:17px;margin:12px 0 6px}
 .state p{color:var(--muted);font-size:13px;margin:0}
 </style>
-<script>try{var t=localStorage.rdTheme;if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+<script>try{var t=localStorage.getItem('rd-theme')||localStorage.rdTheme;if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
 </head><body><main>
 <header><h1>Walkie</h1><button id="mode" type="button" aria-label="切换明暗" onclick="
   var d=document.documentElement,dark=d.dataset.theme?d.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
-  d.dataset.theme=dark?'light':'dark';try{localStorage.rdTheme=d.dataset.theme}catch(e){}">◐</button></header>
+  d.dataset.theme=dark?'light':'dark';try{localStorage.setItem('rd-theme',d.dataset.theme)}catch(e){}">◐</button></header>
 ${body}
 </main></body></html>`;
 

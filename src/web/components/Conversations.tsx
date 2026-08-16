@@ -100,7 +100,7 @@ export function Conversations({ notify, onChanged }: { notify: Notify; onChanged
                     {conversation.options && conversation.options.length > 0 && (
                       <div className="conv-options">
                         {conversation.options.map((option) => (
-                          <button type="button" key={option} disabled={Boolean(busyId)} onClick={() => void reply(conversation, option)}>{option}</button>
+                          <button type="button" key={option} disabled={busyId === conversation.id} onClick={() => void reply(conversation, option)}>{option}</button>
                         ))}
                       </div>
                     )}
@@ -112,7 +112,7 @@ export function Conversations({ notify, onChanged }: { notify: Notify; onChanged
                         maxLength={4000}
                         disabled={busyId === conversation.id}
                       />
-                      <IconButton type="submit" label="发送回复" icon={Send} spin={busyId === conversation.id} disabled={Boolean(busyId) || !(drafts[conversation.id] ?? '').trim()} />
+                      <IconButton type="submit" label="发送回复" icon={Send} spin={busyId === conversation.id} disabled={busyId === conversation.id || !(drafts[conversation.id] ?? '').trim()} />
                     </form>
                   </>
                 )}

@@ -232,6 +232,7 @@ Agent  ── check_reply 长轮询 ──► 拿到答案，继续执行
 | `MAX_DELIVERY_ATTEMPTS` | `4` | 单渠道最大尝试次数（指数退避） |
 | `RETRY_BASE_MS` | `2000` | 重试退避基数 |
 | `PUBLIC_URL` | — | 站点对外地址（回复链接、MCP 配置展示用） |
+| `UPDATE_REPO` | `walkie-eth/walkie` | 应用内版本检查指向的 GitHub 仓库（owner/name，自建 fork 时改这里） |
 | `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | — | 使用 Turso/libSQL 远程数据库（Vercel 部署） |
 | `CRON_SECRET` | — | Vercel Cron 鉴权 |
 
@@ -245,7 +246,7 @@ Agent  ── check_reply 长轮询 ──► 拿到答案，继续执行
 
 ## 常见问题
 
-**忘记管理密码？** 重新 `wrangler secret put ADMIN_TOKEN`（或改环境变量后重启）设置一个新的 env 密码，登录后可在面板再改。
+**忘记管理密码？** 设置一个新的 env 密码即可：Cloudflare 用 `wrangler secret put ADMIN_TOKEN`；Docker/Node 改环境变量后重启。登录后可在面板再改。注意：面板轮换过的密码保存在数据库中，重设 env 后旧的面板密码仍有效，需登录面板重新轮换覆盖。
 
 **换设备后 Agent Key 丢了？** 「密钥」页可直接查看并复制（明文加密存储）；也可以吊销后重建。
 

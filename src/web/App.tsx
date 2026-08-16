@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Activity, Code2, KeyRound, LayoutDashboard, LoaderCircle, Radio, Menu,
+  Activity, Code2, KeyRound, LayoutDashboard, LoaderCircle, LogOut, Radio, Menu,
   MessageCircleQuestion, MessageSquareText, RefreshCw, Route as RouteIcon, ServerCog, X
 } from 'lucide-react';
 import type { ApiKey, Channel, DashboardStats, Delivery, Destination, ProviderDefinition, Route } from '../shared/types';
-import { api, ApiError, getToken } from './api';
+import { api, ApiError, getToken, setToken } from './api';
 import { Button, IconButton, ThemeToggle, Toasts, type Notify, type Toast } from './components/ui';
 import { Login } from './components/Login';
 import { Overview } from './components/Overview';
@@ -197,8 +197,21 @@ export default function App() {
           ))}
         </nav>
         <div className="side-footer">
-          <ThemeToggle />
-          <IconButton label="刷新数据" icon={RefreshCw} onClick={refresh} />
+          <div className="side-footer-meta">
+            <span className="version-badge" title={`Walkie v${meta.version} · ${meta.runtime}`}>v{meta.version}</span>
+            <button
+              type="button"
+              className="logout-button"
+              onClick={() => { setToken(''); setAuthenticated(false); }}
+            >
+              <LogOut size={13} />
+              退出登录
+            </button>
+          </div>
+          <div className="side-footer-actions">
+            <ThemeToggle />
+            <IconButton label="刷新数据" icon={RefreshCw} onClick={refresh} />
+          </div>
         </div>
       </aside>
       {menu && <div className="nav-backdrop" onClick={() => setMenu(false)} />}

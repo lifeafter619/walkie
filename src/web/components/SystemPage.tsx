@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { Activity, Check, Copy, Download, ExternalLink, LoaderCircle, ShieldCheck, TestTube2, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Activity, Copy, Download, ExternalLink, LoaderCircle, ShieldCheck, TestTube2, AlertTriangle, RefreshCw } from 'lucide-react';
 import type { Channel, ProviderDefinition } from '../../shared/types';
 import { api } from '../api';
-import { Badge, Button, IconButton, Modal, Notify, type Notify as NotifyType } from './ui';
+import { Badge, Button, IconButton, Modal, type Notify } from './ui';
 import { ProviderIcon } from './ProviderIcon';
 
 type Meta = {
@@ -27,7 +27,7 @@ type UpdateStatus = {
  * 系统状态：实例信息（URL 可复制）+ 各渠道测试结果（可在此直接测试）+ 版本更新。
  * ──────────────────────────────────────────────────────────── */
 
-function CopyableRow({ label, value, notify }: { label: string; value: string; notify: NotifyType }) {
+function CopyableRow({ label, value, notify }: { label: string; value: string; notify: Notify }) {
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(value);
@@ -47,7 +47,7 @@ function CopyableRow({ label, value, notify }: { label: string; value: string; n
   );
 }
 
-export function SystemPage({ meta, channels, providers, refresh, notify }: { meta: Meta; channels: Channel[]; providers: ProviderDefinition[]; refresh: () => Promise<void> | void; notify: NotifyType }) {
+export function SystemPage({ meta, channels, providers, refresh, notify }: { meta: Meta; channels: Channel[]; providers: ProviderDefinition[]; refresh: () => Promise<void> | void; notify: Notify }) {
   const [testingId, setTestingId] = useState('');
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [checking, setChecking] = useState(false);

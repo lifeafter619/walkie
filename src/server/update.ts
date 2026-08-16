@@ -56,7 +56,7 @@ export async function checkUpdate(repo?: string): Promise<UpdateCheckResult> {
       releaseNotes: release.body?.slice(0, 500),
       releaseUrl: release.html_url,
       canApply,
-      applyHint: canApply ? undefined : '当前部署方式不支持应用内更新。请手动拉取最新代码并重新部署。'
+      applyHint: canApply ? undefined : '当前部署方式不支持应用内更新。Docker 请拉取新镜像后重建容器；源码部署请 git pull 后重新构建部署。'
     };
   } catch (error) {
     return { currentVersion: CURRENT_VERSION, latestVersion: CURRENT_VERSION, hasUpdate: false, canApply: false, applyHint: `检查更新失败：${error instanceof Error ? error.message : '网络错误'}` };
