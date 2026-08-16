@@ -15,19 +15,19 @@ const config = loadConfig({ host: '0.0.0.0' });
 const repository = await createLibsqlRepository(databaseUrl, process.env.TURSO_AUTH_TOKEN, config.masterKey);
 const dispatcher = new ProviderDispatcher(config);
 let workerRef: DeliveryWorker;
-const notifications = new NotificationService(repository, () => void workerRef.drainOnce());
+const notifications = new NotificationService(repository, () => void workerRef.drainAll());
 const worker = new DeliveryWorker(repository, dispatcher, config);
 workerRef = worker;
 // 请求返回后继续跑完投递，而不是随函数冻结中断
-const drain = worker.drainOnce.bind(worker);
-worker.drainOnce = () => { const pending = drain(); waitUntil(pending); return pending; };
+const drain = worker.drainAll.bind(worker);
+worker.drainAll = () => { const pending = drain(); waitUntil(pending); return pending; };
 
 const app = express();
 app.get('/api/cron/drain', async (req, res) => {
   if (!process.env.CRON_SECRET || req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
     return res.status(401).json({ error: 'CRON_SECRET required' });
   }
-  res.json({ processed: await worker.drainOnce() });
+  res.json({ processed: await worker.drainAll() });
 });
 app.use(createApp({ config, repository, notifications, dispatcher, worker }));
 

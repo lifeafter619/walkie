@@ -10,6 +10,10 @@ describe('validation helpers', () => {
     expect(validateChannelCreate('no-such-provider', {})).toEqual(['不支持的渠道类型']);
     expect(validateChannelCreate('telegram', {})).toEqual(['Bot Token不能为空', 'Chat ID不能为空']);
     expect(validateChannelCreate('telegram', { botToken: 't', chatId: '42' })).toEqual([]);
+    expect(validateChannelCreate('onebot', { server: 'https://qq.example.com' })).toContain('私聊 QQ 号或群号至少填写一项');
+    expect(validateChannelCreate('wxpusher', { appToken: 'token' })).toContain('UID 列表或主题 ID 至少填写一项');
+    expect(validateChannelCreate('apprise', { server: 'https://apprise.example.com' })).toContain('持久配置 Key 或 Apprise URL 至少填写一项');
+    expect(validateChannelCreate('gotify', { server: 'not-a-url', token: 'token' })).toContain('服务地址必须是有效的 HTTP(S) 地址');
   });
 
   it('validateChannelUpdate merges config then revalidates required fields', async () => {

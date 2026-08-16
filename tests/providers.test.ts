@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../src/server/config.js';
-import { ProviderDispatcher, splitBody } from '../src/server/providers/dispatcher.js';
+import { ProviderDispatcher, splitBody, splitBodyBytes } from '../src/server/providers/dispatcher.js';
 import { assertSafeUrl } from '../src/server/providers/network.js';
 
 const config = { allowPrivateWebhooks: true, allowInsecureHttp: false } as AppConfig;
@@ -48,6 +48,26 @@ describe('provider dispatcher', () => {
     await expect(dispatcher.send('wxpusher', { appToken: 'AT_x' }, { title: 'T', body: 'B', severity: 'info', metadata: {} })).rejects.toThrow('UID');
   });
 
+  it('uses the Apprise persistent key path and detects logical provider failures', async () => {
+    const fetcher = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).includes('/notify/saved')) return new Response('{}', { status: 200 });
+      return new Response(JSON.stringify({ status: 'failed', retcode: 1404, message: 'not found' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const dispatcher = new ProviderDispatcher(config, fetcher);
+    await dispatcher.send('apprise', { server: 'https://apprise.example.com', configKey: 'saved' }, { title: 'T', body: 'B', severity: 'info', metadata: {} });
+    expect(String(vi.mocked(fetcher).mock.calls[0][0])).toBe('https://apprise.example.com/notify/saved');
+    await expect(dispatcher.send('onebot', { server: 'https://onebot.example.com', userId: '42' }, { title: 'T', body: 'B', severity: 'info', metadata: {} })).rejects.toThrow('not found');
+  });
+
+  it('detects non-HTTP failure responses from Synology Chat and Pushover', async () => {
+    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(String(url).includes('pushover')
+      ? JSON.stringify({ status: 0, errors: ['invalid token'] })
+      : JSON.stringify({ success: false, error: 'invalid token' }), { status: 200 })) as unknown as typeof fetch;
+    const dispatcher = new ProviderDispatcher(config, fetcher);
+    await expect(dispatcher.send('synology-chat', { webhookUrl: 'https://synology.example.com/hook' }, { title: 'T', body: 'B', severity: 'info', metadata: {} })).rejects.toThrow('invalid token');
+    await expect(dispatcher.send('pushover', { apiToken: 'a', userKey: 'u' }, { title: 'T', body: 'B', severity: 'info', metadata: {} })).rejects.toThrow('invalid token');
+  });
+
   it('blocks insecure and private webhook targets by default', async () => {
     await expect(assertSafeUrl('http://example.com/hook', { allowPrivateWebhooks: false, allowInsecureHttp: false })).rejects.toThrow('HTTP 地址已禁用');
     await expect(assertSafeUrl('https://127.0.0.1/hook', { allowPrivateWebhooks: false, allowInsecureHttp: false })).rejects.toThrow('私网或回环');
@@ -64,6 +84,12 @@ describe('long message chunking', () => {
     expect(splitBody('short', 1000)).toEqual(['short']);
   });
 
+  it('splits UTF-8 payloads without exceeding the byte limit', () => {
+    const chunks = splitBodyBytes('告警😀'.repeat(500), 900);
+    expect(chunks.every((chunk) => Buffer.byteLength(chunk, 'utf8') <= 900)).toBe(true);
+    expect(chunks.join('')).toBe('告警😀'.repeat(500));
+  });
+
   it('sends numbered parts for over-limit Telegram messages, url only on last', async () => {
     const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
     const dispatcher = new ProviderDispatcher(config, fetcher);
@@ -73,6 +99,17 @@ describe('long message chunking', () => {
     expect(bodies[0]).toContain('Report (1/3)');
     expect(bodies[0]).not.toContain('https://example.com/r');
     expect(bodies[2]).toContain('https://example.com/r');
+  });
+
+  it('splits ntfy messages at the documented 4096-byte limit', async () => {
+    const fetcher = vi.fn(async () => new Response('', { status: 200 })) as unknown as typeof fetch;
+    const dispatcher = new ProviderDispatcher(config, fetcher);
+    const body = '告警😀'.repeat(1500);
+    await dispatcher.send('ntfy', { server: 'https://ntfy.sh', topic: 'ops' }, { title: 'T', body, severity: 'critical', metadata: {} });
+    const payloads = vi.mocked(fetcher).mock.calls.map((call) => String(call[1]?.body ?? ''));
+    expect(payloads.length).toBeGreaterThan(1);
+    expect(payloads.every((part) => Buffer.byteLength(part, 'utf8') <= 4096)).toBe(true);
+    expect(payloads.join('')).toBe(body);
   });
 });
 

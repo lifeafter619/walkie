@@ -131,6 +131,16 @@ export class DeliveryWorker {
     }
   }
 
+  /** 排空当前所有已到期尝试；Serverless 入口没有常驻 timer，需要显式使用此方法。 */
+  async drainAll(): Promise<number> {
+    let total = 0;
+    for (;;) {
+      const processed = await this.drainOnce();
+      total += processed;
+      if (!processed) return total;
+    }
+  }
+
   private async drain(): Promise<number> {
     const attempts = await this.repository.claimDueAttempts(this.config.deliveryWorkers, this.config.maxDeliveryAttempts);
     await Promise.all(attempts.map((attempt) => this.processAttempt(attempt)));

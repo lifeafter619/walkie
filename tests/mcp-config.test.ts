@@ -84,6 +84,12 @@ describe('MCP config tools', () => {
     expect(res.text).toContain('Chat ID不能为空');
   });
 
+  it('rejects malformed quiet hours in config tools', async () => {
+    const { app, secret } = await setup();
+    const res = await call(app, secret, 1, 'create_channel', { name: 'X', slug: 'quiet', provider: 'telegram', config: { botToken: 't', chatId: '1' }, quietHours: '99:99-08:00' });
+    expect(res.text).toContain('quietHours');
+  });
+
   it('manages routes: create, update, delete', async () => {
     const { app, repository, secret } = await setup();
     const channel = await repository.createChannel({ name: 'Ops', slug: 'ops', provider: 'telegram', config: { botToken: 't', chatId: '42' } });

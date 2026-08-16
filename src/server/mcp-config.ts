@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ApiKey, ProviderId } from '../shared/types.js';
+import { quietHoursSchema } from '../shared/schemas.js';
 import type { RelayRepository } from './database.js';
 import type { ProviderDispatcher } from './providers/dispatcher.js';
 import { PROVIDERS } from './providers/catalog.js';
@@ -43,7 +44,7 @@ export function registerConfigTools(server: McpServer, repository: RelayReposito
       config: z.record(z.string(), z.unknown()),
       enabled: z.boolean().optional(),
       rateLimitPerMin: z.number().int().min(0).max(600).nullish(),
-      quietHours: z.string().max(40).nullish()
+      quietHours: quietHoursSchema
     }),
     annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false }
   }, async (input) => {
@@ -63,7 +64,7 @@ export function registerConfigTools(server: McpServer, repository: RelayReposito
       config: z.record(z.string(), z.unknown()).optional(),
       enabled: z.boolean().optional(),
       rateLimitPerMin: z.number().int().min(0).max(600).nullish(),
-      quietHours: z.string().max(40).nullish()
+      quietHours: quietHoursSchema
     }),
     annotations: { destructiveHint: false, openWorldHint: false }
   }, async ({ channel: ref, provider, config, ...rest }) => {

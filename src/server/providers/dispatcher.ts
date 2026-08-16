@@ -24,6 +24,7 @@ const BODY_LIMITS: Partial<Record<ProviderId, number>> = {
   telegram: 3600, wecom: 1200, dingtalk: 16000, discord: 3600,
   'google-chat': 3600, qmsg: 900, twilio: 1400, onebot: 3500, line: 4500
 };
+const BODY_BYTE_LIMITS: Partial<Record<ProviderId, number>> = { wecom: 2600, webex: 6000, ntfy: 4096, pushover: 900 };
 
 /** 按上限切分正文，优先在换行处断开 */
 export function splitBody(body: string, limit: number): string[] {
@@ -33,6 +34,29 @@ export function splitBody(body: string, limit: number): string[] {
   while (rest.length > limit) {
     const cut = rest.lastIndexOf('\n', limit);
     const at = cut > limit / 2 ? cut : limit;
+    chunks.push(rest.slice(0, at));
+    rest = rest.slice(at).replace(/^\n/, '');
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+}
+
+/** 按 UTF-8 字节上限切分，适用于平台按字节计数的正文。 */
+export function splitBodyBytes(body: string, limit: number): string[] {
+  if (Buffer.byteLength(body, 'utf8') <= limit) return [body];
+  const chunks: string[] = [];
+  let rest = body;
+  while (Buffer.byteLength(rest, 'utf8') > limit) {
+    let low = 1;
+    let high = Math.min(rest.length, limit);
+    let end = 1;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      if (Buffer.byteLength(rest.slice(0, middle), 'utf8') <= limit) { end = middle; low = middle + 1; } else high = middle - 1;
+    }
+    if (end > 0 && end < rest.length && /[\uD800-\uDBFF]/.test(rest[end - 1]!)) end -= 1;
+    const cut = rest.lastIndexOf('\n', end);
+    const at = cut > end / 2 ? cut : end;
     chunks.push(rest.slice(0, at));
     rest = rest.slice(at).replace(/^\n/, '');
   }
@@ -59,7 +83,8 @@ export class ProviderDispatcher {
   async send(provider: ProviderId, config: Record<string, unknown>, message: ProviderMessage): Promise<ProviderResult> {
     if (provider === 'smtp') return this.sendSmtp(config, message);
     const limit = BODY_LIMITS[provider];
-    const chunks = limit ? splitBody(message.body, limit) : [message.body];
+    const byteLimit = BODY_BYTE_LIMITS[provider];
+    const chunks = byteLimit ? splitBodyBytes(message.body, byteLimit) : limit ? splitBody(message.body, limit) : [message.body];
     let result: ProviderResult = {};
     for (let index = 0; index < chunks.length; index += 1) {
       const part: ProviderMessage = chunks.length === 1 ? message : {
@@ -71,6 +96,7 @@ export class ProviderDispatcher {
       };
       const request = this.buildRequest(provider, config, part);
       const response = await safeFetch(request.url, request.init, this.appConfig, this.fetcher, this.resolveHost);
+      this.assertProviderResponse(provider, response.body);
       result = { responseCode: response.status, response: response.body };
     }
     return result;
@@ -115,7 +141,7 @@ export class ProviderDispatcher {
       case 'discord':
         return { url: string(config, 'webhookUrl'), init: this.json({ embeds: [{ title: message.title, description: message.body, url: message.url, color: Number.parseInt(color[message.severity].slice(1), 16) }] }) };
       case 'teams':
-        return { url: string(config, 'webhookUrl'), init: this.json({ type: 'message', attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: { type: 'AdaptiveCard', version: '1.4', body: [{ type: 'TextBlock', text: message.title, weight: 'Bolder', wrap: true }, { type: 'TextBlock', text: message.body, wrap: true }], actions: message.url ? [{ type: 'Action.OpenUrl', title: '查看详情', url: message.url }] : [] } }] }) };
+        return { url: string(config, 'webhookUrl'), init: this.json({ type: 'message', attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', contentUrl: null, content: { $schema: 'http://adaptivecards.io/schemas/adaptive-card.json', type: 'AdaptiveCard', version: '1.4', body: [{ type: 'TextBlock', text: message.title, weight: 'Bolder', wrap: true }, { type: 'TextBlock', text: message.body, wrap: true }], actions: message.url ? [{ type: 'Action.OpenUrl', title: '查看详情', url: message.url }] : [] } }] }) };
       case 'google-chat':
         return { url: string(config, 'webhookUrl'), init: this.json({ text: `*${message.title}*\n${message.body}${message.url ? `\n<${message.url}|查看详情>` : ''}` }) };
       case 'mattermost':
@@ -193,8 +219,9 @@ export class ProviderDispatcher {
       case 'webex':
         return { url: 'https://webexapis.com/v1/messages', init: this.json({ roomId: string(config, 'roomId'), markdown: markdown(message) }, { Authorization: `Bearer ${string(config, 'accessToken')}` }) };
       case 'apprise': {
-        const endpoint = `${string(config, 'server').replace(/\/$/, '')}/notify`;
-        return { url: endpoint, init: this.json({ title: message.title, body: message.body, type: message.severity === 'critical' ? 'failure' : message.severity === 'warning' ? 'warning' : message.severity === 'success' ? 'success' : 'info', ...(config.configKey ? { key: config.configKey } : { urls: string(config, 'urls').split(/\r?\n/).filter(Boolean) }) }) };
+        const key = string(config, 'configKey').trim();
+        const endpoint = `${string(config, 'server').replace(/\/$/, '')}/notify${key ? `/${encodeURIComponent(key)}` : ''}`;
+        return { url: endpoint, init: this.json({ title: message.title, body: message.body, type: message.severity === 'critical' ? 'failure' : message.severity === 'warning' ? 'warning' : message.severity === 'success' ? 'success' : 'info', ...(key ? {} : { urls: string(config, 'urls').split(/\r?\n/).filter(Boolean) }) }) };
       }
       case 'webhook': {
         let headers: Record<string, string> = { 'content-type': 'application/json' };
@@ -235,6 +262,18 @@ export class ProviderDispatcher {
       default:
         throw new Error(`不支持的渠道类型: ${provider}`);
     }
+  }
+
+  private assertProviderResponse(provider: ProviderId, body: string): void {
+    let parsed: Record<string, unknown>;
+    try { parsed = JSON.parse(body) as Record<string, unknown>; } catch { return; }
+    if (provider === 'onebot') {
+      if (parsed.status !== undefined && parsed.status !== 'ok') throw new Error(String(parsed.message ?? parsed.wording ?? 'OneBot 拒绝了消息'));
+      if (parsed.retcode !== undefined && Number(parsed.retcode) !== 0) throw new Error(String(parsed.message ?? parsed.wording ?? `OneBot 返回错误码 ${parsed.retcode}`));
+    }
+    if (provider === 'synology-chat' && parsed.success === false) throw new Error(String(parsed.error ?? 'Synology Chat 拒绝了消息'));
+    if (provider === 'pushover' && parsed.status !== undefined && Number(parsed.status) !== 1) throw new Error(String((parsed.errors as string[] | undefined)?.join('; ') ?? 'Pushover 拒绝了消息'));
+    if (provider === 'rocketchat' && parsed.success === false) throw new Error(String(parsed.error ?? 'Rocket.Chat 拒绝了消息'));
   }
 
   private async sendSmtp(config: Record<string, unknown>, message: ProviderMessage): Promise<ProviderResult> {

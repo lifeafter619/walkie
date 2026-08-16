@@ -52,7 +52,37 @@ export const PROVIDER_MAP = new Map<ProviderId, ProviderDefinition>(PROVIDERS.ma
 export function validateProviderConfig(provider: ProviderId, config: Record<string, unknown>): string[] {
   const definition = PROVIDER_MAP.get(provider);
   if (!definition) return ['不支持的渠道类型'];
-  return definition.fields
-    .filter((item) => item.required && (config[item.key] === undefined || config[item.key] === ''))
+  const missing = (value: unknown) => value === undefined || value === null || (typeof value === 'string' && value.trim() === '');
+  const errors = definition.fields
+    .filter((item) => item.required && missing(config[item.key]))
     .map((item) => `${item.label}不能为空`);
+  for (const item of definition.fields) {
+    const value = config[item.key];
+    if (missing(value)) continue;
+    if (item.type === 'url') {
+      try {
+        const url = new URL(String(value));
+        if (!['http:', 'https:'].includes(url.protocol)) throw new Error();
+      } catch { errors.push(`${item.label}必须是有效的 HTTP(S) 地址`); }
+    } else if (item.type === 'number') {
+      const number = typeof value === 'number' ? value : Number(value);
+      if (!Number.isFinite(number)) errors.push(`${item.label}必须是数字`);
+      if (item.key === 'port' && (!Number.isInteger(number) || number < 1 || number > 65_535)) errors.push('端口必须是 1-65535 的整数');
+      if (item.key === 'criticalVolume' && (!Number.isInteger(number) || number < 0 || number > 10)) errors.push('critical 音量必须是 0-10 的整数');
+    } else if (item.type === 'boolean' && typeof value !== 'boolean') {
+      errors.push(`${item.label}必须是布尔值`);
+    } else if (item.type === 'select' && item.options && !item.options.some((option) => option.value === String(value))) {
+      errors.push(`${item.label}不是有效选项`);
+    }
+  }
+  if (provider === 'onebot' && missing(config.userId) && missing(config.groupId)) errors.push('私聊 QQ 号或群号至少填写一项');
+  if (provider === 'wxpusher' && missing(config.uids) && missing(config.topicIds)) errors.push('UID 列表或主题 ID 至少填写一项');
+  if (provider === 'apprise' && missing(config.configKey) && missing(config.urls)) errors.push('持久配置 Key 或 Apprise URL 至少填写一项');
+  if (provider === 'webhook' && !missing(config.headers)) {
+    try {
+      const parsed = JSON.parse(String(config.headers));
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error();
+    } catch { errors.push('请求头必须是 JSON 对象'); }
+  }
+  return errors;
 }

@@ -250,7 +250,11 @@ export class RelayRepository {
       if (!current) throw new Error('Channel not found');
       await this.ensureFreshDek();
       // getChannel 按 id/slug 双解析，写回必须用解析出的真实 id（传 slug 时 WHERE id=slug 会静默 no-op）
-      const config = input.config ? { ...await this.getChannelConfig(current.id), ...input.config } : await this.getChannelConfig(current.id);
+      const config = await this.getChannelConfig(current.id);
+      for (const [key, value] of Object.entries(input.config ?? {})) {
+        if (value === null || value === '') delete config[key];
+        else config[key] = value;
+      }
       await this.db.run(`UPDATE channels SET name=?,slug=?,provider=?,enabled=?,config_encrypted=?,rate_limit_per_min=?,quiet_hours=?,updated_at=? WHERE id=?`, [
         input.name ?? current.name, input.slug ?? current.slug, input.provider ?? current.provider,
         input.enabled ?? current.enabled ? 1 : 0, encryptJson(config, this.encryptionKey()),
@@ -280,6 +284,7 @@ export class RelayRepository {
       await this.db.run('UPDATE channels SET enabled=0,updated_at=? WHERE id=?', [now(), current.id]);
       // 软删除同样要终结未完结 attempt，否则投递永久停在 processing
       await this.failAttemptsForDisabledChannel(current.id);
+      await this.audit(actor, 'channel.disable', 'channel', current.id, { reason: 'delete-deferred-history-or-route' });
       return;
     }
     await this.db.run('DELETE FROM channels WHERE id=?', [current.id]);
@@ -408,6 +413,7 @@ export class RelayRepository {
   }
 
   async listKeys(): Promise<ApiKey[]> {
+    await this.ensureFreshDek();
     return (await this.db.all('SELECT * FROM api_keys ORDER BY created_at DESC')).map((row) => this.keyFrom(row));
   }
 

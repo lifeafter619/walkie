@@ -1,6 +1,9 @@
 import { z } from 'zod';
 
 export const slugSchema = z.string().min(2).max(80).regex(/^[a-z0-9][a-z0-9-]*$/, '只允许小写字母、数字和连字符');
+export const quietHoursSchema = z.string()
+  .regex(/^(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d(?:@[\w/+-]+)?$/, '格式应为 HH:MM-HH:MM，可选 @时区（如 @Asia/Shanghai）')
+  .or(z.literal('')).nullish();
 export const channelSchema = z.object({
   name: z.string().min(1).max(100),
   slug: slugSchema,
@@ -8,7 +11,7 @@ export const channelSchema = z.object({
   enabled: z.boolean().optional(),
   config: z.record(z.string(), z.unknown()),
   rateLimitPerMin: z.number().int().min(0).max(600).nullish(),
-  quietHours: z.string().regex(/^\d{2}:\d{2}-\d{2}:\d{2}(@[\w/+-]+)?$/, '格式应为 HH:MM-HH:MM，可选 @时区（如 @Asia/Shanghai）').or(z.literal('')).nullish()
+  quietHours: quietHoursSchema
 });
 export const routeSchema = z.object({
   name: z.string().min(1).max(100),

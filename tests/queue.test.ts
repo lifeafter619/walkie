@@ -26,6 +26,19 @@ describe('delivery worker', () => {
     repository.close();
   });
 
+  it('drains all due fanout attempts for serverless callers', async () => {
+    const repository = await createNodeRepository(':memory:', randomBytes(32));
+    const channels = await Promise.all([1, 2, 3].map((index) => repository.createChannel({ name: `C${index}`, slug: `c-${index}`, provider: 'webhook', config: {} })));
+    const route = await repository.createRoute({ name: 'All', slug: 'all-three', strategy: 'fanout', channelIds: channels.map((channel) => channel.id) });
+    const send = vi.fn(async () => ({ responseCode: 200 }));
+    const worker = new DeliveryWorker(repository, { send } as unknown as ProviderDispatcher, { deliveryWorkers: 1, maxDeliveryAttempts: 1, retryBaseMs: 1 });
+    const delivery = await new NotificationService(repository).send({ destination: route.id, title: 'T', body: 'B' }, 'test');
+    expect(await worker.drainAll()).toBe(3);
+    expect(send).toHaveBeenCalledTimes(3);
+    expect((await repository.getDelivery(delivery.id))?.status).toBe('delivered');
+    repository.close();
+  });
+
   it('does not claim fallback backup while primary attempt is in flight', async () => {
     const repository = await createNodeRepository(':memory:', randomBytes(32));
     const first = await repository.createChannel({ name: 'Primary', slug: 'primary', provider: 'webhook', config: {} });

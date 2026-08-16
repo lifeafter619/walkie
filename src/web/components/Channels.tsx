@@ -77,10 +77,9 @@ export function ChannelForm({
     event.preventDefault();
     setBusy(true);
     try {
-      // 编辑模式：值为空串的键不提交（后端按 key 合并，缺席才保留原值），
-      // 否则「输入后清空」会把已存凭据覆盖成 ''；number 字段清空时同样跳过（Number('')===0）
+      // 编辑模式：缺席的键保留原值；空字符串提交为删除意图（后端会移除该配置项）。
       const cleanedConfig = channel
-        ? Object.fromEntries(Object.entries(config).filter(([, value]) => value !== '' && value !== undefined))
+        ? Object.fromEntries(Object.entries(config).filter(([, value]) => value !== undefined))
         : config;
       // 静默时段：起止都选了才生效；只选了一半按未设置处理（后端无法表达半段区间）
       const quietHours = quietStart && quietEnd ? `${quietStart}-${quietEnd}@${quietTz}` : null;
@@ -157,22 +156,45 @@ export function ChannelForm({
                   placeholder={channel ? '留空保留现有值' : item.placeholder}
                 />
               ) : item.type === 'select' ? (
-                <select value={String(config[item.key] ?? (channel ? '' : item.defaultValue ?? ''))} onChange={(event) => isSmtpPreset ? applyPreset(event.target.value) : setConfig({ ...config, [item.key]: event.target.value })}>
-                  {/* 编辑模式服务端不回传已存值，不能拿默认值冒充；空值=保留现有，提交时被剔除 */}
-                  {channel && <option value="">（保留现有设置）</option>}
+                <select
+                  value={channel && config[item.key] === undefined ? '__walkie_preserve__' : String(config[item.key] ?? (item.defaultValue ?? ''))}
+                  onChange={(event) => {
+                    if (channel && event.target.value === '__walkie_preserve__') {
+                      const next = { ...config };
+                      delete next[item.key];
+                      setConfig(next);
+                    } else if (isSmtpPreset) applyPreset(event.target.value);
+                    else setConfig({ ...config, [item.key]: event.target.value });
+                  }}
+                >
+                  {channel && <option value="__walkie_preserve__">（保留现有设置）</option>}
                   {item.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </select>
               ) : item.type === 'boolean' ? (
-                <span className="check-row">
-                  <input type="checkbox" checked={Boolean(config[item.key] ?? item.defaultValue)} onChange={(event) => setConfig({ ...config, [item.key]: event.target.checked })} disabled={Boolean(lockedByPreset)} />
-                  启用
-                </span>
+                channel ? (
+                  <select value={config[item.key] === undefined ? '__walkie_preserve__' : String(config[item.key])} onChange={(event) => {
+                    if (event.target.value === '__walkie_preserve__') {
+                      const next = { ...config };
+                      delete next[item.key];
+                      setConfig(next);
+                    } else setConfig({ ...config, [item.key]: event.target.value === 'true' });
+                  }} disabled={Boolean(lockedByPreset)}>
+                    <option value="__walkie_preserve__">（保留现有设置）</option>
+                    <option value="true">启用</option>
+                    <option value="false">停用</option>
+                  </select>
+                ) : (
+                  <span className="check-row">
+                    <input type="checkbox" checked={Boolean(config[item.key] ?? item.defaultValue)} onChange={(event) => setConfig({ ...config, [item.key]: event.target.checked })} disabled={Boolean(lockedByPreset)} />
+                    启用
+                  </span>
+                )
               ) : (
                 <input
                   autoComplete={item.type === 'password' ? 'new-password' : undefined}
                   type={item.type === 'number' ? 'number' : item.type === 'password' ? 'password' : item.type === 'url' ? 'url' : 'text'}
                   value={String(config[item.key] ?? '')}
-                  onChange={(event) => setConfig({ ...config, [item.key]: item.type === 'number' ? (event.target.value === '' ? undefined : Number(event.target.value)) : event.target.value })}
+                  onChange={(event) => setConfig({ ...config, [item.key]: item.type === 'number' ? (event.target.value === '' ? '' : Number(event.target.value)) : event.target.value })}
                   required={item.required && !channel}
                   placeholder={channel ? '留空保留现有值' : item.placeholder}
                   disabled={Boolean(lockedByPreset)}
