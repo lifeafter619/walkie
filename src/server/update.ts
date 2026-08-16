@@ -31,10 +31,10 @@ const CURRENT_VERSION = VERSION;
 
 /**
  * 检查更新：从 GitHub releases API 获取最新版本。
- * @param repo GitHub 仓库（owner/name），通过环境变量 UPDATE_REPO 配置，默认 walkie-eth/walkie
+ * @param repo GitHub 仓库（owner/name），通过环境变量 UPDATE_REPO 配置，默认 lifeafter619/walkie
  */
 export async function checkUpdate(repo?: string): Promise<UpdateCheckResult> {
-  const repoName = repo ?? process.env.UPDATE_REPO ?? 'walkie-eth/walkie';
+  const repoName = repo ?? process.env.UPDATE_REPO ?? 'lifeafter619/walkie';
   const apiUrl = `https://api.github.com/repos/${repoName}/releases/latest`;
   try {
     const response = await fetch(apiUrl, {

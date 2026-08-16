@@ -292,7 +292,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     if (path === '/api/admin/credentials/master-key/rotate' && request.method === 'POST') return json(await this.repository.rotateMasterKey());
 
     if (path === '/api/admin/update/check' && request.method === 'GET') {
-      const repo = this.env.UPDATE_REPO ?? 'walkie-eth/walkie';
+      const repo = this.env.UPDATE_REPO ?? 'lifeafter619/walkie';
       const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`;
       try {
         const response = await fetch(apiUrl, { headers: { 'user-agent': 'walkie-update-checker', accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(10_000) });

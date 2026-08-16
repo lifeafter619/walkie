@@ -232,7 +232,7 @@ Agent  ── check_reply 长轮询 ──► 拿到答案，继续执行
 | `MAX_DELIVERY_ATTEMPTS` | `4` | 单渠道最大尝试次数（指数退避） |
 | `RETRY_BASE_MS` | `2000` | 重试退避基数 |
 | `PUBLIC_URL` | — | 站点对外地址（回复链接、MCP 配置展示用） |
-| `UPDATE_REPO` | `walkie-eth/walkie` | 应用内版本检查指向的 GitHub 仓库（owner/name，自建 fork 时改这里） |
+| `UPDATE_REPO` | `lifeafter619/walkie` | 应用内版本检查指向的 GitHub 仓库（owner/name，自建 fork 时改这里） |
 | `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | — | 使用 Turso/libSQL 远程数据库（Vercel 部署） |
 | `CRON_SECRET` | — | Vercel Cron 鉴权 |
 
