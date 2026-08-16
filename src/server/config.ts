@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 export interface AppConfig {
@@ -39,12 +39,19 @@ function resolveMasterKey(isProduction: boolean): Buffer {
     throw new Error('MASTER_KEY must be a base64-encoded 32-byte key');
   }
   if (isProduction) throw new Error('MASTER_KEY is required in production');
-  return createHash('sha256').update('walkie-local-development-key').digest();
+  // 开发 fallback 必须保持更名前的旧值：更名后换 key 会让所有本地旧库的 dek_wrapped
+  // 解密失败（启动即崩）。仅本地开发使用，生产强制显式 MASTER_KEY。
+  return createHash('sha256').update('relaydock-local-development-key').digest();
 }
 
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const isProduction = process.env.NODE_ENV === 'production';
   const dataDir = path.resolve(process.env.DATA_DIR ?? './data');
+  // 兼容旧名 relaydock.db：升级用户已有数据在旧文件里，优先沿用；
+  // 旧文件为 0 字节残留（未写入过数据）时视为不存在，改用新名 walkie.db。
+  const legacyDb = path.join(dataDir, 'relaydock.db');
+  const hasLegacyData = () => { try { return statSync(legacyDb).size > 0; } catch { return false; } };
+  const databasePath = existsSync(legacyDb) && hasLegacyData() ? legacyDb : path.join(dataDir, 'walkie.db');
   const host = process.env.HOST ?? '127.0.0.1';
   // 远程数据库（Turso/libSQL，如 Vercel 部署）不需要本地数据目录
   if (!process.env.TURSO_DATABASE_URL) mkdirSync(dataDir, { recursive: true });
@@ -58,7 +65,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     port: integer('PORT', 4310, 1, 65535),
     host,
     dataDir,
-    databasePath: path.join(dataDir, 'walkie.db'),
+    databasePath,
     adminToken,
     masterKey: resolveMasterKey(isProduction),
     allowPrivateWebhooks: bool('ALLOW_PRIVATE_WEBHOOKS'),

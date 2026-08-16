@@ -17,10 +17,10 @@ describe('credential storage and repository', () => {
 
   it('never exposes channel credentials and authenticates high-entropy API keys', async () => {
     const repository = await createRepository();
-    const channel = await repository.createChannel({ name: 'Ops', slug: 'ops', provider: 'telegram', config: { botToken: 'abc', chatId: '42' } });
+    const channel = await repository.createChannel({ name: 'Ops', slug: 'ops', provider: 'telegram', config: { botToken: 'leak-canary-secret-token-xyz123', chatId: '42' } });
     expect(channel.configKeys).toEqual(['botToken', 'chatId']);
-    expect(JSON.stringify(channel)).not.toContain('abc');
-    expect(await repository.getChannelConfig(channel.id)).toEqual({ botToken: 'abc', chatId: '42' });
+    expect(JSON.stringify(channel)).not.toContain('leak-canary-secret-token-xyz123');
+    expect(await repository.getChannelConfig(channel.id)).toEqual({ botToken: 'leak-canary-secret-token-xyz123', chatId: '42' });
 
     const created = await repository.createKey({ name: 'Build agent' });
     expect((await repository.authenticateKey(created.secret))?.id).toBe(created.apiKey.id);
@@ -78,6 +78,47 @@ describe('credential storage and repository', () => {
     await repository.db.run("INSERT INTO deliveries (id,target_type,target_id,title,body,severity,metadata,source,status,created_at,updated_at) VALUES ('delivery-1','channel',?,'x','x','info','{}','test','queued',datetime('now'),datetime('now'))", [channel.id]);
     await repository.db.run("INSERT INTO attempts (id,delivery_id,channel_id,position,status,next_attempt_at,created_at,updated_at) VALUES ('attempt-1','delivery-1',?,0,'pending',datetime('now'),datetime('now'),datetime('now'))", [channel.id]);
     expect(await repository.nextDueAttempt()).toBeUndefined();
+    repository.close();
+  });
+});
+
+describe('disabled channel cleanup (regression)', () => {
+  it('fails pending attempts and finalizes deliveries when a channel is disabled after queueing', async () => {
+    const repository = await createRepository();
+    const channel = await repository.createChannel({ name: 'Live', slug: 'live', provider: 'webhook', config: { url: 'https://example.com', bodyTemplate: '{}' } });
+    const service = new NotificationService(repository);
+    const delivery = await service.send({ destination: channel.id, title: 'x', body: 'x' }, 'test');
+    expect((await repository.getDelivery(delivery.id))?.status).toBe('queued');
+    // 排队后禁用频道：未完结 attempt 必须就地失败，投递进入终态而不是永久 processing
+    await repository.updateChannel(channel.id, { enabled: false });
+    const after = await repository.getDelivery(delivery.id);
+    expect(after?.status).toBe('failed');
+    expect(after?.attempts?.[0].status).toBe('failed');
+    repository.close();
+  });
+
+  it('soft-deleting a channel with history also finalizes in-flight attempts', async () => {
+    const repository = await createRepository();
+    const channel = await repository.createChannel({ name: 'Old', slug: 'old', provider: 'webhook', config: { url: 'https://example.com', bodyTemplate: '{}' } });
+    const service = new NotificationService(repository);
+    const delivery = await service.send({ destination: channel.id, title: 'x', body: 'x' }, 'test');
+    await repository.deleteChannel(channel.id); // 有投递历史 → 软删除
+    expect((await repository.getDelivery(delivery.id))?.status).toBe('failed');
+    repository.close();
+  });
+
+  it('fallback route skips a disabled primary instead of blocking the chain', async () => {
+    const repository = await createRepository();
+    const primary = await repository.createChannel({ name: 'P', slug: 'p', provider: 'webhook', config: { url: 'https://example.com', bodyTemplate: '{}' } });
+    const backup = await repository.createChannel({ name: 'B', slug: 'b', provider: 'webhook', config: { url: 'https://example.com', bodyTemplate: '{}' } });
+    const route = await repository.createRoute({ name: 'R', slug: 'r', strategy: 'fallback', channelIds: [primary.id, backup.id] });
+    const service = new NotificationService(repository);
+    const delivery = await service.send({ destination: route.id, title: 'x', body: 'x' }, 'test');
+    await repository.updateChannel(primary.id, { enabled: false });
+    // 主频道禁用后，备用频道（position 1）应可被领取，而不是被 position 0 的 MIN 门控卡死
+    const claimed = await repository.claimDueAttempts(4);
+    expect(claimed.map((attempt) => attempt.channelId)).toEqual([backup.id]);
+    expect(delivery.id).toBeTruthy();
     repository.close();
   });
 });

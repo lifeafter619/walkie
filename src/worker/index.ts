@@ -23,6 +23,7 @@ type WorkerEnv = Env & {
   MAX_DELIVERY_ATTEMPTS?: string;
   RETRY_BASE_MS?: string;
   MAX_SENDS_PER_MIN?: string;
+  UPDATE_REPO?: string;
 };
 
 const json = (value: unknown, status = 200, headers: HeadersInit = {}) => Response.json(value, { status, headers });
@@ -32,6 +33,18 @@ const integer = (value: string | undefined, fallback: number, min: number, max: 
   return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
 };
 const enabled = (value: string | undefined) => value === 'true' || value === '1';
+const isSemver = (version: string): boolean => /^\d+\.\d+\.\d+$/.test(version);
+const isNewerVersion = (candidate: string, current: string): boolean => {
+  // 仅在双方都是合法语义化版本（X.Y.Z）时才比较，拒绝 "latest"、日期、预发布标签等
+  if (!isSemver(candidate) || !isSemver(current)) return false;
+  const left = candidate.split('.').map((part) => Number.parseInt(part, 10) || 0);
+  const right = current.split('.').map((part) => Number.parseInt(part, 10) || 0);
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    if (difference !== 0) return difference > 0;
+  }
+  return false;
+};
 
 async function resolveHost(hostname: string): Promise<string[]> {
   const [v4, v6] = await Promise.all([
@@ -77,7 +90,11 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     try { await this.worker.drainOnce(); }
     catch (error) { console.error(JSON.stringify({ event: 'drain.error', message: error instanceof Error ? error.message : String(error) })); }
     const due = await this.repository.nextDueAttempt();
+    // 存在滞留 sending 的尝试时设兜底 alarm：drain 中途异常/isolate 被逐后没有任何定时器
+    // 会再触发回收（nextDueAttempt 不看 sending），单频道投递会无限期卡在 processing
+    const stuck = await this.repository.hasStuckSending();
     if (due) await this.ctx.storage.setAlarm(Math.max(Date.now() + 250, new Date(due).getTime()));
+    else if (stuck) await this.ctx.storage.setAlarm(Date.now() + 6 * 60_000);
   }
 
   private async requireAdmin(request: Request): Promise<Response | undefined> {
@@ -205,6 +222,15 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       const input = channelSchema.partial().parse(await readBody(request));
       const provider = input.provider as ProviderId | undefined;
       if (provider && !PROVIDER_MAP.has(provider)) throw new Error('不支持的渠道类型');
+      // PATCH 换 provider/改 config 后重新校验必填字段（与 Node 版一致）
+      if (input.config || input.provider) {
+        const current = await this.repository.getChannel(channel[1]);
+        if (!current) return json({ error: '频道不存在' }, 404);
+        const providerToCheck = (provider ?? current.provider) as ProviderId;
+        const merged = { ...await this.repository.getChannelConfig(current.id), ...(input.config ?? {}) };
+        const errors = validateProviderConfig(providerToCheck, merged);
+        if (errors.length) return json({ error: errors.join('；') }, 400);
+      }
       return json(await this.repository.updateChannel(channel[1], { ...input, provider }));
     }
     if (channel && request.method === 'DELETE') { await this.repository.deleteChannel(channel[1]); return new Response(null, { status: 204 }); }
@@ -241,6 +267,10 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     if (path === '/api/admin/keys' && request.method === 'POST') return json(await this.repository.createKey(keySchema.parse(await readBody(request))), 201);
     const revoke = /^\/api\/admin\/keys\/([^/]+)\/revoke$/.exec(path);
     if (revoke && request.method === 'POST') { await this.repository.revokeKey(revoke[1]); return json({ success: true }); }
+    const restore = /^\/api\/admin\/keys\/([^/]+)\/restore$/.exec(path);
+    if (restore && request.method === 'POST') { await this.repository.restoreKey(restore[1]); return json({ success: true }); }
+    const deleteKey = /^\/api\/admin\/keys\/([^/]+)$/.exec(path);
+    if (deleteKey && request.method === 'DELETE') { await this.repository.deleteKey(deleteKey[1]); return new Response(null, { status: 204 }); }
 
     if (path === '/api/admin/credentials' && request.method === 'GET') return json(await this.repository.getCredentialStatus(Boolean(this.env.ADMIN_TOKEN)));
     if (path === '/api/admin/credentials/admin-token' && request.method === 'POST') {
@@ -250,6 +280,25 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       return json({ token }, 201);
     }
     if (path === '/api/admin/credentials/master-key/rotate' && request.method === 'POST') return json(await this.repository.rotateMasterKey());
+
+    if (path === '/api/admin/update/check' && request.method === 'GET') {
+      const repo = this.env.UPDATE_REPO ?? 'walkie-eth/walkie';
+      const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`;
+      try {
+        const response = await fetch(apiUrl, { headers: { 'user-agent': 'walkie-update-checker', accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(10_000) });
+        if (!response.ok) return json({ currentVersion: '0.3.0', latestVersion: '0.3.0', hasUpdate: false, canApply: false, applyHint: `无法获取版本信息（HTTP ${response.status}）。` });
+        const release = await response.json() as { tag_name: string; html_url: string; body?: string };
+        const latestVersion = release.tag_name.replace(/^v/, '');
+        const hasUpdate = isNewerVersion(latestVersion, '0.3.0');
+        return json({ currentVersion: '0.3.0', latestVersion, hasUpdate, releaseNotes: release.body?.slice(0, 500), releaseUrl: release.html_url, canApply: false, applyHint: 'Cloudflare Workers 不支持应用内更新，请运行 npm run deploy:cf 重新部署。' });
+      } catch (error) {
+        return json({ currentVersion: '0.3.0', latestVersion: '0.3.0', hasUpdate: false, canApply: false, applyHint: `检查更新失败：${error instanceof Error ? error.message : '网络错误'}` });
+      }
+    }
+    if (path === '/api/admin/update/apply' && request.method === 'POST') {
+      // Cloudflare Workers 不支持应用内更新；明确拒绝以防前端误调用
+      return json({ success: false, message: 'Cloudflare Workers 不支持应用内更新，请运行 npm run deploy:cf 重新部署。', needsRestart: false });
+    }
 
     if (path === '/api/admin/deliveries' && request.method === 'GET') return json({ deliveries: await this.repository.listDeliveries({ limit: Number(url.searchParams.get('limit') ?? 100), status: url.searchParams.get('status') ?? undefined }) });
     const delivery = /^\/api\/admin\/deliveries\/([^/]+)$/.exec(path);

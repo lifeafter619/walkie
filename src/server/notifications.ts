@@ -57,6 +57,12 @@ export class NotificationService {
     apiKey: ApiKey,
     publicUrl: string
   ): Promise<{ conversation: Conversation; replyUrl: string; deliveryId: string }> {
+    // 先校验目的地可用再建会话，避免 send 失败留下永远无人回复的孤儿会话
+    const destination = (await this.repository.listDestinations()).find((item) => item.id === input.destination || item.slug === input.destination);
+    if (!destination || !destination.enabled) throw new Error('目的地不存在或已禁用');
+    if (!apiKey.scopes.includes('notifications:send')) throw new Error('API Key 缺少 notifications:send 权限');
+    if (apiKey.destinationIds.length && !apiKey.destinationIds.includes(destination.id)) throw new Error('API Key 无权访问该目的地');
+
     const timeoutSeconds = Math.min(Math.max(input.timeoutSeconds ?? 3600, 30), 86_400);
     const { conversation, replyToken } = await this.repository.createConversation({ apiKeyId: apiKey.id, question: input.question, options: input.options, timeoutSeconds });
     const replyUrl = `${publicUrl.replace(/\/$/, '')}/reply/${conversation.id}/${replyToken}`;
