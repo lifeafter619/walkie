@@ -7,7 +7,7 @@ import path from 'node:path';
 import { ZodError } from 'zod';
 import type { ApiKey, ProviderId } from '../shared/types.js';
 import { VERSION } from '../shared/version.js';
-import { askSchema, channelSchema, credentialTokenSchema, keySchema, notificationSchema, routeSchema } from '../shared/schemas.js';
+import { askSchema, channelSchema, credentialTokenSchema, keySchema, keyUpdateSchema, notificationSchema, routeSchema } from '../shared/schemas.js';
 import type { AppConfig } from './config.js';
 import { generateAdminToken, safeSecretEqual, safeTokenEqual } from './crypto.js';
 import type { RelayRepository } from './database.js';
@@ -15,9 +15,10 @@ import { createRelayMcpHandler } from './mcp.js';
 import { renderReplyForm, renderReplyResult } from './reply-page.js';
 import type { NotificationService } from './notifications.js';
 import type { ProviderDispatcher } from './providers/dispatcher.js';
-import { PROVIDERS, PROVIDER_MAP, validateProviderConfig } from './providers/catalog.js';
+import { PROVIDERS } from './providers/catalog.js';
 import type { DeliveryWorker } from './queue.js';
 import { applyUpdate, checkUpdate } from './update.js';
+import { assertKeyDestinations, validateChannelCreate, validateChannelUpdate, validateRouteChannelIds } from './validation.js';
 
 declare global {
   namespace Express { interface Request { agentKey?: ApiKey; auth?: AuthInfo } }
@@ -96,26 +97,21 @@ export function createApp(deps: AppDependencies) {
   admin.get('/channels', asyncRoute(async (_req, res) => res.json({ channels: await repository.listChannels() })));
   admin.post('/channels', asyncRoute(async (req, res) => {
     const input = channelSchema.parse(req.body);
-    const provider = input.provider as ProviderId;
-    if (!PROVIDER_MAP.has(provider)) throw new Error('不支持的渠道类型');
-    const errors = validateProviderConfig(provider, input.config);
+    const errors = validateChannelCreate(input.provider, input.config);
     if (errors.length) return res.status(400).json({ error: errors.join('；') });
-    res.status(201).json(await repository.createChannel({ ...input, provider }));
+    res.status(201).json(await repository.createChannel({ ...input, provider: input.provider as ProviderId }));
   }));
   admin.patch('/channels/:id', asyncRoute(async (req, res) => {
     const input = channelSchema.partial().parse(req.body);
-    const provider = input.provider as ProviderId | undefined;
-    if (provider && !PROVIDER_MAP.has(provider)) throw new Error('不支持的渠道类型');
     // PATCH 换 provider/改 config 后重新校验必填字段，避免存入必然发送失败的配置
     if (input.config || input.provider) {
-      const current = await repository.getChannel(String(req.params.id));
-      if (!current) return res.status(404).json({ error: '频道不存在' });
-      const providerToCheck = (provider ?? current.provider) as ProviderId;
-      const merged = { ...await repository.getChannelConfig(current.id), ...(input.config ?? {}) };
-      const errors = validateProviderConfig(providerToCheck, merged);
+      const { current, errors } = await validateChannelUpdate(repository, String(req.params.id), input);
+      if (errors[0] === '频道不存在') return res.status(404).json({ error: '频道不存在' });
       if (errors.length) return res.status(400).json({ error: errors.join('；') });
+      res.json(await repository.updateChannel(current!.id, { ...input, provider: input.provider as ProviderId }));
+      return;
     }
-    res.json(await repository.updateChannel(String(req.params.id), { ...input, provider }));
+    res.json(await repository.updateChannel(String(req.params.id), { ...input, provider: input.provider as ProviderId }));
   }));
   admin.delete('/channels/:id', asyncRoute(async (req, res) => { await repository.deleteChannel(String(req.params.id)); res.status(204).end(); }));
   admin.post('/channels/:id/test', asyncRoute(async (req, res) => {
@@ -135,14 +131,16 @@ export function createApp(deps: AppDependencies) {
   admin.get('/routes', asyncRoute(async (_req, res) => res.json({ routes: await repository.listRoutes() })));
   admin.post('/routes', asyncRoute(async (req, res) => {
     const input = routeSchema.parse(req.body);
-    const channels = new Set((await repository.listChannels()).map((channel) => channel.id));
-    if (input.channelIds.some((id) => !channels.has(id))) return res.status(400).json({ error: '路由包含不存在的频道' });
+    const errors = await validateRouteChannelIds(repository, input.channelIds);
+    if (errors.length) return res.status(400).json({ error: errors.join('；') });
     res.status(201).json(await repository.createRoute(input));
   }));
   admin.patch('/routes/:id', asyncRoute(async (req, res) => {
     const input = routeSchema.partial().parse(req.body);
-    const channels = new Set((await repository.listChannels()).map((channel) => channel.id));
-    if (input.channelIds?.some((id) => !channels.has(id))) return res.status(400).json({ error: '路由包含不存在的频道' });
+    if (input.channelIds) {
+      const errors = await validateRouteChannelIds(repository, input.channelIds);
+      if (errors.length) return res.status(400).json({ error: errors.join('；') });
+    }
     res.json(await repository.updateRoute(String(req.params.id), input));
   }));
   admin.delete('/routes/:id', asyncRoute(async (req, res) => { await repository.deleteRoute(String(req.params.id)); res.status(204).end(); }));
@@ -150,7 +148,19 @@ export function createApp(deps: AppDependencies) {
   admin.get('/keys', asyncRoute(async (_req, res) => res.json({ keys: await repository.listKeys() })));
   admin.post('/keys', asyncRoute(async (req, res) => {
     const input = keySchema.parse(req.body);
+    if (input.destinationIds?.length) {
+      const errors = await assertKeyDestinations(repository, input.destinationIds);
+      if (errors.length) return res.status(400).json({ error: errors.join('；') });
+    }
     res.status(201).json(await repository.createKey(input));
+  }));
+  admin.patch('/keys/:id', asyncRoute(async (req, res) => {
+    const input = keyUpdateSchema.parse(req.body);
+    if (input.destinationIds) {
+      const errors = await assertKeyDestinations(repository, input.destinationIds);
+      if (errors.length) return res.status(400).json({ error: errors.join('；') });
+    }
+    res.json(await repository.updateKey(String(req.params.id), input));
   }));
   admin.post('/keys/:id/revoke', asyncRoute(async (req, res) => { await repository.revokeKey(String(req.params.id)); res.json({ success: true }); }));
   admin.post('/keys/:id/restore', asyncRoute(async (req, res) => { await repository.restoreKey(String(req.params.id)); res.json({ success: true }); }));

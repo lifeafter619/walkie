@@ -52,8 +52,8 @@ export const keySchema = z.object({
   secret: secretSchema.optional()
 });
 
-/** 编辑 Key：不允许改密钥本身（换密钥走吊销重建）；strict 拒绝未知键 */
-export const keyUpdateSchema = keySchema.omit({ secret: true }).strict();
+/** 编辑 Key：不允许改密钥本身（换密钥走吊销重建）；全部字段可选，strict 拒绝未知键 */
+export const keyUpdateSchema = keySchema.omit({ secret: true }).partial().strict();
 
 /** 管理密码设置：可自定义（≥8 字符）；缺省则服务端随机生成 */
 export const credentialTokenSchema = z.object({

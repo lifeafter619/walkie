@@ -5,15 +5,16 @@ import { ZodError } from 'zod';
 import type { AuthInfo } from '@modelcontextprotocol/server';
 import type { ApiKey, ProviderId } from '../shared/types.js';
 import { VERSION } from '../shared/version.js';
-import { askSchema, channelSchema, credentialTokenSchema, keySchema, notificationSchema, routeSchema } from '../shared/schemas.js';
+import { askSchema, channelSchema, credentialTokenSchema, keySchema, keyUpdateSchema, notificationSchema, routeSchema } from '../shared/schemas.js';
 import { RelayRepository } from '../server/database.js';
 import { generateAdminToken, safeSecretEqual, safeTokenEqual } from '../server/crypto.js';
 import { createRelayMcpHandler } from '../server/mcp.js';
 import { renderReplyForm, renderReplyResult } from '../server/reply-page.js';
 import { NotificationService } from '../server/notifications.js';
-import { PROVIDERS, PROVIDER_MAP, validateProviderConfig } from '../server/providers/catalog.js';
+import { PROVIDERS } from '../server/providers/catalog.js';
 import { ProviderDispatcher } from '../server/providers/dispatcher.js';
 import { DeliveryWorker } from '../server/queue.js';
+import { assertKeyDestinations, validateChannelCreate, validateChannelUpdate, validateRouteChannelIds } from '../server/validation.js';
 import { BodyTooLargeError, readBody } from './body.js';
 import { DurableRelayDatabase } from './database.js';
 
@@ -221,27 +222,21 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     if (path === '/api/admin/channels' && request.method === 'GET') return json({ channels: await this.repository.listChannels() });
     if (path === '/api/admin/channels' && request.method === 'POST') {
       const input = channelSchema.parse(await readBody(request));
-      const provider = input.provider as ProviderId;
-      if (!PROVIDER_MAP.has(provider)) throw new Error('不支持的渠道类型');
-      const errors = validateProviderConfig(provider, input.config);
+      const errors = validateChannelCreate(input.provider, input.config);
       if (errors.length) return json({ error: errors.join('；') }, 400);
-      return json(await this.repository.createChannel({ ...input, provider }), 201);
+      return json(await this.repository.createChannel({ ...input, provider: input.provider as ProviderId }), 201);
     }
     const channel = /^\/api\/admin\/channels\/([^/]+)$/.exec(path);
     if (channel && request.method === 'PATCH') {
       const input = channelSchema.partial().parse(await readBody(request));
-      const provider = input.provider as ProviderId | undefined;
-      if (provider && !PROVIDER_MAP.has(provider)) throw new Error('不支持的渠道类型');
       // PATCH 换 provider/改 config 后重新校验必填字段（与 Node 版一致）
       if (input.config || input.provider) {
-        const current = await this.repository.getChannel(channel[1]);
-        if (!current) return json({ error: '频道不存在' }, 404);
-        const providerToCheck = (provider ?? current.provider) as ProviderId;
-        const merged = { ...await this.repository.getChannelConfig(current.id), ...(input.config ?? {}) };
-        const errors = validateProviderConfig(providerToCheck, merged);
+        const { current, errors } = await validateChannelUpdate(this.repository, channel[1], input);
+        if (errors[0] === '频道不存在') return json({ error: '频道不存在' }, 404);
         if (errors.length) return json({ error: errors.join('；') }, 400);
+        return json(await this.repository.updateChannel(current!.id, { ...input, provider: input.provider as ProviderId }));
       }
-      return json(await this.repository.updateChannel(channel[1], { ...input, provider }));
+      return json(await this.repository.updateChannel(channel[1], { ...input, provider: input.provider as ProviderId }));
     }
     if (channel && request.method === 'DELETE') { await this.repository.deleteChannel(channel[1]); return new Response(null, { status: 204 }); }
     const testChannel = /^\/api\/admin\/channels\/([^/]+)\/test$/.exec(path);
@@ -262,23 +257,43 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     if (path === '/api/admin/routes' && request.method === 'GET') return json({ routes: await this.repository.listRoutes() });
     if (path === '/api/admin/routes' && request.method === 'POST') {
       const input = routeSchema.parse(await readBody(request));
-      await this.assertChannels(input.channelIds);
+      const errors = await validateRouteChannelIds(this.repository, input.channelIds);
+      if (errors.length) return json({ error: errors.join('；') }, 400);
       return json(await this.repository.createRoute(input), 201);
     }
     const route = /^\/api\/admin\/routes\/([^/]+)$/.exec(path);
     if (route && request.method === 'PATCH') {
       const input = routeSchema.partial().parse(await readBody(request));
-      if (input.channelIds) await this.assertChannels(input.channelIds);
+      if (input.channelIds) {
+        const errors = await validateRouteChannelIds(this.repository, input.channelIds);
+        if (errors.length) return json({ error: errors.join('；') }, 400);
+      }
       return json(await this.repository.updateRoute(route[1], input));
     }
     if (route && request.method === 'DELETE') { await this.repository.deleteRoute(route[1]); return new Response(null, { status: 204 }); }
 
     if (path === '/api/admin/keys' && request.method === 'GET') return json({ keys: await this.repository.listKeys() });
-    if (path === '/api/admin/keys' && request.method === 'POST') return json(await this.repository.createKey(keySchema.parse(await readBody(request))), 201);
+    if (path === '/api/admin/keys' && request.method === 'POST') {
+      const input = keySchema.parse(await readBody(request));
+      if (input.destinationIds?.length) {
+        const errors = await assertKeyDestinations(this.repository, input.destinationIds);
+        if (errors.length) return json({ error: errors.join('；') }, 400);
+      }
+      return json(await this.repository.createKey(input), 201);
+    }
     const revoke = /^\/api\/admin\/keys\/([^/]+)\/revoke$/.exec(path);
     if (revoke && request.method === 'POST') { await this.repository.revokeKey(revoke[1]); return json({ success: true }); }
     const restore = /^\/api\/admin\/keys\/([^/]+)\/restore$/.exec(path);
     if (restore && request.method === 'POST') { await this.repository.restoreKey(restore[1]); return json({ success: true }); }
+    const patchKey = /^\/api\/admin\/keys\/([^/]+)$/.exec(path);
+    if (patchKey && request.method === 'PATCH') {
+      const input = keyUpdateSchema.parse(await readBody(request));
+      if (input.destinationIds) {
+        const errors = await assertKeyDestinations(this.repository, input.destinationIds);
+        if (errors.length) return json({ error: errors.join('；') }, 400);
+      }
+      return json(await this.repository.updateKey(patchKey[1], input));
+    }
     const deleteKey = /^\/api\/admin\/keys\/([^/]+)$/.exec(path);
     if (deleteKey && request.method === 'DELETE') { await this.repository.deleteKey(deleteKey[1]); return new Response(null, { status: 204 }); }
 
@@ -333,11 +348,6 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       return accepted ? json({ success: true }) : json({ error: '会话已回复或已过期' }, 409);
     }
     return json({ error: 'Not found' }, 404);
-  }
-
-  private async assertChannels(ids: string[]): Promise<void> {
-    const channels = new Set((await this.repository.listChannels()).map((item) => item.id));
-    if (ids.some((id) => !channels.has(id))) throw new Error('路由包含无效的频道');
   }
 
   private async serverchan(request: Request, secret: string): Promise<Response> {

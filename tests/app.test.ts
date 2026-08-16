@@ -117,3 +117,32 @@ describe('HTTP API and MCP', () => {
     expect(delivery.metadata).toMatchObject({ tags: 'a|b', via: 'serverchan-compat' });
   });
 });
+
+describe('admin key editing', () => {
+  it('updates scopes and destination whitelist via PATCH', async () => {
+    const { app, repository } = await setup();
+    const channel = await repository.createChannel({ name: 'Ops', slug: 'ops', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{}' } });
+    const created = await request(app).post('/api/admin/keys').send({ name: 'Editable' }).expect(201);
+    const id = created.body.apiKey.id as string;
+
+    await request(app).patch(`/api/admin/keys/${id}`).send({ scopes: ['notifications:send', 'config:write'], destinationIds: [channel.id] }).expect(200);
+    const listed = await request(app).get('/api/admin/keys').expect(200);
+    const key = listed.body.keys.find((item: { id: string }) => item.id === id);
+    expect(key.scopes).toEqual(['notifications:send', 'config:write']);
+    expect(key.destinationIds).toEqual([channel.id]);
+
+    await request(app).patch(`/api/admin/keys/${id}`).send({ destinationIds: ['no-such-dest'] }).expect(400);
+    await request(app).patch('/api/admin/keys/no-such-key').send({ name: 'x' }).expect(404);
+  });
+
+  it('rejects unknown destinations on key create', async () => {
+    const { app } = await setup();
+    await request(app).post('/api/admin/keys').send({ name: 'Bad', destinationIds: ['no-such-dest'] }).expect(400);
+  });
+
+  it('rejects secret or unknown fields via PATCH', async () => {
+    const { app } = await setup();
+    const created = await request(app).post('/api/admin/keys').send({ name: 'S' }).expect(201);
+    await request(app).patch(`/api/admin/keys/${created.body.apiKey.id}`).send({ secret: 'new-secret-123' }).expect(400);
+  });
+});
