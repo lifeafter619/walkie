@@ -419,6 +419,10 @@ td code { color: var(--muted); }
 .modal-body { padding: 18px; overflow-y: auto; display: grid; gap: 16px; }
 .modal-actions { margin: 2px -18px -18px; padding: 12px 18px; border-top: 1px solid var(--line-soft); display: flex; justify-content: flex-end; gap: 8px; background: var(--surface-alt); }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+/* 静默时段：两个 time 选择器 + 分隔字一行，时区下拉独占下一行 */
+.quiet-hours-inputs { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.quiet-hours-inputs input[type="time"] { flex: 1; min-width: 0; }
+.quiet-sep { color: var(--muted); font-size: 12px; flex: 0 0 auto; }
 .provider-note { min-height: 52px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 10px 12px; color: var(--ink-2); background: var(--surface-alt); border: 1px solid var(--line); border-radius: 6px; }
 .provider-note strong { font-size: 12px; color: var(--ink); }
 .provider-note p { margin: 2px 0 0; color: var(--muted); font-size: 11px; }

@@ -25,6 +25,14 @@ const SMTP_PRESETS: Record<string, { host: string; port: number; secure: boolean
 
 const SMTP_LOCKED_KEYS = new Set(['host', 'port', 'secure']);
 
+/* 静默时段时区下拉的常用项；浏览器当前时区不在列表时动态插到最前 */
+const COMMON_TIMEZONES = [
+  'Asia/Shanghai', 'Asia/Hong_Kong', 'Asia/Taipei', 'Asia/Tokyo', 'Asia/Seoul', 'Asia/Singapore',
+  'Asia/Kolkata', 'Asia/Dubai', 'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Moscow',
+  'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'America/Sao_Paulo',
+  'Australia/Sydney', 'UTC'
+];
+
 /* ────────────────────────────────────────────────────────────
  * 频道管理：列表 + 表单。
  * 渠道类型选择：provider-note 内「选择/更换」按钮打开图标弹框（ChannelPicker）。
@@ -44,7 +52,13 @@ export function ChannelForm({
   const [provider, setProvider] = useState<ProviderId>(channel?.provider ?? providers[0]?.id ?? 'telegram');
   const [config, setConfig] = useState<Record<string, unknown>>({});
   const [rateLimit, setRateLimit] = useState(channel?.rateLimitPerMin ?? 0);
-  const [quiet, setQuiet] = useState(channel?.quietHours ?? '');
+  // 静默时段拆成三个选择器输入（time 滚轮 + 时区下拉），提交时拼回 "HH:MM-HH:MM@TZ" 存储格式
+  const quietStored = channel?.quietHours ?? '';
+  const quietParsed = /^(\d{2}:\d{2})-(\d{2}:\d{2})(?:@(.+))?$/.exec(quietStored);
+  const [quietStart, setQuietStart] = useState(quietParsed?.[1] ?? '');
+  const [quietEnd, setQuietEnd] = useState(quietParsed?.[2] ?? '');
+  // 默认带浏览器时区：Cloudflare Workers 服务器时间恒为 UTC，不带时区的静默时段基本是错的
+  const [quietTz, setQuietTz] = useState(quietParsed?.[3] ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC');
   const [busy, setBusy] = useState(false);
   const [picking, setPicking] = useState(false);
 
@@ -68,7 +82,9 @@ export function ChannelForm({
       const cleanedConfig = channel
         ? Object.fromEntries(Object.entries(config).filter(([, value]) => value !== '' && value !== undefined))
         : config;
-      const body = { name, slug: channelSlug || slugify(name), provider, config: cleanedConfig, rateLimitPerMin: rateLimit || null, quietHours: quiet || null };
+      // 静默时段：起止都选了才生效；只选了一半按未设置处理（后端无法表达半段区间）
+      const quietHours = quietStart && quietEnd ? `${quietStart}-${quietEnd}@${quietTz}` : null;
+      const body = { name, slug: channelSlug || slugify(name), provider, config: cleanedConfig, rateLimitPerMin: rateLimit || null, quietHours };
       channel ? await api.updateChannel(channel.id, body) : await api.createChannel(body);
       notify('success', channel ? '频道已更新' : '频道已创建');
       saved();
@@ -175,8 +191,17 @@ export function ChannelForm({
             <input type="number" min={0} max={600} value={rateLimit} onChange={(event) => setRateLimit(Number(event.target.value))} />
           </label>
           <label>静默时段<span className="optional">可选</span>
-            <input value={quiet} onChange={(event) => setQuiet(event.target.value)} pattern="\d{2}:\d{2}-\d{2}:\d{2}(@[\w/+-]+)?" placeholder="22:00-08:00@Asia/Shanghai" />
-            <small>静默期内消息延后发送，critical 级别照常送达；不带 @时区 时按服务器本地时间（Cloudflare Workers 为 UTC）</small>
+            <div className="quiet-hours-inputs">
+              <input type="time" value={quietStart} onChange={(event) => setQuietStart(event.target.value)} aria-label="静默开始时间" />
+              <span className="quiet-sep">至</span>
+              <input type="time" value={quietEnd} onChange={(event) => setQuietEnd(event.target.value)} aria-label="静默结束时间" />
+            </div>
+            <select value={quietTz} onChange={(event) => setQuietTz(event.target.value)} aria-label="静默时段时区">
+              {Array.from(new Set([quietTz, ...COMMON_TIMEZONES])).map((tz) => (
+                <option key={tz} value={tz}>{tz}</option>
+              ))}
+            </select>
+            <small>静默期内消息延后发送，critical 级别照常送达；起止时间都选择后生效，清空任一即关闭</small>
           </label>
         </div>
 
