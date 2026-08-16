@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#fafafa" />
     <meta name="description" content="Walkie notification control plane for AI agents" />
     <title>Walkie</title>
-    <script>try{var s=localStorage.getItem('rd-theme');if(s==='dark'||s==='light')document.documentElement.setAttribute('data-theme',s);}catch(e){}</script>
+    <script>try{var s=localStorage.getItem('rd-theme');if(s==='dark'||s==='light')document.documentElement.setAttribute('data-theme',s);var m=document.querySelector('meta[name="theme-color"]');if(m)m.content=s==='dark'? '#0a0a0a' :s==='light'? '#fafafa' :matchMedia('(prefers-color-scheme: dark)').matches? '#0a0a0a' : '#fafafa';}catch(e){}</script>
   </head>
   <body>
     <div id="root"></div>
