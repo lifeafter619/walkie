@@ -208,7 +208,7 @@ export function Keys({
         <Button variant="primary" icon={Plus} onClick={() => setCreating(true)}>创建密钥</Button>
       </header>
 
-      <section className="panel">
+      <section className="panel keys-table-panel">
         <div className="table-wrap">
           <table>
             <thead>
@@ -273,6 +273,72 @@ export function Keys({
           )}
         </div>
       </section>
+
+      {/* 手机端表格列太多改卡片流（styles.css ≤680px 切换显示），操作与表格行共用一套状态 */}
+      <div className="keys-cards">
+        {keys.map((key) => (
+          <div key={key.id} className={`key-card${key.revokedAt ? ' disabled-row' : ''}`}>
+            <div className="key-card-head">
+              <div>
+                <strong>{key.name}</strong>
+                <span className="muted-row">创建于 {formatDate(key.createdAt)}</span>
+              </div>
+              {key.revokedAt ? <Badge status="revoked" /> : <span className="state-dot active">有效</span>}
+            </div>
+            <dl className="key-card-facts">
+              <div>
+                <dt>密钥前缀</dt>
+                <dd><code>{key.secret
+                  // 随机密钥由服务端生成，格式恒为 rdk_<prefix>_…；自定义密钥即便以 rdk_ 开头也匹配不上（prefix 是哈希）
+                  ? (key.secret.startsWith(`rdk_${key.prefix}_`) ? `rdk_${key.prefix}_••••` : '自定义密钥')
+                  : `rdk_${key.prefix}_••••`}</code></dd>
+              </div>
+              <div>
+                <dt>权限</dt>
+                <dd>{key.scopes.map((scope) => scope === 'notifications:send' ? '发送' : '读取').join('、')}</dd>
+              </div>
+              <div>
+                <dt>目的地</dt>
+                <dd>{key.destinationIds.length ? `${key.destinationIds.length} 个指定` : '全部'}</dd>
+              </div>
+              <div>
+                <dt>最近使用</dt>
+                <dd>{formatDate(key.lastUsedAt)}</dd>
+              </div>
+            </dl>
+            {revealId === key.id && (
+              key.viewable && key.secret ? (
+                <div className="copy-field">
+                  <code>{key.secret}</code>
+                  <IconButton label="复制密钥" icon={Copy} onClick={() => copySecret(key.secret!)} />
+                </div>
+              ) : (
+                <span className="muted-row">此密钥创建于该功能启用前，仅存哈希，无法查看。如需可复制密钥，请吊销后重新创建。</span>
+              )
+            )}
+            <div className="key-card-actions">
+              {key.revokedAt ? (
+                <>
+                  <Button icon={RotateCcw} loading={busyId === key.id + 'restore'} disabled={Boolean(busyId)} onClick={() => restore(key)}>重新启用</Button>
+                  <Button icon={Trash2} disabled={Boolean(busyId)} onClick={() => setDeletingId(key.id)}>彻底删除</Button>
+                </>
+              ) : (
+                <>
+                  {key.viewable && (
+                    <Button icon={revealId === key.id ? EyeOff : Eye} onClick={() => setRevealId(revealId === key.id ? null : key.id)}>
+                      {revealId === key.id ? '收起' : '查看'}
+                    </Button>
+                  )}
+                  <Button icon={Power} loading={busyId === key.id + 'revoke'} disabled={Boolean(busyId)} onClick={() => revoke(key)}>吊销</Button>
+                </>
+              )}
+            </div>
+          </div>
+        ))}
+        {!keys.length && (
+          <Empty icon={Bot} title="还没有 Agent Key" text="创建一个密钥，让 Agent 通过 MCP 或 REST 发送通知。" action={<Button variant="primary" icon={Plus} onClick={() => setCreating(true)}>创建密钥</Button>} />
+        )}
+      </div>
 
       <CredentialPanels notify={notify} refresh={refresh} />
 

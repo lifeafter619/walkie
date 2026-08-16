@@ -349,6 +349,19 @@ td code { color: var(--muted); }
 .cred-note code { color: var(--ink-2); }
 .cred-note svg { flex-shrink: 0; margin-top: 2px; }
 
+/* ── 密钥页 · 手机端卡片流（桌面隐藏，≤680px 顶替 7 列表格） ── */
+.keys-cards { display: none; }
+.key-card { padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); display: grid; gap: 10px; }
+.key-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.key-card-head strong { display: block; color: var(--ink); font-size: 13px; font-weight: 600; }
+.key-card-facts { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+.key-card-facts > div { min-width: 0; display: grid; gap: 2px; }
+.key-card-facts dt { color: var(--muted); font-size: 11px; }
+.key-card-facts dd { margin: 0; color: var(--ink-2); font-size: 12px; overflow-wrap: anywhere; }
+.key-card-facts dd code { font-size: 11px; }
+.key-card-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.key-card-actions .button { flex: 1 1 calc(50% - 4px); }
+
 /* ── Agent 密钥查看行（展开） ── */
 .reveal-row > td { padding: 12px 16px; background: var(--surface-alt); }
 .capability-list { padding: 6px 16px 12px; }
@@ -544,6 +557,32 @@ td code { color: var(--muted); }
 .login-footer { margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 11px; text-align: center; }
 .nav-backdrop { display: none; }
 
+/* ── 手机端「更多」底部面板（仅 ≤680px 显示，挂在底栏上方） ── */
+.sheet-backdrop, .mobile-sheet { display: none; }
+@media (max-width: 680px) {
+  .sheet-backdrop { display: block; position: fixed; z-index: 26; inset: 0; background: rgba(0, 0, 0, 0.3); }
+  .mobile-sheet {
+    position: fixed; z-index: 27; right: 0; bottom: calc(64px + env(safe-area-inset-bottom)); left: 0;
+    margin: 0 10px; padding: 8px 12px calc(10px + env(safe-area-inset-bottom));
+    display: grid; gap: 10px; border: 1px solid var(--line); border-radius: 12px 12px 0 0;
+    background: var(--surface); box-shadow: var(--shadow-pop);
+  }
+  .sheet-grab { width: 36px; height: 4px; margin: 2px auto 0; border-radius: 2px; background: var(--faint); }
+  .sheet-links { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .sheet-links button {
+    min-height: 64px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
+    color: var(--ink-2); display: grid; place-items: center; gap: 4px; padding: 8px 4px; font-size: 12px;
+  }
+  .sheet-links button.active { color: var(--ink); border-color: var(--ink); font-weight: 600; }
+  .sheet-links button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 面板里的主题切换带文字标签（侧栏版只显图标是因为 232px 放不下） */
+  .mobile-sheet .theme-segment { justify-self: center; }
+  .mobile-sheet .theme-segment button span { display: inline; font-size: 12px; padding: 0 6px; }
+  .sheet-actions { display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--line-soft); padding-top: 10px; }
+  .sheet-actions .version-badge { flex: 1; }
+  .sheet-actions .logout-button { font-size: 12px; }
+}
+
 /* ── 响应式 ── */
 @media (max-width: 1100px) {
   .overview-grid { grid-template-columns: minmax(0, 1fr) 320px; }
@@ -576,7 +615,9 @@ td code { color: var(--muted); }
   body { padding-bottom: 64px; }
   .page-content { padding: 18px 14px 28px; }
   .page-head h1 { font-size: 16px; }
-  .mobile-nav { position: fixed; z-index: 25; inset: auto 0 0; height: calc(64px + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom); display: grid; grid-template-columns: repeat(5, 1fr); background: var(--surface); border-top: 1px solid var(--line); }
+  /* 汉堡与底栏二选一：≤680px 只有底栏导航，桌面抽屉入口留给平板区间 */
+  .mobile-top { display: none; }
+  .mobile-nav { position: fixed; z-index: 25; inset: auto 0 0; height: calc(64px + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom); display: grid; grid-template-columns: repeat(6, 1fr); background: var(--surface); border-top: 1px solid var(--line); }
   .mobile-nav button { border: 0; background: transparent; color: var(--muted); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; font-size: 10px; }
   .mobile-nav button.active { color: var(--ink); font-weight: 600; }
   .stats-strip { grid-template-columns: repeat(2, 1fr); }
@@ -590,6 +631,12 @@ td code { color: var(--muted); }
   .filters select { width: 112px; }
   table { min-width: 680px; }
   .recent-panel table { min-width: 600px; }
+  /* 密钥页：7 列表格换卡片流；凭据面板标签列改上下堆叠、表单收单列 */
+  .keys-table-panel { display: none; }
+  .keys-cards { display: grid; gap: 10px; }
+  .cred-meta > div { grid-template-columns: 1fr; min-height: 0; gap: 2px; padding: 8px 16px; align-content: start; }
+  .cred-form { display: grid; grid-template-columns: 1fr; align-items: stretch; }
+  .cred-form input { flex-basis: auto; }
   .system-grid { grid-template-columns: 1fr; }
   .onboarding-steps { grid-template-columns: 1fr; }
   .onboarding-step { border-right: 0; border-bottom: 1px solid var(--line-soft); }

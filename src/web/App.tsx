@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Activity, Code2, KeyRound, LayoutDashboard, LoaderCircle, LogOut, Radio, Menu,
+  Activity, Code2, EllipsisVertical, KeyRound, LayoutDashboard, LoaderCircle, LogOut, Radio, Menu,
   MessageCircleQuestion, MessageSquareText, RefreshCw, Route as RouteIcon, ServerCog, X
 } from 'lucide-react';
 import type { ApiKey, Channel, DashboardStats, Delivery, Destination, ProviderDefinition, Route } from '../shared/types';
@@ -44,6 +44,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState<Page>(pageFromHash);
   const [menu, setMenu] = useState(false);
+  // 手机端「更多」底部面板：底栏只放 5 个高频页，其余页面与主题/刷新/退出收纳于此
+  const [sheet, setSheet] = useState(false);
 
   const [stats, setStats] = useState<DashboardStats>();
   const [providers, setProviders] = useState<ProviderDefinition[]>([]);
@@ -57,7 +59,7 @@ export default function App() {
 
   // 浏览器前进/后退与手输 hash 同步页面
   useEffect(() => {
-    const onHash = () => setPage(pageFromHash());
+    const onHash = () => { setPage(pageFromHash()); setSheet(false); };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
@@ -65,6 +67,7 @@ export default function App() {
   const go = useCallback((next: Page) => {
     window.location.hash = next;
     setPage(next);
+    setSheet(false);
   }, []);
 
   const notify: Notify = useCallback((kind, message) => {
@@ -234,7 +237,39 @@ export default function App() {
             <span>{label}</span>
           </button>
         ))}
+        <button
+          className={sheet || ['routes', 'integrations', 'system'].includes(page) ? 'active' : ''}
+          aria-expanded={sheet}
+          onClick={() => setSheet(!sheet)}
+        >
+          <span className="mobile-tab-icon"><EllipsisVertical size={19} /></span>
+          <span>更多</span>
+        </button>
       </nav>
+
+      {sheet && (
+        <div className="sheet-backdrop" onClick={() => setSheet(false)}>
+          <nav className="mobile-sheet" role="dialog" aria-label="更多页面与设置" onClick={(event) => event.stopPropagation()}>
+            <div className="sheet-grab" aria-hidden="true" />
+            <div className="sheet-links">
+              {nav.filter(({ id }) => !mobileNav.includes(id)).map(({ id, label, icon: Icon }) => (
+                <button key={id} className={page === id ? 'active' : ''} onClick={() => go(id)}>
+                  <Icon size={17} /><span>{label}</span>
+                </button>
+              ))}
+            </div>
+            <ThemeToggle />
+            <div className="sheet-actions">
+              <IconButton label="刷新数据" icon={RefreshCw} onClick={refresh} />
+              <span className="version-badge" title={`Walkie v${meta.version} · ${meta.runtime}`}>v{meta.version}</span>
+              <button type="button" className="logout-button" onClick={() => { setToken(''); setAuthenticated(false); }}>
+                <LogOut size={13} />
+                退出登录
+              </button>
+            </div>
+          </nav>
+        </div>
+      )}
 
       <Toasts toasts={toasts} dismiss={(id) => setToasts((old) => old.filter((item) => item.id !== id))} />
     </div>
