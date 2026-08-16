@@ -121,4 +121,26 @@ describe('disabled channel cleanup (regression)', () => {
     expect(delivery.id).toBeTruthy();
     repository.close();
   });
+
+  it('updates key scopes and destinations with audit trail', async () => {
+    const repository = await createRepository();
+    const channel = await repository.createChannel({ name: 'Ops', slug: 'ops', provider: 'telegram', config: { botToken: 't', chatId: '42' } });
+    const { apiKey } = await repository.createKey({ name: 'Editor' });
+    const updated = await repository.updateKey(apiKey.id, { scopes: ['config:write'], destinationIds: [channel.id] });
+    expect(updated.scopes).toEqual(['config:write']);
+    expect(updated.destinationIds).toEqual([channel.id]);
+    expect((await repository.getKey(apiKey.id))?.scopes).toEqual(['config:write']);
+    await expect(repository.updateKey('no-such-key', { name: 'x' })).rejects.toThrow('Key not found');
+    const keyUpdate = (await repository.listAuditEvents()).find((event) => event.action === 'api_key.update');
+    expect(keyUpdate?.actor).toBe('admin');
+    expect(keyUpdate?.details).toEqual({ fields: ['scopes', 'destinationIds'] });
+    repository.close();
+  });
+
+  it('records agent actor on channel mutations', async () => {
+    const repository = await createRepository();
+    await repository.createChannel({ name: 'Ops', slug: 'ops', provider: 'telegram', config: { botToken: 't', chatId: '42' } }, 'agent:key-1');
+    expect((await repository.listAuditEvents()).find((event) => event.action === 'channel.create')?.actor).toBe('agent:key-1');
+    repository.close();
+  });
 });

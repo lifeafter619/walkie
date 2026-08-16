@@ -231,7 +231,7 @@ export class RelayRepository {
     }
   }
 
-  async createChannel(input: { name: string; slug: string; provider: ProviderId; enabled?: boolean; config: Record<string, unknown>; rateLimitPerMin?: number | null; quietHours?: string | null }): Promise<Channel> {
+  async createChannel(input: { name: string; slug: string; provider: ProviderId; enabled?: boolean; config: Record<string, unknown>; rateLimitPerMin?: number | null; quietHours?: string | null }, actor = 'admin'): Promise<Channel> {
     return this.withWriteLock(async () => {
       await this.ensureFreshDek();
       const id = randomUUID();
@@ -239,12 +239,12 @@ export class RelayRepository {
       await this.db.run(`INSERT INTO channels
         (id,name,slug,provider,config_encrypted,enabled,rate_limit_per_min,quiet_hours,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?,?,?,?)`, [id, input.name, input.slug, input.provider, encryptJson(input.config, this.encryptionKey()), input.enabled === false ? 0 : 1, input.rateLimitPerMin || null, input.quietHours || null, timestamp, timestamp]);
-      await this.audit('admin', 'channel.create', 'channel', id, { provider: input.provider });
+      await this.audit(actor, 'channel.create', 'channel', id, { provider: input.provider });
       return (await this.getChannel(id))!;
     });
   }
 
-  async updateChannel(id: string, input: Partial<{ name: string; slug: string; provider: ProviderId; enabled: boolean; config: Record<string, unknown>; rateLimitPerMin: number | null; quietHours: string | null }>): Promise<Channel> {
+  async updateChannel(id: string, input: Partial<{ name: string; slug: string; provider: ProviderId; enabled: boolean; config: Record<string, unknown>; rateLimitPerMin: number | null; quietHours: string | null }>, actor = 'admin'): Promise<Channel> {
     return this.withWriteLock(async () => {
       const current = await this.getChannel(id);
       if (!current) throw new Error('Channel not found');
@@ -260,7 +260,7 @@ export class RelayRepository {
       ]);
       // 禁用频道后，其未完结的 attempt 再也不会被 claim，必须就地失败并推进投递终态，否则投递永久停在 processing
       if (input.enabled === false) await this.failAttemptsForDisabledChannel(current.id);
-      await this.audit('admin', 'channel.update', 'channel', current.id, {});
+      await this.audit(actor, 'channel.update', 'channel', current.id, {});
       return (await this.getChannel(current.id))!;
     });
   }
@@ -270,7 +270,7 @@ export class RelayRepository {
       [success ? 'success' : 'failed', error ?? null, now(), id]);
   }
 
-  async deleteChannel(id: string): Promise<void> {
+  async deleteChannel(id: string, actor = 'admin'): Promise<void> {
     // 先解析真实 id：调用方可能传 slug，直接拿参数写 WHERE id=? 会静默 no-op 却返回成功
     const current = await this.getChannel(id);
     if (!current) return;
@@ -283,7 +283,7 @@ export class RelayRepository {
       return;
     }
     await this.db.run('DELETE FROM channels WHERE id=?', [current.id]);
-    await this.audit('admin', 'channel.delete', 'channel', current.id, {});
+    await this.audit(actor, 'channel.delete', 'channel', current.id, {});
   }
 
   /** 频道被禁用/软删除后，其 pending/retrying/sending attempt 就地失败，并刷新受影响投递的终态 */
@@ -311,16 +311,16 @@ export class RelayRepository {
     return row ? this.routeFrom(row) : undefined;
   }
 
-  async createRoute(input: { name: string; slug: string; strategy: RouteStrategy; channelIds: string[]; enabled?: boolean }): Promise<Route> {
+  async createRoute(input: { name: string; slug: string; strategy: RouteStrategy; channelIds: string[]; enabled?: boolean }, actor = 'admin'): Promise<Route> {
     const id = randomUUID();
     const timestamp = now();
     await this.db.run('INSERT INTO routes (id,name,slug,strategy,channel_ids,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)',
       [id, input.name, input.slug, input.strategy, JSON.stringify(input.channelIds), input.enabled === false ? 0 : 1, timestamp, timestamp]);
-    await this.audit('admin', 'route.create', 'route', id, { strategy: input.strategy });
+    await this.audit(actor, 'route.create', 'route', id, { strategy: input.strategy });
     return (await this.getRoute(id))!;
   }
 
-  async updateRoute(id: string, input: Partial<{ name: string; slug: string; strategy: RouteStrategy; channelIds: string[]; enabled: boolean }>): Promise<Route> {
+  async updateRoute(id: string, input: Partial<{ name: string; slug: string; strategy: RouteStrategy; channelIds: string[]; enabled: boolean }>, actor = 'admin'): Promise<Route> {
     const current = await this.getRoute(id);
     if (!current) throw new Error('Route not found');
     // getRoute 按 id/slug 双解析，写回用真实 id（传 slug 时 WHERE id=slug 会静默 no-op）
@@ -328,11 +328,11 @@ export class RelayRepository {
       input.name ?? current.name, input.slug ?? current.slug, input.strategy ?? current.strategy,
       JSON.stringify(input.channelIds ?? current.channelIds), input.enabled ?? current.enabled ? 1 : 0, now(), current.id
     ]);
-    await this.audit('admin', 'route.update', 'route', current.id, {});
+    await this.audit(actor, 'route.update', 'route', current.id, {});
     return (await this.getRoute(current.id))!;
   }
 
-  async deleteRoute(id: string): Promise<void> {
+  async deleteRoute(id: string, actor = 'admin'): Promise<void> {
     const current = await this.getRoute(id);
     if (!current) return;
     // 在途投递还要靠路由行判定 fallback 语义（claim 时 JOIN routes 取 strategy），
@@ -340,11 +340,11 @@ export class RelayRepository {
     const active = (await this.db.get(`SELECT COUNT(*) count FROM deliveries WHERE target_type='route' AND target_id=? AND status IN ('queued','processing')`, [current.id])) as { count: number };
     if (active.count > 0) {
       await this.db.run('UPDATE routes SET enabled=0,updated_at=? WHERE id=?', [now(), current.id]);
-      await this.audit('admin', 'route.disable', 'route', current.id, { reason: 'delete-deferred-active-deliveries' });
+      await this.audit(actor, 'route.disable', 'route', current.id, { reason: 'delete-deferred-active-deliveries' });
       return;
     }
     await this.db.run('DELETE FROM routes WHERE id=?', [current.id]);
-    await this.audit('admin', 'route.delete', 'route', current.id, {});
+    await this.audit(actor, 'route.delete', 'route', current.id, {});
   }
 
   async listDestinations(): Promise<Destination[]> {
@@ -429,6 +429,20 @@ export class RelayRepository {
   async restoreKey(id: string): Promise<void> {
     await this.db.run('UPDATE api_keys SET revoked_at=NULL WHERE id=?', [id]);
     await this.audit('admin', 'api_key.restore', 'api_key', id, {});
+  }
+
+  /** 编辑 Key 的名称/scope/目的地白名单；不改动密钥本身（换密钥走吊销重建） */
+  async updateKey(id: string, input: { name?: string; scopes?: string[]; destinationIds?: string[] }): Promise<ApiKey> {
+    const COLUMNS = { name: 'name', scopes: 'scopes', destinationIds: 'destination_ids' } as const;
+    const fields = (Object.keys(COLUMNS) as Array<keyof typeof COLUMNS>).filter((field) => input[field] !== undefined);
+    const existing = await this.getKey(id);
+    if (!existing) throw new Error('Key not found');
+    if (fields.length) {
+      const params = fields.map((field) => field === 'name' ? input.name! : JSON.stringify(input[field]));
+      await this.db.run(`UPDATE api_keys SET ${fields.map((field) => `${COLUMNS[field]}=?`).join(', ')} WHERE id=?`, [...params, id]);
+      await this.audit('admin', 'api_key.update', 'api_key', id, { fields });
+    }
+    return (await this.getKey(id))!;
   }
 
   /** 彻底删除密钥记录（不可恢复）。删除前应先吊销，确保缓存/会话立即失效 */
@@ -770,6 +784,15 @@ export class RelayRepository {
       await this.audit('admin', 'credential.master_key.rotate', 'credential', 'dek', { version: nextVersion });
       return { version: nextVersion, rotatedAt: timestamp };
     });
+  }
+
+  async listAuditEvents(limit = 100): Promise<Array<{ id: string; actor: string; action: string; resourceType: string; resourceId?: string; details: Record<string, unknown>; createdAt: string }>> {
+    const rows = await this.db.all('SELECT * FROM audit_events ORDER BY created_at DESC LIMIT ?', [limit]);
+    return rows.map((row) => ({
+      id: String(row.id), actor: String(row.actor), action: String(row.action), resourceType: String(row.resource_type),
+      resourceId: row.resource_id ? String(row.resource_id) : undefined,
+      details: row.details ? JSON.parse(String(row.details)) : {}, createdAt: String(row.created_at)
+    }));
   }
 
   async audit(actor: string, action: string, resourceType: string, resourceId: string | undefined, details: Record<string, unknown>): Promise<void> {
