@@ -81,7 +81,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       maxSendsPerMin: integer(env.MAX_SENDS_PER_MIN, 0, 0, 100_000)
     });
     this.notifications = new NotificationService(this.repository, () => ctx.waitUntil(this.drainAndSchedule()));
-    this.mcp = createRelayMcpHandler(this.repository, this.notifications, (request) => request ? new URL(request.url).origin : '');
+    this.mcp = createRelayMcpHandler(this.repository, this.notifications, this.dispatcher, (request) => request ? new URL(request.url).origin : '');
   }
 
   async alarm(): Promise<void> {

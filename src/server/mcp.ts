@@ -3,7 +3,9 @@ import { z } from 'zod';
 import type { ApiKey } from '../shared/types.js';
 import { VERSION } from '../shared/version.js';
 import type { RelayRepository } from './database.js';
+import { registerConfigTools } from './mcp-config.js';
 import type { NotificationService } from './notifications.js';
+import type { ProviderDispatcher } from './providers/dispatcher.js';
 
 const result = (value: unknown) => ({
   content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }],
@@ -12,12 +14,15 @@ const result = (value: unknown) => ({
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export function createRelayMcpServer(repository: RelayRepository, notifications: NotificationService, apiKey: ApiKey, publicUrl = ''): McpServer {
+export function createRelayMcpServer(repository: RelayRepository, notifications: NotificationService, dispatcher: ProviderDispatcher, apiKey: ApiKey, publicUrl = ''): McpServer {
   const server = new McpServer(
     { name: 'Walkie', version: VERSION },
     {
       supportedProtocolVersions: ['2026-07-28', ...SUPPORTED_PROTOCOL_VERSIONS],
       instructions: 'Use list_destinations before sending. Call send_notification with an allowed destination slug or ID, then use get_delivery with the returned deliveryId when delivery status is needed. To ask the human a question, call ask_user, then poll check_reply with the returned conversationId until status is replied or the deadline passes. Never invent destination IDs.'
+        + (apiKey.scopes.includes('config:write')
+          ? ' When the user asks to set up or change notification channels or routes: call list_channel_types to learn the provider\'s required fields, ask the user for any missing required values, then create_channel, test_channel, and report the result. Never echo config values back to the user or logs.'
+          : '')
     }
   );
 
@@ -29,9 +34,10 @@ export function createRelayMcpServer(repository: RelayRepository, notifications:
 
   server.registerTool('list_routes', {
     title: 'List notification routes',
-    description: 'List enabled fanout and fallback routes this Agent can use.',
+    description: 'List routes this Agent can use (all routes when the key has config:write).',
     inputSchema: z.object({})
   }, async () => {
+    if (apiKey.scopes.includes('config:write')) return result({ routes: await repository.listRoutes() });
     const allowed = new Set((await notifications.listDestinations(apiKey)).filter((item) => item.kind === 'route').map((item) => item.id));
     return result({ routes: (await repository.listRoutes()).filter((route) => route.enabled && allowed.has(route.id)) });
   });
@@ -100,14 +106,16 @@ export function createRelayMcpServer(repository: RelayRepository, notifications:
     annotations: { readOnlyHint: true }
   }, async ({ deliveryId }) => result({ delivery: await notifications.getDelivery(deliveryId, apiKey) }));
 
+  if (apiKey.scopes.includes('config:write')) registerConfigTools(server, repository, dispatcher, apiKey);
+
   return server;
 }
 
-export function createRelayMcpHandler(repository: RelayRepository, notifications: NotificationService, publicUrl: (request?: Request) => string = () => '') {
+export function createRelayMcpHandler(repository: RelayRepository, notifications: NotificationService, dispatcher: ProviderDispatcher, publicUrl: (request?: Request) => string = () => '') {
   return createMcpHandler(async ({ authInfo, requestInfo }: McpRequestContext) => {
     const apiKey = authInfo?.clientId ? await repository.getKey(authInfo.clientId) : undefined;
     if (!apiKey || apiKey.revokedAt) throw new Error('无效或已吊销的 Agent API Key');
-    return createRelayMcpServer(repository, notifications, apiKey, publicUrl(requestInfo));
+    return createRelayMcpServer(repository, notifications, dispatcher, apiKey, publicUrl(requestInfo));
   }, {
     legacy: 'stateless',
     responseMode: 'json',

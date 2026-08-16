@@ -49,7 +49,7 @@ export function createApp(deps: AppDependencies) {
   // publicUrl：优先显式配置；未配置时用调用方给出的请求 origin（反向代理场景生成可用链接），
   // 无请求上下文时退回监听地址
   const publicUrl = (origin?: string) => (config.publicUrl ?? origin ?? `http://${config.host}:${config.port}`).replace(/\/$/, '');
-  const mcpHandler = createRelayMcpHandler(repository, notifications, (request) => publicUrl(request ? new URL(request.url).origin : undefined));
+  const mcpHandler = createRelayMcpHandler(repository, notifications, dispatcher, (request) => publicUrl(request ? new URL(request.url).origin : undefined));
   const nodeMcpHandler = toNodeHandler(mcpHandler, {
     onerror: (error) => console.error('MCP adapter failed:', error.message)
   });
