@@ -19,13 +19,18 @@ import { Button, Modal, type Notify, formatDate } from './ui';
 
 export function CredentialPanels({ notify, refresh }: { notify: Notify; refresh: () => void }) {
   const [status, setStatus] = useState<CredentialStatus>();
+  const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [password, setPassword] = useState('');
   const [confirmRotateKey, setConfirmRotateKey] = useState(false);
 
   const load = useCallback(async () => {
+    setLoadFailed(false);
     try { setStatus(await api.credentials()); }
-    catch (error) { notify('error', error instanceof Error ? error.message : '加载凭据状态失败'); }
+    catch (error) {
+      setLoadFailed(true);
+      notify('error', error instanceof Error ? error.message : '加载凭据状态失败');
+    }
   }, [notify]);
 
   useEffect(() => { void load(); }, [load]);
@@ -57,7 +62,12 @@ export function CredentialPanels({ notify, refresh }: { notify: Notify; refresh:
     } finally { setBusy(false); }
   };
 
-  if (!status) return <div className="modal-loading"><LoaderCircle className="spin" /></div>;
+  if (!status) return loadFailed
+    ? <section className="panel"><div className="modal-body">
+        <p className="panel-note" style={{ borderTop: 0 }}>凭据状态加载失败，可能是网络抖动。</p>
+        <div className="cred-form"><Button variant="primary" icon={RefreshCw} onClick={() => void load()}>重试加载</Button></div>
+      </div></section>
+    : <div className="modal-loading"><LoaderCircle className="spin" /></div>;
 
   return (
     <>

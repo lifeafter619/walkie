@@ -1,5 +1,5 @@
 import { Fragment, useState, type FormEvent } from 'react';
-import { AlertTriangle, Bot, Check, Copy, Eye, EyeOff, KeyRound, Plus, Power } from 'lucide-react';
+import { AlertTriangle, Bot, Check, Copy, Eye, EyeOff, KeyRound, Plus, Power, RotateCcw, Trash2 } from 'lucide-react';
 import type { ApiKey, Destination } from '../../shared/types';
 import { api } from '../api';
 import { Badge, Button, Empty, IconButton, Modal, Notify, formatDate } from './ui';
@@ -142,15 +142,50 @@ export function Keys({
 }) {
   const [creating, setCreating] = useState(false);
   const [revealId, setRevealId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState('');
 
   const revoke = async (key: ApiKey) => {
     if (!confirm(`吊销“${key.name}”？使用该密钥的 Agent 会立即失去访问权限。`)) return;
+    setBusyId(key.id + 'revoke');
     try {
       await api.revokeKey(key.id);
       notify('success', '密钥已吊销');
+      setRevealId(null);
       refresh();
     } catch (error) {
       notify('error', error instanceof Error ? error.message : '吊销失败');
+    } finally {
+      setBusyId('');
+    }
+  };
+
+  const restore = async (key: ApiKey) => {
+    if (busyId) return;
+    setBusyId(key.id + 'restore');
+    try {
+      await api.restoreKey(key.id);
+      notify('success', '密钥已重新启用');
+      refresh();
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : '启用失败');
+    } finally {
+      setBusyId('');
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deletingId || busyId) return;
+    setBusyId(deletingId + 'delete');
+    try {
+      await api.deleteKey(deletingId);
+      notify('success', '密钥已彻底删除');
+      setDeletingId(null);
+      refresh();
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : '删除失败');
+    } finally {
+      setBusyId('');
     }
   };
 
@@ -197,10 +232,19 @@ export function Keys({
                     <td>{formatDate(key.lastUsedAt)}</td>
                     <td>{key.revokedAt ? <Badge status="revoked" /> : <span className="state-dot active">有效</span>}</td>
                     <td>
-                      {!key.revokedAt && key.viewable && (
-                        <IconButton label={revealId === key.id ? '收起密钥' : '查看密钥'} icon={revealId === key.id ? EyeOff : Eye} onClick={() => setRevealId(revealId === key.id ? null : key.id)} />
+                      {key.revokedAt ? (
+                        <div className="row-actions">
+                          <IconButton label="重新启用" icon={RotateCcw} spin={busyId === key.id + 'restore'} disabled={Boolean(busyId)} onClick={() => restore(key)} />
+                          <IconButton label="彻底删除" icon={Trash2} disabled={Boolean(busyId)} onClick={() => setDeletingId(key.id)} />
+                        </div>
+                      ) : (
+                        <div className="row-actions">
+                          {key.viewable && (
+                            <IconButton label={revealId === key.id ? '收起密钥' : '查看密钥'} icon={revealId === key.id ? EyeOff : Eye} onClick={() => setRevealId(revealId === key.id ? null : key.id)} />
+                          )}
+                          <IconButton label="吊销密钥" icon={Power} spin={busyId === key.id + 'revoke'} disabled={Boolean(busyId)} onClick={() => revoke(key)} />
+                        </div>
                       )}
-                      {!key.revokedAt && <IconButton label="吊销密钥" icon={Power} onClick={() => revoke(key)} />}
                     </td>
                   </tr>
                   {revealId === key.id && (
@@ -230,6 +274,24 @@ export function Keys({
       <CredentialPanels notify={notify} refresh={refresh} />
 
       {creating && <KeyForm destinations={destinations} close={() => setCreating(false)} saved={refresh} notify={notify} />}
+
+      {deletingId && (
+        <Modal title="确认彻底删除" onClose={() => setDeletingId(null)}>
+          <div className="modal-body">
+            <div className="warning-banner">
+              <AlertTriangle size={18} />
+              <div>
+                <strong>此操作不可恢复</strong>
+                <p>删除后该密钥记录将永久消失。已吊销的密钥不会再出现在列表中。确认要继续吗？</p>
+              </div>
+            </div>
+            <footer className="modal-actions">
+              <Button onClick={() => setDeletingId(null)}>取消</Button>
+              <Button variant="danger" icon={Trash2} loading={Boolean(busyId)} onClick={confirmDelete}>彻底删除</Button>
+            </footer>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

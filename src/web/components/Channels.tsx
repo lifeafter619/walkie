@@ -63,7 +63,12 @@ export function ChannelForm({
     event.preventDefault();
     setBusy(true);
     try {
-      const body = { name, slug: channelSlug || slugify(name), provider, config, rateLimitPerMin: rateLimit || null, quietHours: quiet || null };
+      // 编辑模式：值为空串的键不提交（后端按 key 合并，缺席才保留原值），
+      // 否则「输入后清空」会把已存凭据覆盖成 ''；number 字段清空时同样跳过（Number('')===0）
+      const cleanedConfig = channel
+        ? Object.fromEntries(Object.entries(config).filter(([, value]) => value !== '' && value !== undefined))
+        : config;
+      const body = { name, slug: channelSlug || slugify(name), provider, config: cleanedConfig, rateLimitPerMin: rateLimit || null, quietHours: quiet || null };
       channel ? await api.updateChannel(channel.id, body) : await api.createChannel(body);
       notify('success', channel ? '频道已更新' : '频道已创建');
       saved();
@@ -149,7 +154,7 @@ export function ChannelForm({
                   autoComplete={item.type === 'password' ? 'new-password' : undefined}
                   type={item.type === 'number' ? 'number' : item.type === 'password' ? 'password' : item.type === 'url' ? 'url' : 'text'}
                   value={String(config[item.key] ?? item.defaultValue ?? '')}
-                  onChange={(event) => setConfig({ ...config, [item.key]: item.type === 'number' ? Number(event.target.value) : event.target.value })}
+                  onChange={(event) => setConfig({ ...config, [item.key]: item.type === 'number' ? (event.target.value === '' ? undefined : Number(event.target.value)) : event.target.value })}
                   required={item.required && !channel}
                   placeholder={channel ? '留空保留现有值' : item.placeholder}
                   disabled={Boolean(lockedByPreset)}

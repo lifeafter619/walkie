@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Activity, ChevronRight, ExternalLink, LoaderCircle, RefreshCw, Search } from 'lucide-react';
 import type { Delivery, ProviderId } from '../../shared/types';
 import { api } from '../api';
-import { Badge, Empty, IconButton, Modal, Notify, SEVERITY_LABEL, formatDate } from './ui';
+import { Badge, Button, Empty, IconButton, Modal, Notify, SEVERITY_LABEL, formatDate } from './ui';
 import { ProviderIcon } from './ProviderIcon';
 
 /* ────────────────────────────────────────────────────────────
@@ -11,15 +11,26 @@ import { ProviderIcon } from './ProviderIcon';
 
 export function DeliveryDetail({ id, close, notify }: { id: string; close: () => void; notify: Notify }) {
   const [delivery, setDelivery] = useState<Delivery>();
+  const [failed, setFailed] = useState(false);
+  const [reload, setReload] = useState(0);
+  const latestRef = useRef(0);
 
   useEffect(() => {
     setDelivery(undefined);
-    api.delivery(id).then(setDelivery).catch((error: Error) => notify('error', error.message));
-  }, [id, notify]);
+    setFailed(false);
+    // 自增守卫：快速连续点开多条投递时，只有最新一次请求的结果能落地
+    const current = ++latestRef.current;
+    api.delivery(id).then((data) => { if (latestRef.current === current) setDelivery(data); })
+      .catch((error: Error) => { if (latestRef.current === current) { setFailed(true); notify('error', error.message); } });
+  }, [id, notify, reload]);
 
   return (
     <Modal title="投递详情" onClose={close} wide>
-      {!delivery ? (
+      {failed ? (
+        <div className="modal-body">
+          <Empty icon={Activity} title="加载投递详情失败" text="该投递可能已被清理，或网络暂时不可用。" action={<Button onClick={() => setReload(reload + 1)}>重试</Button>} />
+        </div>
+      ) : !delivery ? (
         <div className="modal-loading"><LoaderCircle className="spin" /></div>
       ) : (
         <div className="modal-body delivery-detail">
@@ -62,11 +73,12 @@ export function DeliveryDetail({ id, close, notify }: { id: string; close: () =>
 }
 
 export function Deliveries({
-  deliveries, refresh, notify
+  deliveries, refresh, notify, onFilterChange
 }: {
   deliveries: Delivery[];
   refresh: (status?: string, quiet?: boolean) => void;
   notify: Notify;
+  onFilterChange?: (status: string) => void;
 }) {
   const [status, setStatus] = useState('');
   const [selected, setSelected] = useState('');
@@ -75,7 +87,7 @@ export function Deliveries({
   const filtered = deliveries.filter((item) =>
     `${item.title} ${item.targetName ?? ''} ${item.id}`.toLowerCase().includes(query.toLowerCase())
   );
-  const changeStatus = (next: string) => { setStatus(next); refresh(next); };
+  const changeStatus = (next: string) => { setStatus(next); onFilterChange?.(next); refresh(next); };
 
   // 有未终结投递时每 5 秒静默刷新，全部到终态后自动停止
   const hasActive = deliveries.some((item) => item.status === 'queued' || item.status === 'processing');

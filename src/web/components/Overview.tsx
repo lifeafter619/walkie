@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { RefreshCw, Send } from 'lucide-react';
+import { ArrowRight, KeyRound, MessageSquareText, Radio, RefreshCw, Send } from 'lucide-react';
 import type { DashboardStats, Delivery, Destination, Severity } from '../../shared/types';
 import { api } from '../api';
 import { Badge, Button, Empty, IconButton, Notify, SEVERITY_LABEL, formatDate } from './ui';
@@ -16,13 +16,19 @@ export function Overview({
   const [form, setForm] = useState({ destination: '', title: '', body: '', severity: 'info' as Severity });
   const [busy, setBusy] = useState(false);
 
-  // 只在「已启用」的目的地里挑默认值，且避免重复赋值
+  // 只在「已启用」的目的地里挑默认值；当前选中的目的地被删/禁用后重置，避免 select 显示空白
   const enabledDestinations = useMemo(() => destinations.filter((d) => d.enabled), [destinations]);
   useEffect(() => {
     if (!form.destination && enabledDestinations[0]) {
       setForm((old) => ({ ...old, destination: enabledDestinations[0].id }));
+    } else if (form.destination && !enabledDestinations.some((d) => d.id === form.destination)) {
+      setForm((old) => ({ ...old, destination: enabledDestinations[0]?.id ?? '' }));
     }
   }, [enabledDestinations, form.destination]);
+
+  const hasChannels = (stats?.channels ?? 0) > 0;
+  const hasKeys = (stats?.activeKeys ?? 0) > 0;
+  const needsOnboarding = !hasChannels || !hasKeys;
 
   const send = async (event: FormEvent) => {
     event.preventDefault();
@@ -42,7 +48,8 @@ export function Overview({
   const statItems = [
     { label: '启用频道', value: `${stats?.enabledChannels ?? 0} / ${stats?.channels ?? 0}` },
     { label: '近 24h 投递', value: stats?.deliveries24h ?? 0 },
-    { label: '送达率', value: `${stats?.successRate24h ?? 100}%` },
+    // 无投递时显示占位符而非误导性的 100%
+    { label: '送达率', value: !stats?.deliveries24h ? '—' : `${stats.successRate24h}%` },
     { label: '失败', value: stats?.failed24h ?? 0, danger: (stats?.failed24h ?? 0) > 0 }
   ];
 
@@ -52,6 +59,44 @@ export function Overview({
         <h1>概览</h1>
         <IconButton label="刷新数据" icon={RefreshCw} onClick={refresh} />
       </header>
+
+      {needsOnboarding && (
+        <section className="onboarding-banner">
+          <div className="onboarding-head">
+            <Radio size={18} />
+            <h2>快速开始</h2>
+          </div>
+          <div className="onboarding-steps">
+            <a className={`onboarding-step ${hasChannels ? 'done' : 'todo'}`} href="#channels">
+              <span className="step-num">{hasChannels ? '✓' : '1'}</span>
+              <MessageSquareText size={18} />
+              <div>
+                <strong>添加推送频道</strong>
+                <span>选择 Telegram、企业微信、飞书等通知渠道</span>
+              </div>
+              {!hasChannels && <ArrowRight size={15} className="step-arrow" />}
+            </a>
+            <a className={`onboarding-step ${hasKeys ? 'done' : 'todo'}`} href="#keys">
+              <span className="step-num">{hasKeys ? '✓' : '2'}</span>
+              <KeyRound size={18} />
+              <div>
+                <strong>创建 Agent API Key</strong>
+                <span>Agent 用它通过 MCP 或 REST 发送通知</span>
+              </div>
+              {!hasKeys && <ArrowRight size={15} className="step-arrow" />}
+            </a>
+            <a className="onboarding-step todo" href="#integrations">
+              <span className="step-num">3</span>
+              <Send size={18} />
+              <div>
+                <strong>接入 Agent</strong>
+                <span>复制 MCP 配置，填入 Agent 客户端</span>
+              </div>
+              <ArrowRight size={15} className="step-arrow" />
+            </a>
+          </div>
+        </section>
+      )}
 
       <div className="page-grid overview-grid">
         <section className="stats-strip">

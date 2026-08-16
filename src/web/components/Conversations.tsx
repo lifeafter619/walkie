@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { MessageCircleQuestion, RefreshCw, Send } from 'lucide-react';
+import { LoaderCircle, MessageCircleQuestion, RefreshCw, Send } from 'lucide-react';
 import type { Conversation } from '../../shared/types';
 import { api } from '../api';
 import { Badge, Empty, IconButton, Notify, formatDate } from './ui';
@@ -78,7 +78,9 @@ export function Conversations({ notify, onChanged }: { notify: Notify; onChanged
         </div>
       </div>
 
-      {items && items.length > 0 ? (
+      {items === undefined ? (
+        <section className="panel"><div className="modal-loading"><LoaderCircle className="spin" /></div></section>
+      ) : items.length > 0 ? (
         <div className="conv-list">
           {items.map((conversation) => {
             const status = statusOf(conversation);

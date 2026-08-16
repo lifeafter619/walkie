@@ -3,7 +3,7 @@ import {
   AlertTriangle, Check, CheckCircle2, LoaderCircle, Monitor, Moon, Sun,
   X, type LucideIcon
 } from 'lucide-react';
-import { cycleTheme, useTheme } from '../appearance';
+import { setTheme, useTheme } from '../appearance';
 
 /* ────────────────────────────────────────────────────────────
  * 通用 UI 组件。中性工具风：状态用小圆点+文字，不用彩色胶囊。
@@ -39,12 +39,27 @@ export function IconButton({
 
 export function ThemeToggle() {
   const theme = useTheme();
-  const Icon = theme === 'system' ? Monitor : theme === 'dark' ? Moon : Sun;
-  const label = theme === 'system' ? '跟随系统' : theme === 'dark' ? '暗色' : '亮色';
+  const options: Array<{ mode: 'light' | 'dark' | 'system'; label: string; icon: LucideIcon }> = [
+    { mode: 'light', label: '亮色', icon: Sun },
+    { mode: 'dark', label: '暗色', icon: Moon },
+    { mode: 'system', label: '自动', icon: Monitor },
+  ];
   return (
-    <button className="icon-button" title={`主题：${label}（点击切换）`} aria-label={`主题：${label}`} onClick={cycleTheme}>
-      <Icon size={16} />
-    </button>
+    <div className="theme-segment" role="group" aria-label="主题模式">
+      {options.map(({ mode, label, icon: Icon }) => (
+        <button
+          key={mode}
+          className={theme === mode ? 'active' : ''}
+          title={label}
+          aria-label={label}
+          aria-pressed={theme === mode}
+          onClick={() => setTheme(mode)}
+        >
+          <Icon size={14} />
+          <span>{label}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -74,13 +89,26 @@ export const SEVERITY_LABEL: Record<'info' | 'success' | 'warning' | 'critical',
   info: '信息', success: '成功', warning: '警告', critical: '紧急'
 };
 
+/** 打开中的 Modal 栈：Esc 只关最顶层，避免叠加弹框（频道表单 + 渠道选择器）一次全被关掉 */
+const modalStack: symbol[] = [];
+
 export function Modal({
   title, children, onClose, wide = false
 }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
   useEffect(() => {
-    const close = (event: KeyboardEvent) => event.key === 'Escape' && onClose();
+    const token = Symbol('modal');
+    modalStack.push(token);
+    const close = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || modalStack[modalStack.length - 1] !== token) return;
+      event.stopPropagation();
+      onClose();
+    };
     window.addEventListener('keydown', close);
-    return () => window.removeEventListener('keydown', close);
+    return () => {
+      const index = modalStack.indexOf(token);
+      if (index >= 0) modalStack.splice(index, 1);
+      window.removeEventListener('keydown', close);
+    };
   }, [onClose]);
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -123,6 +151,8 @@ export function Toasts({ toasts, dismiss }: { toasts: Toast[]; dismiss: (id: num
 export const formatDate = (date?: string) => {
   if (!date) return '—';
   const parsed = new Date(date);
+  // 非法日期字符串会让 Intl.format 抛 RangeError 并击穿整棵组件树，降级为占位符
+  if (Number.isNaN(parsed.getTime())) return '—';
   const sameYear = parsed.getFullYear() === new Date().getFullYear();
   return new Intl.DateTimeFormat('zh-CN', {
     ...(sameYear ? {} : { year: 'numeric' }),
