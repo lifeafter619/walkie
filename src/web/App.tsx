@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity, Code2, KeyRound, LayoutDashboard, LoaderCircle, Radio, Menu,
   MessageCircleQuestion, MessageSquareText, RefreshCw, Route as RouteIcon, ServerCog, X
 } from 'lucide-react';
 import type { ApiKey, Channel, DashboardStats, Delivery, Destination, ProviderDefinition, Route } from '../shared/types';
 import { api, ApiError, getToken } from './api';
-import { IconButton, ThemeToggle, Toasts, type Notify, type Toast } from './components/ui';
+import { Button, IconButton, ThemeToggle, Toasts, type Notify, type Toast } from './components/ui';
 import { Login } from './components/Login';
 import { Overview } from './components/Overview';
 import { Channels } from './components/Channels';
@@ -74,11 +74,20 @@ export default function App() {
     window.setTimeout(() => setToasts((old) => old.filter((toast) => toast.id !== id)), kind === 'error' ? 6500 : 3500);
   }, []);
 
-  const loadAll = useCallback(async () => {
+  // 投递页状态筛选提升到 App：30s 轮询与手动刷新都沿用当前筛选，避免无筛选全量数据覆盖列表。
+  // ref 供 loadAll 取值（不进 useCallback deps，避免改筛选让引导 effect 重跑）；state 供 Deliveries 受控渲染
+  const [deliveryFilter, setDeliveryFilter] = useState('');
+  const deliveryFilterRef = useRef('');
+  const changeDeliveryFilter = useCallback((status: string) => {
+    deliveryFilterRef.current = status;
+    setDeliveryFilter(status);
+  }, []);
+
+  const loadAll = useCallback(async (quiet = false) => {
     try {
       const [nextStats, channelData, routeData, keyData, deliveryData, destinationData, providerData, conversationData] = await Promise.all([
         api.stats(), api.channels(), api.routes(), api.keys(),
-        api.deliveries(), api.destinations(), api.providers(), api.conversations(true)
+        api.deliveries(deliveryFilterRef.current), api.destinations(), api.providers(), api.conversations(true)
       ]);
       setStats(nextStats);
       setChannels(channelData.channels);
@@ -91,21 +100,39 @@ export default function App() {
       setAuthenticated(true);
     } catch (error) {
       if (error instanceof ApiError && (error.status === 401 || error.status === 403)) setAuthenticated(false);
-      else notify('error', error instanceof Error ? error.message : '加载失败');
+      else {
+        // 非鉴权失败（瞬时 500/网络抖动）不把已登录用户踢回登录页：带着现有数据进主界面并提示
+        setAuthenticated(true);
+        if (!quiet) notify('error', error instanceof Error ? error.message : '加载失败');
+      }
     } finally {
       setLoading(false);
     }
   }, [notify]);
 
-  useEffect(() => {
+  const [metaFailed, setMetaFailed] = useState(false);
+  const boot = useCallback(() => {
+    setMetaFailed(false);
+    setLoading(true);
     api.meta().then(async (nextMeta) => {
       setMeta(nextMeta);
       if (!nextMeta.adminAuthRequired || getToken()) await loadAll();
       else setLoading(false);
-    }).catch((error: Error) => { notify('error', error.message); setLoading(false); });
+    }).catch((error: Error) => { setMetaFailed(true); notify('error', error.message); setLoading(false); });
   }, [loadAll, notify]);
 
-  const refresh = useCallback(() => void loadAll(), [loadAll]);
+  useEffect(() => { boot(); }, [boot]);
+
+  const refresh = useCallback(() => loadAll(), [loadAll]);
+
+  // 30s 静默轮询保持数据新鲜；页面切后台暂停，恢复可见立即拉取一次
+  useEffect(() => {
+    if (!authenticated) return;
+    const timer = window.setInterval(() => { if (!document.hidden) void loadAll(true); }, 30_000);
+    const onVisible = () => { if (!document.hidden) void loadAll(true); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
+  }, [authenticated, loadAll]);
 
   // 投递列表轻量轮询（Deliveries 页内有未终结投递时调用，quiet 避免轮询失败刷 toast）
   const refreshDeliveries = useCallback(async (status = '', quiet = false) => {
@@ -116,10 +143,25 @@ export default function App() {
     }
   }, [notify]);
 
+  // Toasts 在三个分支都要渲染：启动/登录期间的错误提示否则完全不可见
+  const toastStack = <Toasts toasts={toasts} dismiss={(id) => setToasts((old) => old.filter((item) => item.id !== id))} />;
+
   if (loading || !meta) {
-    return <div className="boot"><LoaderCircle className="spin" size={20} /></div>;
+    return (
+      <div className="boot">
+        {metaFailed ? (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+            <p style={{ margin: 0, fontSize: 14 }}>无法连接服务器，请检查网络后重试。</p>
+            <Button variant="primary" icon={RefreshCw} onClick={boot}>重试</Button>
+          </div>
+        ) : (
+          <LoaderCircle className="spin" size={20} />
+        )}
+        {toastStack}
+      </div>
+    );
   }
-  if (!authenticated) return <Login meta={meta} onSuccess={loadAll} />;
+  if (!authenticated) return <><Login meta={meta} onSuccess={loadAll} />{toastStack}</>;
 
   const content = page === 'overview'
     ? <Overview stats={stats} deliveries={deliveries} destinations={destinations} refresh={refresh} notify={notify} />
@@ -128,7 +170,7 @@ export default function App() {
     : page === 'routes'
     ? <Routes routes={routes} channels={channels} refresh={refresh} notify={notify} />
     : page === 'deliveries'
-    ? <Deliveries deliveries={deliveries} refresh={refreshDeliveries} notify={notify} />
+    ? <Deliveries deliveries={deliveries} refresh={refreshDeliveries} notify={notify} filterStatus={deliveryFilter} onFilterChange={changeDeliveryFilter} />
     : page === 'conversations'
     ? <Conversations notify={notify} onChanged={refresh} />
     : page === 'keys'

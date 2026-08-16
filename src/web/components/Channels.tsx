@@ -7,7 +7,7 @@ import type { Channel, ProviderDefinition, ProviderId } from '../../shared/types
 import { api } from '../api';
 import { Badge, Button, Empty, IconButton, Modal, Notify, slugify } from './ui';
 import { ProviderIcon } from './ProviderIcon';
-import { ChannelPicker, ProviderSelect } from './ChannelPicker';
+import { ChannelPicker } from './ChannelPicker';
 
 /* ────────────────────────────────────────────────────────────
  * SMTP 邮箱服务商预设：选择后自动填充 host/port/secure 并锁定。
@@ -27,7 +27,7 @@ const SMTP_LOCKED_KEYS = new Set(['host', 'port', 'secure']);
 
 /* ────────────────────────────────────────────────────────────
  * 频道管理：列表 + 表单。
- * 渠道类型选择改为图标弹框（ChannelPicker），表单内用 ProviderSelect 触发。
+ * 渠道类型选择：provider-note 内「选择/更换」按钮打开图标弹框（ChannelPicker）。
  * ──────────────────────────────────────────────────────────── */
 
 export function ChannelForm({
@@ -93,31 +93,31 @@ export function ChannelForm({
         </div>
 
         <label>渠道类型</label>
-        <ProviderSelect
-          providers={providers}
-          value={provider}
-          onPick={() => setPicking(true)}
-          disabled={Boolean(channel)}
-        />
-        {picking && (
-          <ChannelPicker
-            providers={providers}
-            current={provider}
-            onPick={(next) => { setProvider(next); setConfig({}); setPicking(false); }}
-            onClose={() => setPicking(false)}
-            disabled={Boolean(channel)}
-          />
-        )}
-
-        {definition && (
+        {definition ? (
           <div className="provider-note">
-            <ProviderIcon provider={definition.id} name={definition.name} size={20} />
+            <ProviderIcon provider={definition.id} name={definition.name} size={30} />
             <div>
               <strong>{definition.name}</strong>
               <p>{definition.description}</p>
             </div>
             <a href={definition.docsUrl} target="_blank" rel="noreferrer" title="打开官方文档"><ExternalLink size={15} /></a>
+            <Button type="button" onClick={() => setPicking(true)} disabled={Boolean(channel)} title={channel ? '编辑时不可更换渠道类型' : undefined}>更换</Button>
           </div>
+        ) : (
+          <Button type="button" onClick={() => setPicking(true)}>选择渠道</Button>
+        )}
+        {picking && (
+          <ChannelPicker
+            providers={providers}
+            current={provider}
+            onPick={(next) => {
+              // 重选当前渠道不清空已填配置（provider 未变时重置 effect 不会跑，清了就找不回默认值）
+              if (next !== provider) { setProvider(next); setConfig({}); }
+              setPicking(false);
+            }}
+            onClose={() => setPicking(false)}
+            disabled={Boolean(channel)}
+          />
         )}
 
         <div className="config-fields">
@@ -141,7 +141,9 @@ export function ChannelForm({
                   placeholder={channel ? '留空保留现有值' : item.placeholder}
                 />
               ) : item.type === 'select' ? (
-                <select value={String(config[item.key] ?? item.defaultValue ?? '')} onChange={(event) => isSmtpPreset ? applyPreset(event.target.value) : setConfig({ ...config, [item.key]: event.target.value })}>
+                <select value={String(config[item.key] ?? (channel ? '' : item.defaultValue ?? ''))} onChange={(event) => isSmtpPreset ? applyPreset(event.target.value) : setConfig({ ...config, [item.key]: event.target.value })}>
+                  {/* 编辑模式服务端不回传已存值，不能拿默认值冒充；空值=保留现有，提交时被剔除 */}
+                  {channel && <option value="">（保留现有设置）</option>}
                   {item.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </select>
               ) : item.type === 'boolean' ? (
@@ -153,7 +155,7 @@ export function ChannelForm({
                 <input
                   autoComplete={item.type === 'password' ? 'new-password' : undefined}
                   type={item.type === 'number' ? 'number' : item.type === 'password' ? 'password' : item.type === 'url' ? 'url' : 'text'}
-                  value={String(config[item.key] ?? item.defaultValue ?? '')}
+                  value={String(config[item.key] ?? '')}
                   onChange={(event) => setConfig({ ...config, [item.key]: item.type === 'number' ? (event.target.value === '' ? undefined : Number(event.target.value)) : event.target.value })}
                   required={item.required && !channel}
                   placeholder={channel ? '留空保留现有值' : item.placeholder}
@@ -293,8 +295,8 @@ export function Channels({
                     <td>
                       <div className="row-actions">
                         <IconButton label="发送测试" icon={busyId === channel.id + 'test' ? LoaderCircle : TestTube2} spin={busyId === channel.id + 'test'} disabled={busyId !== ''} onClick={() => act(channel, 'test')} />
-                        <IconButton label="编辑" icon={Edit3} onClick={() => setEditing(channel)} />
-                        <IconButton label="删除" icon={Trash2} onClick={() => act(channel, 'delete')} />
+                        <IconButton label="编辑" icon={Edit3} disabled={busyId !== ''} onClick={() => setEditing(channel)} />
+                        <IconButton label="删除" icon={Trash2} disabled={busyId !== ''} onClick={() => act(channel, 'delete')} />
                       </div>
                     </td>
                   </tr>

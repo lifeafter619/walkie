@@ -2,7 +2,7 @@ const escapeHtml = (value: string) =>
   value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 
 const page = (body: string) => `<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="robots" content="noindex"><title>Walkie</title>
 <style>
 :root{color-scheme:light dark;
@@ -15,7 +15,7 @@ const page = (body: string) => `<!doctype html>
   --bg:#0f1613;--surface:#171f1c;--line:#28332e;--ink:#e5ece8;--muted:#8fa199;
   --accent:#3aa98a;--accent-ink:#08130f;--danger:#e07b6f;--soft:#1e2823}}
 *{box-sizing:border-box}
-body{margin:0;padding:20px 16px;min-height:100vh;display:flex;justify-content:center;
+body{margin:0;padding:20px 16px calc(20px + env(safe-area-inset-bottom));min-height:100vh;display:flex;justify-content:center;
   font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
   background:var(--bg);color:var(--ink)}
 main{width:100%;max-width:520px}
@@ -26,17 +26,21 @@ h1{font-size:15px;font-weight:650;margin:0;color:var(--muted)}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px}
 .q{font-size:16px;line-height:1.6;white-space:pre-wrap;word-break:break-word;margin:0 0 18px}
 .options{display:grid;gap:8px;margin-bottom:14px}
-.options button{width:100%;min-height:46px;padding:10px 14px;font-size:15px;text-align:left;cursor:pointer;
-  border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--ink)}
+.options button{width:100%;min-height:48px;padding:10px 14px;font-size:15px;font-weight:550;text-align:left;cursor:pointer;
+  border:1px solid var(--line);border-radius:10px;background:var(--soft);color:var(--ink);
+  transition:border-color .12s,background .12s}
 .options button:hover{border-color:var(--accent);color:var(--accent)}
-textarea{width:100%;min-height:88px;padding:12px;font:inherit;font-size:15px;resize:vertical;
+.options button:active{background:var(--surface);border-color:var(--accent);transform:scale(.99)}
+textarea{width:100%;min-height:88px;padding:12px;font:inherit;font-size:16px;resize:vertical;
   border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--ink);outline:none}
 textarea:focus{border-color:var(--accent)}
-.send{width:100%;margin-top:10px;min-height:46px;font-size:15px;font-weight:650;cursor:pointer;
+.send{width:100%;margin-top:10px;min-height:48px;font-size:16px;font-weight:650;cursor:pointer;
   border:0;border-radius:10px;background:var(--accent);color:var(--accent-ink)}
+.send:active{opacity:.85}
 .divider{display:flex;align-items:center;gap:10px;margin:4px 0 12px;color:var(--muted);font-size:12px}
 .divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--line)}
 .note{margin-top:14px;color:var(--muted);font-size:12px;text-align:center}
+.form-error{margin:0 0 12px;color:var(--danger);font-size:13px}
 .state{text-align:center;padding:36px 20px}
 .state .icon{font-size:34px}
 .state h2{font-size:17px;margin:12px 0 6px}
@@ -51,11 +55,12 @@ ${body}
 </main></body></html>`;
 
 /** 回复表单页：选项按钮直接提交，或自由输入；纯 HTML 提交，无 JS 依赖 */
-export function renderReplyForm(question: string, options: string[] = []): string {
+export function renderReplyForm(question: string, options: string[] = [], error?: string): string {
   const optionButtons = options.length
     ? `<div class="options">${options.map((option) => `<button type="submit" name="reply" value="${escapeHtml(option)}">${escapeHtml(option)}</button>`).join('')}</div><div class="divider">或自由输入</div>`
     : '';
-  return page(`<div class="card"><p class="q">${escapeHtml(question)}</p>
+  const errorBanner = error ? `<p class="form-error">${escapeHtml(error)}</p>` : '';
+  return page(`<div class="card"><p class="q">${escapeHtml(question)}</p>${errorBanner}
 <form method="post">${optionButtons}
 <textarea name="replyText" placeholder="输入回复…"${options.length ? '' : ' required'}></textarea>
 <button class="send" type="submit">发送回复</button>

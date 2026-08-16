@@ -6,6 +6,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { ZodError } from 'zod';
 import type { ApiKey, ProviderId } from '../shared/types.js';
+import { VERSION } from '../shared/version.js';
 import { askSchema, channelSchema, credentialTokenSchema, keySchema, notificationSchema, routeSchema } from '../shared/schemas.js';
 import type { AppConfig } from './config.js';
 import { generateAdminToken, safeSecretEqual, safeTokenEqual } from './crypto.js';
@@ -75,12 +76,12 @@ export function createApp(deps: AppDependencies) {
     next();
   });
 
-  app.get('/health', (_req, res) => res.json({ status: 'ok', version: '0.3.0', queue: 'running' }));
+  app.get('/health', (_req, res) => res.json({ status: 'ok', version: VERSION, queue: 'running' }));
   app.get('/api/meta', asyncRoute(async (req, res) => {
     const publicUrl = (config.publicUrl ?? `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
     const rotated = await repository.getAdminTokenHash();
     res.json({
-      name: 'Walkie', version: '0.3.0', runtime: 'node',
+      name: 'Walkie', version: VERSION, runtime: 'node',
       adminAuthRequired: Boolean(config.adminToken) || Boolean(rotated.hash),
       publicUrl, mcpEndpoint: '/mcp', mcpUrl: `${publicUrl}/mcp`
     });
@@ -225,7 +226,12 @@ export function createApp(deps: AppDependencies) {
   app.post('/reply/:id/:token', asyncRoute(async (req, res) => {
     const params = (req.body ?? {}) as Record<string, unknown>;
     const reply = String(params.reply ?? params.replyText ?? '').trim().slice(0, 4000);
-    if (!reply) return res.status(400).type('html').send(renderReplyResult('gone'));
+    if (!reply) {
+      // 空提交时链接仍有效，重新渲染表单并提示，而不是误报「链接已失效」把人劝退
+      const conversation = await repository.getConversationForReply(String(req.params.id), String(req.params.token));
+      const usable = conversation && !conversation.repliedAt && conversation.expiresAt > new Date().toISOString();
+      return res.status(usable ? 400 : 410).type('html').send(usable ? renderReplyForm(conversation.question, conversation.options, '回复内容不能为空，请输入后再发送。') : renderReplyResult('gone'));
+    }
     const accepted = await repository.replyConversation(String(req.params.id), reply, 'reply-link', String(req.params.token));
     res.status(accepted ? 200 : 410).type('html').send(renderReplyResult(accepted ? 'done' : 'gone'));
   }));
@@ -233,8 +239,8 @@ export function createApp(deps: AppDependencies) {
   // Server酱兼容入口：GET/POST /{key}.send 或 /send/{key}.send，key 为 Agent API Key。
   // 参数 title/text、desp、tags、short 与 Server酱³ 一致；destination 指定目的地（Key 白名单只有一个时可省略）。
   const serverchanCompat = asyncRoute(async (req: Request, res: Response) => {
-    let compatKey = String(req.params[0]);
-    try { compatKey = decodeURIComponent(compatKey); } catch { /* 保留原样 */ }
+    // Express 5 已对正则路由参数做过一次 percent-decode，再 decode 会把含 %xx 的自定义密钥解坏（与 Workers 版行为对齐）
+    const compatKey = String(req.params[0]);
     const apiKey = await repository.authenticateKey(compatKey);
     if (!apiKey) return res.status(401).json({ code: 40001, message: '无效或已吊销的 SendKey', data: {} });
     const params: Record<string, unknown> = { ...req.query, ...(req.body && typeof req.body === 'object' ? req.body : {}) };

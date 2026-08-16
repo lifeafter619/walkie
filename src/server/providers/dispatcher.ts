@@ -122,9 +122,12 @@ export class ProviderDispatcher {
       case 'rocketchat':
         return { url: string(config, 'webhookUrl'), init: this.json({ text: markdown(message) }) };
       case 'ntfy': {
+        // HTTP 头只接受 Latin-1：中文标题/标签需 RFC 2047 编码（ntfy 服务端原生支持），否则 fetch 直接抛 TypeError
+        const header = (value: string) => /^[\x20-\x7e]*$/.test(value) ? value : `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`;
         const priority = string(config, 'priority') || (message.severity === 'critical' ? 'urgent' : message.severity === 'warning' ? 'high' : 'default');
         const tags = string(config, 'tags') || (typeof message.metadata.tags === 'string' ? message.metadata.tags.replace(/\|/g, ',') : '');
-        return { url: `${string(config, 'server').replace(/\/$/, '')}/${encodeURIComponent(string(config, 'topic'))}`, init: { method: 'POST', headers: { Title: message.title, Priority: priority, ...(tags ? { Tags: tags } : {}), ...(message.url ? { Click: message.url } : {}), ...(config.token ? { Authorization: `Bearer ${string(config, 'token')}` } : {}) }, body: message.body } };
+        const click = message.url && /^[\x00-\xff]*$/.test(message.url) ? message.url : message.url ? encodeURI(message.url) : undefined;
+        return { url: `${string(config, 'server').replace(/\/$/, '')}/${encodeURIComponent(string(config, 'topic'))}`, init: { method: 'POST', headers: { Title: header(message.title), Priority: priority, ...(tags ? { Tags: header(tags) } : {}), ...(click ? { Click: click } : {}), ...(config.token ? { Authorization: `Bearer ${string(config, 'token')}` } : {}) }, body: message.body } };
       }
       case 'gotify':
         return { url: `${string(config, 'server').replace(/\/$/, '')}/message?token=${encodeURIComponent(string(config, 'token'))}`, init: this.json({ title: message.title, message: message.body, priority: message.severity === 'critical' ? Math.max(Number(config.priority ?? 5), 8) : Number(config.priority ?? 5), extras: message.url ? { 'client::notification': { click: { url: message.url } } } : undefined }) };

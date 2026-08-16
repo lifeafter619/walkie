@@ -1,4 +1,4 @@
-import { useEffect, type ButtonHTMLAttributes, type ReactNode } from 'react';
+import { useEffect, useRef, type ButtonHTMLAttributes, type ReactNode } from 'react';
 import {
   AlertTriangle, Check, CheckCircle2, LoaderCircle, Monitor, Moon, Sun,
   X, type LucideIcon
@@ -30,8 +30,9 @@ export function Button({
 export function IconButton({
   label, icon: Icon, spin, ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: LucideIcon; spin?: boolean }) {
+  // 默认 type="button"：IconButton 常出现在 <form> 内（弹框关闭钮等），不显式指定会变成 submit
   return (
-    <button className="icon-button" title={label} aria-label={label} {...props}>
+    <button className="icon-button" type="button" title={label} aria-label={label} {...props}>
       <Icon size={16} className={spin ? 'spin' : undefined} />
     </button>
   );
@@ -95,13 +96,16 @@ const modalStack: symbol[] = [];
 export function Modal({
   title, children, onClose, wide = false
 }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
+  // onClose 走 ref、注册只在挂载时做一次：若把 onClose 放进 deps，父组件每次重渲染
+  // （内联箭头函数变身份）都会让 token 出栈再入栈，叠层顺序被打乱，Esc 会关错层
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   useEffect(() => {
     const token = Symbol('modal');
     modalStack.push(token);
     const close = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || modalStack[modalStack.length - 1] !== token) return;
-      event.stopPropagation();
-      onClose();
+      closeRef.current();
     };
     window.addEventListener('keydown', close);
     return () => {
@@ -109,7 +113,7 @@ export function Modal({
       if (index >= 0) modalStack.splice(index, 1);
       window.removeEventListener('keydown', close);
     };
-  }, [onClose]);
+  }, []);
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className={`modal ${wide ? 'modal-wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}>

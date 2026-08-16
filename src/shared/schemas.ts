@@ -26,7 +26,7 @@ export const notificationSchema = z.object({
   tags: z.string().max(200).optional(),
   short: z.string().max(200).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
-  idempotencyKey: z.string().max(200).optional(),
+  idempotencyKey: z.string().min(1).max(200).optional(),
   callbackUrl: z.url().optional()
 });
 

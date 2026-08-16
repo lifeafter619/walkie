@@ -1,12 +1,12 @@
-import type { ApiKey, Conversation, Delivery, NotificationInput, Severity } from '../shared/types.js';
+import type { ApiKey, Conversation, Delivery, Destination, NotificationInput, Severity } from '../shared/types.js';
 import type { RelayRepository } from './database.js';
 
 export class NotificationService {
   constructor(private readonly repository: RelayRepository, private readonly onQueued?: (delivery: Delivery) => void) {}
 
-  async send(input: NotificationInput, source: string, apiKey?: ApiKey): Promise<Delivery> {
-    if (apiKey && !apiKey.scopes.includes('notifications:send')) throw new Error('API Key 缺少 notifications:send 权限');
-    const destination = (await this.repository.listDestinations()).find((item) => item.id === input.destination || item.slug === input.destination);
+  /** 解析目的地与可用频道；目的地不可用、Key 无权限或无可用频道时抛错（send 与 ask 共用） */
+  private async resolveTarget(destinationRef: string, apiKey?: ApiKey): Promise<{ destination: Destination; channelIds: string[] }> {
+    const destination = (await this.repository.listDestinations()).find((item) => item.id === destinationRef || item.slug === destinationRef);
     if (!destination || !destination.enabled) throw new Error('目的地不存在或已禁用');
     if (apiKey?.destinationIds.length && !apiKey.destinationIds.includes(destination.id)) throw new Error('API Key 无权访问该目的地');
 
@@ -18,7 +18,15 @@ export class NotificationService {
       const enabled = new Set((await this.repository.listChannels()).filter((channel) => channel.enabled).map((channel) => channel.id));
       channelIds = route.channelIds.filter((channelId) => enabled.has(channelId));
     }
+    // 路由允许存重复频道 ID；attempts 有 UNIQUE(delivery_id, channel_id)，不去重会让整个投递创建失败
+    channelIds = [...new Set(channelIds)];
     if (!channelIds.length) throw new Error('目的地没有可用频道');
+    return { destination, channelIds };
+  }
+
+  async send(input: NotificationInput, source: string, apiKey?: ApiKey): Promise<Delivery> {
+    if (apiKey && !apiKey.scopes.includes('notifications:send')) throw new Error('API Key 缺少 notifications:send 权限');
+    const { destination, channelIds } = await this.resolveTarget(input.destination, apiKey);
 
     const delivery = await this.repository.createDelivery({
       targetType: destination.kind,
@@ -57,11 +65,9 @@ export class NotificationService {
     apiKey: ApiKey,
     publicUrl: string
   ): Promise<{ conversation: Conversation; replyUrl: string; deliveryId: string }> {
-    // 先校验目的地可用再建会话，避免 send 失败留下永远无人回复的孤儿会话
-    const destination = (await this.repository.listDestinations()).find((item) => item.id === input.destination || item.slug === input.destination);
-    if (!destination || !destination.enabled) throw new Error('目的地不存在或已禁用');
+    // 先校验目的地/权限/可用频道再建会话，避免 send 注定失败却留下永远无人回复的孤儿会话
     if (!apiKey.scopes.includes('notifications:send')) throw new Error('API Key 缺少 notifications:send 权限');
-    if (apiKey.destinationIds.length && !apiKey.destinationIds.includes(destination.id)) throw new Error('API Key 无权访问该目的地');
+    await this.resolveTarget(input.destination, apiKey);
 
     const timeoutSeconds = Math.min(Math.max(input.timeoutSeconds ?? 3600, 30), 86_400);
     const { conversation, replyToken } = await this.repository.createConversation({ apiKeyId: apiKey.id, question: input.question, options: input.options, timeoutSeconds });

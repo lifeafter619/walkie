@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { VERSION } from '../shared/version.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -26,7 +27,7 @@ export interface UpdateApplyResult {
   needsRestart: boolean;
 }
 
-const CURRENT_VERSION = '0.3.0';
+const CURRENT_VERSION = VERSION;
 
 /**
  * 检查更新：从 GitHub releases API 获取最新版本。
@@ -85,9 +86,11 @@ export async function applyUpdate(): Promise<UpdateApplyResult> {
 
     // 重新安装依赖并构建。--include=dev 确保 vite/tsc 等构建工具到位，
     // 否则在 NODE_ENV=production 下 npm ci 会跳过 devDependencies 导致构建失败。
-    await execFileAsync('npm', ['ci', '--include=dev'], { cwd, timeout: 180_000 });
-    await execFileAsync('npm', ['run', 'build:web'], { cwd, timeout: 120_000 });
-    await execFileAsync('npm', ['run', 'build:server'], { cwd, timeout: 120_000 });
+    // Windows 上 npm 是 npm.cmd，必须经 shell 才能 spawn（Node 已移除隐式 .cmd 解析）；参数全为常量，无注入面
+    const shell = process.platform === 'win32';
+    await execFileAsync('npm', ['ci', '--include=dev'], { cwd, timeout: 180_000, shell });
+    await execFileAsync('npm', ['run', 'build:web'], { cwd, timeout: 120_000, shell });
+    await execFileAsync('npm', ['run', 'build:server'], { cwd, timeout: 120_000, shell });
 
     return { success: true, message: '更新已下载并构建完成。服务器即将自动重启以应用新版本。', needsRestart: true };
   } catch (error) {

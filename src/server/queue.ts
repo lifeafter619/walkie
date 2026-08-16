@@ -34,6 +34,8 @@ export function quietUntil(quietHours: string | undefined, severity: Severity, a
 export class DeliveryWorker {
   private timer?: ReturnType<typeof setInterval>;
   private running: Promise<number> | undefined;
+  /** drain 在途期间又有触发进来（新投递入队）：结束后补一轮，避免 Vercel 上等 cron */
+  private rerun = false;
   // ponytail: 内存滑动窗口限流，进程重启后窗口清零；需要跨进程精确限流时改为按 attempts 表统计
   private readonly sentAt = new Map<string, number[]>();
 
@@ -107,8 +109,20 @@ export class DeliveryWorker {
   }
 
   async drainOnce(): Promise<number> {
-    if (this.running) return 0;
-    const run = this.drain();
+    if (this.running) {
+      // drain 在途时不丢触发：置 rerun 标记，在途 drain 结束后自动补一轮。
+      // Vercel 没有常驻定时器，错过这次触发就要等下一个请求或 10 分钟 cron
+      this.rerun = true;
+      return 0;
+    }
+    const run = (async () => {
+      let claimed = 0;
+      do {
+        this.rerun = false;
+        claimed += await this.drain();
+      } while (this.rerun);
+      return claimed;
+    })();
     this.running = run;
     try {
       return await run;

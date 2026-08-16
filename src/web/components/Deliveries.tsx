@@ -73,21 +73,22 @@ export function DeliveryDetail({ id, close, notify }: { id: string; close: () =>
 }
 
 export function Deliveries({
-  deliveries, refresh, notify, onFilterChange
+  deliveries, refresh, notify, filterStatus: status, onFilterChange
 }: {
   deliveries: Delivery[];
   refresh: (status?: string, quiet?: boolean) => void;
   notify: Notify;
-  onFilterChange?: (status: string) => void;
+  /** 筛选状态由 App 持有：30s 全量轮询要沿用当前筛选，否则无筛选数据会覆盖列表 */
+  filterStatus: string;
+  onFilterChange: (status: string) => void;
 }) {
-  const [status, setStatus] = useState('');
   const [selected, setSelected] = useState('');
   const [query, setQuery] = useState('');
 
   const filtered = deliveries.filter((item) =>
     `${item.title} ${item.targetName ?? ''} ${item.id}`.toLowerCase().includes(query.toLowerCase())
   );
-  const changeStatus = (next: string) => { setStatus(next); onFilterChange?.(next); refresh(next); };
+  const changeStatus = (next: string) => { onFilterChange(next); refresh(next); };
 
   // 有未终结投递时每 5 秒静默刷新，全部到终态后自动停止
   const hasActive = deliveries.some((item) => item.status === 'queued' || item.status === 'processing');

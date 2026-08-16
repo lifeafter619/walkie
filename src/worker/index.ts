@@ -4,6 +4,7 @@ import { Buffer } from 'node:buffer';
 import { ZodError } from 'zod';
 import type { AuthInfo } from '@modelcontextprotocol/server';
 import type { ApiKey, ProviderId } from '../shared/types.js';
+import { VERSION } from '../shared/version.js';
 import { askSchema, channelSchema, credentialTokenSchema, keySchema, notificationSchema, routeSchema } from '../shared/schemas.js';
 import { RelayRepository } from '../server/database.js';
 import { generateAdminToken, safeSecretEqual, safeTokenEqual } from '../server/crypto.js';
@@ -87,11 +88,15 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
   }
 
   private async drainAndSchedule(): Promise<void> {
+    // drain 前先设临时兜底 alarm：isolate 中途被逐时仍有定时器能回来收拾残局
+    // （正常结束后会被下面的精确时间覆盖；空闲路径不设，避免永久 6 分钟心跳）
+    if (await this.repository.nextDueAttempt()) await this.ctx.storage.setAlarm(Date.now() + 6 * 60_000);
     try { await this.worker.drainOnce(); }
     catch (error) { console.error(JSON.stringify({ event: 'drain.error', message: error instanceof Error ? error.message : String(error) })); }
     const due = await this.repository.nextDueAttempt();
-    // 存在滞留 sending 的尝试时设兜底 alarm：drain 中途异常/isolate 被逐后没有任何定时器
-    // 会再触发回收（nextDueAttempt 不看 sending），单频道投递会无限期卡在 processing
+    // 存在滞留 sending（drain 中途异常/isolate 被逐）时设 6 分钟兜底 alarm：
+    // nextDueAttempt 不看 sending，不设的话单频道投递会无限期卡在 processing；
+    // 6 分钟 > claimDueAttempts 的 5 分钟回收阈值，触发时必然可回收
     const stuck = await this.repository.hasStuckSending();
     if (due) await this.ctx.storage.setAlarm(Math.max(Date.now() + 250, new Date(due).getTime()));
     else if (stuck) await this.ctx.storage.setAlarm(Date.now() + 6 * 60_000);
@@ -119,11 +124,11 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     try {
       const url = new URL(request.url);
       const path = url.pathname;
-      if (path === '/health' && request.method === 'GET') return json({ status: 'ok', version: '0.3.0', runtime: 'cloudflare-workers', queue: 'alarm' });
+      if (path === '/health' && request.method === 'GET') return json({ status: 'ok', version: VERSION, runtime: 'cloudflare-workers', queue: 'alarm' });
       if (path === '/api/meta' && request.method === 'GET') {
         const rotated = await this.repository.getAdminTokenHash();
         return json({
-          name: 'Walkie', version: '0.3.0', runtime: 'cloudflare-workers',
+          name: 'Walkie', version: VERSION, runtime: 'cloudflare-workers',
           adminAuthRequired: Boolean(this.env.ADMIN_TOKEN) || Boolean(rotated.hash),
           publicUrl: url.origin, mcpEndpoint: '/mcp', mcpUrl: `${url.origin}/mcp`
         });
@@ -286,13 +291,13 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`;
       try {
         const response = await fetch(apiUrl, { headers: { 'user-agent': 'walkie-update-checker', accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(10_000) });
-        if (!response.ok) return json({ currentVersion: '0.3.0', latestVersion: '0.3.0', hasUpdate: false, canApply: false, applyHint: `无法获取版本信息（HTTP ${response.status}）。` });
+        if (!response.ok) return json({ currentVersion: VERSION, latestVersion: VERSION, hasUpdate: false, canApply: false, applyHint: `无法获取版本信息（HTTP ${response.status}）。` });
         const release = await response.json() as { tag_name: string; html_url: string; body?: string };
         const latestVersion = release.tag_name.replace(/^v/, '');
-        const hasUpdate = isNewerVersion(latestVersion, '0.3.0');
-        return json({ currentVersion: '0.3.0', latestVersion, hasUpdate, releaseNotes: release.body?.slice(0, 500), releaseUrl: release.html_url, canApply: false, applyHint: 'Cloudflare Workers 不支持应用内更新，请运行 npm run deploy:cf 重新部署。' });
+        const hasUpdate = isNewerVersion(latestVersion, VERSION);
+        return json({ currentVersion: VERSION, latestVersion, hasUpdate, releaseNotes: release.body?.slice(0, 500), releaseUrl: release.html_url, canApply: false, applyHint: 'Cloudflare Workers 不支持应用内更新，请运行 npm run deploy:cf 重新部署。' });
       } catch (error) {
-        return json({ currentVersion: '0.3.0', latestVersion: '0.3.0', hasUpdate: false, canApply: false, applyHint: `检查更新失败：${error instanceof Error ? error.message : '网络错误'}` });
+        return json({ currentVersion: VERSION, latestVersion: VERSION, hasUpdate: false, canApply: false, applyHint: `检查更新失败：${error instanceof Error ? error.message : '网络错误'}` });
       }
     }
     if (path === '/api/admin/update/apply' && request.method === 'POST') {

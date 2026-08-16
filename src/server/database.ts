@@ -70,6 +70,23 @@ export class RelayRepository {
     return this.dek ?? this.masterKey;
   }
 
+  /** 内存 DEK 对应的 dek_version；多实例部署（Vercel+Turso）下用于检测他实例已轮换 */
+  private dekVersion = 1;
+
+  /** 重新从 settings 加载 DEK：他实例轮换后，本实例内存里的旧 DEK 解不开新密文 */
+  private async reloadDek(): Promise<void> {
+    const dekRow = await this.db.get("SELECT value FROM settings WHERE key='dek_wrapped'");
+    if (dekRow) this.dek = unwrapDek(String(dekRow.value), this.masterKey);
+    const versionRow = await this.db.get("SELECT value FROM settings WHERE key='dek_version'");
+    this.dekVersion = versionRow ? Number(versionRow.value) : 1;
+  }
+
+  /** 加密写入前校验 DEK 未被他实例轮换：拿过期 DEK 写入会产生所有实例都解不开的密文 */
+  private async ensureFreshDek(): Promise<void> {
+    const row = await this.db.get("SELECT value FROM settings WHERE key='dek_version'");
+    if ((row ? Number(row.value) : 1) !== this.dekVersion) await this.reloadDek();
+  }
+
   /** 串行化会读写加密字段的操作（createChannel/createKey/rotateMasterKey/init DEK自举），
    *  防止 DEK 轮换的快照-提交间隙内并发写入用旧 DEK 加密导致数据不可解密。 */
   private withWriteLock<T>(task: () => Promise<T>): Promise<T> {
@@ -147,6 +164,8 @@ export class RelayRepository {
     const dekRow = await this.db.get("SELECT value FROM settings WHERE key='dek_wrapped'");
     if (dekRow) {
       this.dek = unwrapDek(String(dekRow.value), this.masterKey);
+      const versionRow = await this.db.get("SELECT value FROM settings WHERE key='dek_version'");
+      this.dekVersion = versionRow ? Number(versionRow.value) : 1;
     } else {
       const freshDek = generateDek();
       // 迁移前先用 KEK 读出所有频道凭据，再用新 DEK 加密写回，全部在一个事务内
@@ -180,22 +199,41 @@ export class RelayRepository {
   }
 
   async listChannels(): Promise<Channel[]> {
-    return (await this.db.all('SELECT * FROM channels ORDER BY name')).map((row) => this.channelFrom(row));
+    const rows = await this.db.all('SELECT * FROM channels ORDER BY name');
+    try {
+      return rows.map((row) => this.channelFrom(row));
+    } catch {
+      // 解密失败可能是他实例轮换了 DEK：重载后重试一次（仍失败则按真实错误抛出）
+      await this.reloadDek();
+      return rows.map((row) => this.channelFrom(row));
+    }
   }
 
   async getChannel(idOrSlug: string): Promise<Channel | undefined> {
     const row = await this.db.get('SELECT * FROM channels WHERE id = ? OR slug = ?', [idOrSlug, idOrSlug]);
-    return row ? this.channelFrom(row) : undefined;
+    if (!row) return undefined;
+    try {
+      return this.channelFrom(row);
+    } catch {
+      await this.reloadDek();
+      return this.channelFrom(row);
+    }
   }
 
   async getChannelConfig(id: string): Promise<Record<string, unknown>> {
     const row = await this.db.get('SELECT config_encrypted FROM channels WHERE id = ?', [id]);
     if (!row) throw new Error('Channel not found');
-    return decryptJson(String(row.config_encrypted), this.encryptionKey());
+    try {
+      return decryptJson(String(row.config_encrypted), this.encryptionKey());
+    } catch {
+      await this.reloadDek();
+      return decryptJson(String(row.config_encrypted), this.encryptionKey());
+    }
   }
 
   async createChannel(input: { name: string; slug: string; provider: ProviderId; enabled?: boolean; config: Record<string, unknown>; rateLimitPerMin?: number | null; quietHours?: string | null }): Promise<Channel> {
     return this.withWriteLock(async () => {
+      await this.ensureFreshDek();
       const id = randomUUID();
       const timestamp = now();
       await this.db.run(`INSERT INTO channels
@@ -210,18 +248,20 @@ export class RelayRepository {
     return this.withWriteLock(async () => {
       const current = await this.getChannel(id);
       if (!current) throw new Error('Channel not found');
-      const config = input.config ? { ...await this.getChannelConfig(id), ...input.config } : await this.getChannelConfig(id);
+      await this.ensureFreshDek();
+      // getChannel 按 id/slug 双解析，写回必须用解析出的真实 id（传 slug 时 WHERE id=slug 会静默 no-op）
+      const config = input.config ? { ...await this.getChannelConfig(current.id), ...input.config } : await this.getChannelConfig(current.id);
       await this.db.run(`UPDATE channels SET name=?,slug=?,provider=?,enabled=?,config_encrypted=?,rate_limit_per_min=?,quiet_hours=?,updated_at=? WHERE id=?`, [
         input.name ?? current.name, input.slug ?? current.slug, input.provider ?? current.provider,
         input.enabled ?? current.enabled ? 1 : 0, encryptJson(config, this.encryptionKey()),
         input.rateLimitPerMin !== undefined ? input.rateLimitPerMin || null : current.rateLimitPerMin ?? null,
         input.quietHours !== undefined ? input.quietHours || null : current.quietHours ?? null,
-        now(), id
+        now(), current.id
       ]);
       // 禁用频道后，其未完结的 attempt 再也不会被 claim，必须就地失败并推进投递终态，否则投递永久停在 processing
-      if (input.enabled === false) await this.failAttemptsForDisabledChannel(id);
-      await this.audit('admin', 'channel.update', 'channel', id, {});
-      return (await this.getChannel(id))!;
+      if (input.enabled === false) await this.failAttemptsForDisabledChannel(current.id);
+      await this.audit('admin', 'channel.update', 'channel', current.id, {});
+      return (await this.getChannel(current.id))!;
     });
   }
 
@@ -231,16 +271,19 @@ export class RelayRepository {
   }
 
   async deleteChannel(id: string): Promise<void> {
-    const used = (await this.db.get("SELECT COUNT(*) count FROM attempts WHERE channel_id=?", [id])) as { count: number };
-    const routed = (await this.db.get('SELECT COUNT(*) count FROM routes, json_each(routes.channel_ids) WHERE json_each.value=?', [id])) as { count: number };
+    // 先解析真实 id：调用方可能传 slug，直接拿参数写 WHERE id=? 会静默 no-op 却返回成功
+    const current = await this.getChannel(id);
+    if (!current) return;
+    const used = (await this.db.get("SELECT COUNT(*) count FROM attempts WHERE channel_id=?", [current.id])) as { count: number };
+    const routed = (await this.db.get('SELECT COUNT(*) count FROM routes, json_each(routes.channel_ids) WHERE json_each.value=?', [current.id])) as { count: number };
     if (used.count > 0 || routed.count > 0) {
-      await this.db.run('UPDATE channels SET enabled=0,updated_at=? WHERE id=?', [now(), id]);
+      await this.db.run('UPDATE channels SET enabled=0,updated_at=? WHERE id=?', [now(), current.id]);
       // 软删除同样要终结未完结 attempt，否则投递永久停在 processing
-      await this.failAttemptsForDisabledChannel(id);
+      await this.failAttemptsForDisabledChannel(current.id);
       return;
     }
-    await this.db.run('DELETE FROM channels WHERE id=?', [id]);
-    await this.audit('admin', 'channel.delete', 'channel', id, {});
+    await this.db.run('DELETE FROM channels WHERE id=?', [current.id]);
+    await this.audit('admin', 'channel.delete', 'channel', current.id, {});
   }
 
   /** 频道被禁用/软删除后，其 pending/retrying/sending attempt 就地失败，并刷新受影响投递的终态 */
@@ -280,17 +323,28 @@ export class RelayRepository {
   async updateRoute(id: string, input: Partial<{ name: string; slug: string; strategy: RouteStrategy; channelIds: string[]; enabled: boolean }>): Promise<Route> {
     const current = await this.getRoute(id);
     if (!current) throw new Error('Route not found');
+    // getRoute 按 id/slug 双解析，写回用真实 id（传 slug 时 WHERE id=slug 会静默 no-op）
     await this.db.run('UPDATE routes SET name=?,slug=?,strategy=?,channel_ids=?,enabled=?,updated_at=? WHERE id=?', [
       input.name ?? current.name, input.slug ?? current.slug, input.strategy ?? current.strategy,
-      JSON.stringify(input.channelIds ?? current.channelIds), input.enabled ?? current.enabled ? 1 : 0, now(), id
+      JSON.stringify(input.channelIds ?? current.channelIds), input.enabled ?? current.enabled ? 1 : 0, now(), current.id
     ]);
-    await this.audit('admin', 'route.update', 'route', id, {});
-    return (await this.getRoute(id))!;
+    await this.audit('admin', 'route.update', 'route', current.id, {});
+    return (await this.getRoute(current.id))!;
   }
 
   async deleteRoute(id: string): Promise<void> {
-    await this.db.run('DELETE FROM routes WHERE id=?', [id]);
-    await this.audit('admin', 'route.delete', 'route', id, {});
+    const current = await this.getRoute(id);
+    if (!current) return;
+    // 在途投递还要靠路由行判定 fallback 语义（claim 时 JOIN routes 取 strategy），
+    // 此时硬删会让 fallback 退化成 fanout（备份频道全发一遍）；先软禁用，投递完结后可再删
+    const active = (await this.db.get(`SELECT COUNT(*) count FROM deliveries WHERE target_type='route' AND target_id=? AND status IN ('queued','processing')`, [current.id])) as { count: number };
+    if (active.count > 0) {
+      await this.db.run('UPDATE routes SET enabled=0,updated_at=? WHERE id=?', [now(), current.id]);
+      await this.audit('admin', 'route.disable', 'route', current.id, { reason: 'delete-deferred-active-deliveries' });
+      return;
+    }
+    await this.db.run('DELETE FROM routes WHERE id=?', [current.id]);
+    await this.audit('admin', 'route.delete', 'route', current.id, {});
   }
 
   async listDestinations(): Promise<Destination[]> {
@@ -303,6 +357,7 @@ export class RelayRepository {
 
   async createKey(input: { name: string; scopes?: string[]; destinationIds?: string[]; secret?: string }): Promise<{ apiKey: ApiKey; secret: string }> {
     return this.withWriteLock(async () => {
+      await this.ensureFreshDek();
       const id = randomUUID();
       const timestamp = now();
       // 生成密钥前缀仅 32 位，UNIQUE 碰撞时重新生成；自定义密钥前缀取哈希前 8 位（仅展示用）
@@ -399,7 +454,7 @@ export class RelayRepository {
             (id,target_type,target_id,title,body,severity,url,metadata,source,status,idempotency_key,created_at,updated_at)
             VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?)`,
           params: [id, input.targetType, input.targetId, input.title, input.body, input.severity, input.url ?? null,
-            JSON.stringify(input.metadata ?? {}), input.source, input.idempotencyKey ?? null, timestamp, timestamp]
+            JSON.stringify(input.metadata ?? {}), input.source, input.idempotencyKey || null, timestamp, timestamp]
         },
         ...input.channelIds.map((channelId, position) => ({
           sql: `INSERT INTO attempts
@@ -457,9 +512,13 @@ export class RelayRepository {
 
   async listDeliveries(options: { limit?: number; status?: string } = {}): Promise<Delivery[]> {
     const limit = clampLimit(options.limit, 50, 200);
+    // 与 getDelivery 同样带出目的地名称，前端列表不用拿 UUID 充数
+    const base = `SELECT d.*,COALESCE(c.name,r.name) target_name FROM deliveries d
+      LEFT JOIN channels c ON d.target_type='channel' AND c.id=d.target_id
+      LEFT JOIN routes r ON d.target_type='route' AND r.id=d.target_id`;
     const rows = options.status
-      ? await this.db.all('SELECT * FROM deliveries WHERE status=? ORDER BY created_at DESC LIMIT ?', [options.status, limit])
-      : await this.db.all('SELECT * FROM deliveries ORDER BY created_at DESC LIMIT ?', [limit]);
+      ? await this.db.all(`${base} WHERE d.status=? ORDER BY d.created_at DESC LIMIT ?`, [options.status, limit])
+      : await this.db.all(`${base} ORDER BY d.created_at DESC LIMIT ?`, [limit]);
     return rows.map((row) => this.deliveryFrom(row));
   }
 
@@ -512,9 +571,11 @@ export class RelayRepository {
     return row?.next_at ? String(row.next_at) : undefined;
   }
 
-  /** 是否存在滞留 sending 的尝试（回收阈值同 reclaimStuckSending）；Workers 用它设兜底 alarm */
+  /** 是否存在滞留 sending 的尝试；Workers 用它设兜底 alarm。
+   *  不看时间阈值：刚崩溃的行也只有几秒新，等 5 分钟阈值到了才查就永远查不到（那时已无人再查）。
+   *  兜底 alarm 定 6 分钟后触发，届时 claimDueAttempts 的 5 分钟回收自然接手。 */
   async hasStuckSending(): Promise<boolean> {
-    const row = await this.db.get("SELECT 1 stuck FROM attempts WHERE status='sending' AND updated_at<? LIMIT 1", [new Date(Date.now() - 5 * 60_000).toISOString()]);
+    const row = await this.db.get("SELECT 1 stuck FROM attempts WHERE status='sending' LIMIT 1");
     return Boolean(row?.stuck);
   }
 
@@ -680,6 +741,7 @@ export class RelayRepository {
    */
   async rotateMasterKey(): Promise<{ version: number; rotatedAt: string }> {
     return this.withWriteLock(async () => {
+      await this.ensureFreshDek();
       if (!this.dek) throw new Error('DEK 尚未初始化');
       const oldDek = this.dek;
       const newDek = generateDek();
@@ -704,6 +766,7 @@ export class RelayRepository {
         { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_rotated_at',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [timestamp, timestamp] }
       ]);
       this.dek = newDek;
+      this.dekVersion = nextVersion;
       await this.audit('admin', 'credential.master_key.rotate', 'credential', 'dek', { version: nextVersion });
       return { version: nextVersion, rotatedAt: timestamp };
     });

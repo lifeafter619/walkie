@@ -47,11 +47,13 @@ function resolveMasterKey(isProduction: boolean): Buffer {
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const isProduction = process.env.NODE_ENV === 'production';
   const dataDir = path.resolve(process.env.DATA_DIR ?? './data');
-  // 兼容旧名 relaydock.db：升级用户已有数据在旧文件里，优先沿用；
-  // 旧文件为 0 字节残留（未写入过数据）时视为不存在，改用新名 walkie.db。
+  // 数据库文件选择：新名 walkie.db 已有数据则优先（c9480da 起的版本一直写它，
+  // 若还倒回旧文件会让期间创建的频道/密钥「凭空消失」）；否则沿用有数据的旧名
+  // relaydock.db（升级用户的存量数据）；两者都没有则用新名。0 字节残留视为不存在。
+  const hasData = (file: string) => { try { return statSync(file).size > 0; } catch { return false; } };
+  const newDb = path.join(dataDir, 'walkie.db');
   const legacyDb = path.join(dataDir, 'relaydock.db');
-  const hasLegacyData = () => { try { return statSync(legacyDb).size > 0; } catch { return false; } };
-  const databasePath = existsSync(legacyDb) && hasLegacyData() ? legacyDb : path.join(dataDir, 'walkie.db');
+  const databasePath = hasData(newDb) ? newDb : hasData(legacyDb) ? legacyDb : newDb;
   const host = process.env.HOST ?? '127.0.0.1';
   // 远程数据库（Turso/libSQL，如 Vercel 部署）不需要本地数据目录
   if (!process.env.TURSO_DATABASE_URL) mkdirSync(dataDir, { recursive: true });

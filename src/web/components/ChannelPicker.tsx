@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Search, X } from 'lucide-react';
 import type { ProviderDefinition, ProviderId } from '../../shared/types';
 import { Modal, IconButton } from './ui';
-import { ProviderIcon, providerBrand } from './ProviderIcon';
+import { ProviderIcon } from './ProviderIcon';
 
 const CATEGORIES = [
   { id: 'all', label: '全部' },
@@ -52,9 +52,10 @@ export function ChannelPicker({
       event.preventDefault();
       if (!filtered.length) return;
       setActiveIndex((i) => Math.max(i - 1, 0));
-    } else if (event.key === 'Enter' && filtered[activeIndex]) {
+    } else if (event.key === 'Enter') {
+      // 无匹配项时也要拦截：picker 渲染在 ChannelForm 的 <form> 里，放过 Enter 会隐式提交表单
       event.preventDefault();
-      onPick(filtered[activeIndex].id);
+      if (filtered[activeIndex]) onPick(filtered[activeIndex].id);
     }
   };
 
@@ -86,6 +87,7 @@ export function ChannelPicker({
             return (
               <button
                 key={cat.id}
+                type="button"
                 role="tab"
                 aria-selected={category === cat.id}
                 className={category === cat.id ? 'active' : ''}
@@ -101,6 +103,7 @@ export function ChannelPicker({
           {filtered.map((provider, index) => (
             <button
               key={provider.id}
+              type="button"
               data-idx={index}
               className={[
                 'picker-tile',
@@ -134,31 +137,3 @@ export function ChannelPicker({
   );
 }
 
-/** 表单内用的「选择渠道」触发器：展示当前选中渠道的图标 + 名称。 */
-export function ProviderSelect({
-  providers, value, onPick, disabled
-}: {
-  providers: ProviderDefinition[];
-  value: ProviderId;
-  onPick: (next: ProviderId) => void;
-  disabled?: boolean;
-}) {
-  const provider = providers.find((p) => p.id === value);
-  const brand = providerBrand(value);
-  return (
-    <button
-      type="button"
-      className="provider-select"
-      onClick={() => onPick(value)}
-      disabled={disabled}
-      style={{ '--brand': `#${brand.hex}` } as React.CSSProperties}
-    >
-      <ProviderIcon provider={value} name={provider?.name} size={22} />
-      <span className="provider-select-text">
-        <strong>{provider?.name ?? value}</strong>
-        <small>{provider?.description}</small>
-      </span>
-      <span className="provider-select-hint">{disabled ? '锁定' : '更换'}</span>
-    </button>
-  );
-}

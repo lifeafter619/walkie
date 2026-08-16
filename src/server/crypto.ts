@@ -77,8 +77,10 @@ export function generateAdminToken(): string {
   return `${ADMIN_TOKEN_PREFIX}${base64url(randomBytes(24))}`;
 }
 
-/** 管理令牌前缀预览：rd_xxxx…（仅展示用，不泄露完整值） */
+/** 管理令牌前缀预览（仅展示用）：生成式 rd_ 令牌取前 7 位；
+ *  自定义密码不能存明文前缀（8 位密码泄露 7 位形同泄露），改用哈希前缀识别 */
 export function adminTokenPrefix(token: string): string {
+  if (!token.startsWith(ADMIN_TOKEN_PREFIX)) return hashSecret(token).slice(0, 8) + '…';
   return token.slice(0, 7) + '…';
 }
 

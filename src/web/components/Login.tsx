@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { AlertTriangle, ArrowRight, Eye, EyeOff, Radio } from 'lucide-react';
-import { api, getToken, setToken } from '../api';
+import { api, ApiError, getToken, setToken } from '../api';
 import { Button, IconButton } from './ui';
 
 type Meta = Awaited<ReturnType<typeof api.meta>>;
@@ -20,7 +20,8 @@ export function Login({ meta, onSuccess }: { meta: Meta; onSuccess: () => void }
       await api.session();
       onSuccess();
     } catch (err) {
-      setToken('');
+      // 仅鉴权失败才清除已存令牌；网络抖动/服务端 5xx 不应吞掉本来有效的密码
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) setToken('');
       setError(err instanceof Error ? err.message : '验证失败');
     } finally {
       setBusy(false);
