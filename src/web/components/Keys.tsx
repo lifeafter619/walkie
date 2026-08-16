@@ -1,5 +1,5 @@
 import { Fragment, useState, type FormEvent } from 'react';
-import { AlertTriangle, Bot, Check, Copy, Eye, EyeOff, KeyRound, Plus, Power, RotateCcw, Trash2 } from 'lucide-react';
+import { AlertTriangle, Bot, Check, Copy, Eye, EyeOff, KeyRound, Plus, Power, RotateCcw, Settings2, Trash2 } from 'lucide-react';
 import type { ApiKey, Destination } from '../../shared/types';
 import { api } from '../api';
 import { Badge, Button, Empty, IconButton, Modal, Notify, formatDate } from './ui';
@@ -10,33 +10,38 @@ import { CredentialPanels } from './Credentials';
  * ──────────────────────────────────────────────────────────── */
 
 export function KeyForm({
-  destinations, close, saved, notify
+  destinations, close, saved, notify, editing
 }: {
   destinations: Destination[];
   close: () => void;
   saved: () => void;
   notify: Notify;
+  editing?: ApiKey;
 }) {
-  const [name, setName] = useState('');
-  const [scopes, setScopes] = useState(['notifications:send', 'deliveries:read']);
-  const [restricted, setRestricted] = useState(false);
-  const [ids, setIds] = useState<string[]>([]);
+  const [name, setName] = useState(editing?.name ?? '');
+  const [scopes, setScopes] = useState<string[]>(editing?.scopes ?? ['notifications:send', 'deliveries:read']);
+  const [restricted, setRestricted] = useState(Boolean(editing?.destinationIds.length));
+  const [ids, setIds] = useState<string[]>(editing?.destinationIds ?? []);
   const [customSecret, setCustomSecret] = useState('');
   const [busy, setBusy] = useState(false);
   const [secret, setSecret] = useState('');
 
-  const create = async (event: FormEvent) => {
+  const submit = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     try {
-      const result = await api.createKey({
-        name, scopes, destinationIds: restricted ? ids : [],
-        ...(customSecret ? { secret: customSecret } : {})
-      });
-      setSecret(result.secret);
+      if (editing) {
+        await api.updateKey(editing.id, { name, scopes, destinationIds: restricted ? ids : [] });
+      } else {
+        const result = await api.createKey({
+          name, scopes, destinationIds: restricted ? ids : [],
+          ...(customSecret ? { secret: customSecret } : {})
+        });
+        setSecret(result.secret);
+      }
       saved();
     } catch (error) {
-      notify('error', error instanceof Error ? error.message : '创建失败');
+      notify('error', error instanceof Error ? error.message : '保存失败');
     } finally {
       setBusy(false);
     }
@@ -53,11 +58,12 @@ export function KeyForm({
 
   const SCOPE_OPTIONS = [
     { id: 'notifications:send', label: '发送通知' },
-    { id: 'deliveries:read', label: '读取投递状态' }
+    { id: 'deliveries:read', label: '读取投递状态' },
+    { id: 'config:write', label: '配置管理' }
   ] as const;
 
   return (
-    <Modal title={secret ? '保存 Agent API Key' : '创建 Agent API Key'} onClose={close} wide>
+    <Modal title={editing ? '编辑 Agent API Key' : secret ? '保存 Agent API Key' : '创建 Agent API Key'} onClose={close} wide>
       {secret ? (
         <div className="modal-body secret-screen">
           <div className="warning-banner">
@@ -78,21 +84,23 @@ export function KeyForm({
           </footer>
         </div>
       ) : (
-        <form className="modal-body" onSubmit={create}>
+        <form className="modal-body" onSubmit={submit}>
           <label>名称
             <input autoFocus value={name} onChange={(event) => setName(event.target.value)} required placeholder="CI 发布 Agent" />
           </label>
-          <label>自定义密钥<span className="optional">可选，留空自动生成</span>
-            <input
-              value={customSecret}
-              onChange={(event) => setCustomSecret(event.target.value)}
-              placeholder="像密码一样随意设置，Agent 直接用它鉴权"
-              pattern="[!-~]{8,200}"
-              title="至少 8 个字符，仅限字母、数字和符号（不含空格）"
-              autoComplete="off"
-            />
-            <small>至少 8 个字符（字母/数字/符号，不含空格）。留空则生成随机 rdk_ 密钥。</small>
-          </label>
+          {!editing && (
+            <label>自定义密钥<span className="optional">可选，留空自动生成</span>
+              <input
+                value={customSecret}
+                onChange={(event) => setCustomSecret(event.target.value)}
+                placeholder="像密码一样随意设置，Agent 直接用它鉴权"
+                pattern="[!-~]{8,200}"
+                title="至少 8 个字符，仅限字母、数字和符号（不含空格）"
+                autoComplete="off"
+              />
+              <small>至少 8 个字符（字母/数字/符号，不含空格）。留空则生成随机 rdk_ 密钥。</small>
+            </label>
+          )}
           <div>
             <div className="field-label">权限范围</div>
             <div className="scope-list">
@@ -124,7 +132,7 @@ export function KeyForm({
           )}
           <footer className="modal-actions">
             <Button type="button" onClick={close}>取消</Button>
-            <Button type="submit" variant="primary" icon={KeyRound} loading={busy} disabled={!scopes.length || (restricted && !ids.length)}>创建密钥</Button>
+            <Button type="submit" variant="primary" icon={KeyRound} loading={busy} disabled={!scopes.length || (restricted && !ids.length)}>{editing ? '保存修改' : '创建密钥'}</Button>
           </footer>
         </form>
       )}
@@ -141,9 +149,12 @@ export function Keys({
   notify: Notify;
 }) {
   const [creating, setCreating] = useState(false);
+  const [editingKey, setEditingKey] = useState<ApiKey | null>(null);
   const [revealId, setRevealId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState('');
+
+  const SCOPE_LABELS: Record<string, string> = { 'notifications:send': '发送', 'deliveries:read': '读取', 'config:write': '配置' };
 
   const revoke = async (key: ApiKey) => {
     if (!confirm(`吊销“${key.name}”？使用该密钥的 Agent 会立即失去访问权限。`)) return;
@@ -228,7 +239,7 @@ export function Keys({
                       : `rdk_${key.prefix}_••••`}</code></td>
                     <td>
                       <div className="scope-pills">
-                        {key.scopes.map((scope) => <span key={scope}>{scope === 'notifications:send' ? '发送' : '读取'}</span>)}
+                        {key.scopes.map((scope) => <span key={scope}>{SCOPE_LABELS[scope] ?? scope}</span>)}
                       </div>
                     </td>
                     <td>{key.destinationIds.length ? `${key.destinationIds.length} 个指定目的地` : '全部目的地'}</td>
@@ -242,6 +253,7 @@ export function Keys({
                         </div>
                       ) : (
                         <div className="row-actions">
+                          <IconButton label="编辑范围" icon={Settings2} disabled={Boolean(busyId)} onClick={() => setEditingKey(key)} />
                           {key.viewable && (
                             <IconButton label={revealId === key.id ? '收起密钥' : '查看密钥'} icon={revealId === key.id ? EyeOff : Eye} onClick={() => setRevealId(revealId === key.id ? null : key.id)} />
                           )}
@@ -295,7 +307,7 @@ export function Keys({
               </div>
               <div>
                 <dt>权限</dt>
-                <dd>{key.scopes.map((scope) => scope === 'notifications:send' ? '发送' : '读取').join('、')}</dd>
+                <dd>{key.scopes.map((scope) => SCOPE_LABELS[scope] ?? scope).join('、')}</dd>
               </div>
               <div>
                 <dt>目的地</dt>
@@ -324,6 +336,7 @@ export function Keys({
                 </>
               ) : (
                 <>
+                  <Button icon={Settings2} disabled={Boolean(busyId)} onClick={() => setEditingKey(key)}>编辑</Button>
                   {key.viewable && (
                     <Button icon={revealId === key.id ? EyeOff : Eye} onClick={() => setRevealId(revealId === key.id ? null : key.id)}>
                       {revealId === key.id ? '收起' : '查看'}
@@ -343,6 +356,16 @@ export function Keys({
       <CredentialPanels notify={notify} refresh={refresh} />
 
       {creating && <KeyForm destinations={destinations} close={() => setCreating(false)} saved={refresh} notify={notify} />}
+
+      {editingKey && (
+        <KeyForm
+          destinations={destinations}
+          close={() => setEditingKey(null)}
+          saved={() => { setEditingKey(null); refresh(); }}
+          notify={notify}
+          editing={editingKey}
+        />
+      )}
 
       {deletingId && (
         <Modal title="确认彻底删除" onClose={() => setDeletingId(null)}>

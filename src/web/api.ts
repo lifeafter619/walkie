@@ -37,6 +37,7 @@ export const api = {
   deleteRoute: (id: string) => request<void>(`/api/admin/routes/${id}`, { method: 'DELETE' }),
   keys: () => request<{ keys: ApiKey[] }>('/api/admin/keys'),
   createKey: (body: unknown) => request<{ apiKey: ApiKey; secret: string }>('/api/admin/keys', { method: 'POST', body: JSON.stringify(body) }),
+  updateKey: (id: string, body: unknown) => request<ApiKey>(`/api/admin/keys/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   revokeKey: (id: string) => request<{ success: boolean }>(`/api/admin/keys/${id}/revoke`, { method: 'POST' }),
   restoreKey: (id: string) => request<{ success: boolean }>(`/api/admin/keys/${id}/restore`, { method: 'POST' }),
   deleteKey: (id: string) => request<void>(`/api/admin/keys/${id}`, { method: 'DELETE' }),
