@@ -1,5 +1,7 @@
 import { useState } from 'react';
-import { Bot, Code2, Copy, KeyRound, Network, SquareTerminal } from 'lucide-react';
+import { Bot, Code2, Copy, Eye, EyeOff, KeyRound, Network, SquareTerminal } from 'lucide-react';
+import type { ApiKey } from '../../shared/types';
+import { api } from '../api';
 import { Button, IconButton, Notify } from './ui';
 
 type Meta = {
@@ -11,11 +13,17 @@ type Meta = {
 type Client = 'codex' | 'claude' | 'cursor' | 'generic';
 
 /* ────────────────────────────────────────────────────────────
- * MCP 接入：端点 + 客户端配置片段。
+ * MCP 接入：端点 + 客户端配置片段 + 已有 API Key 快速复制。
  * ──────────────────────────────────────────────────────────── */
 
-export function Integrations({ meta, notify }: { meta: Meta; notify: Notify }) {
+function maskSecret(secret: string): string {
+  if (secret.length <= 12) return secret.slice(0, 4) + '••••';
+  return secret.slice(0, 8) + '••••' + secret.slice(-4);
+}
+
+export function Integrations({ meta, keys, notify }: { meta: Meta; keys: ApiKey[]; notify: Notify }) {
   const [client, setClient] = useState<Client>('codex');
+  const [revealedIds, setRevealedIds] = useState<Set<string>>(new Set());
 
   const snippets = {
     codex: {
@@ -45,6 +53,17 @@ export function Integrations({ meta, notify }: { meta: Meta; notify: Notify }) {
       notify('error', '复制失败，请手动选择文本');
     }
   };
+
+  const toggleReveal = (id: string) => {
+    setRevealedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const activeKeys = keys.filter((key) => !key.revokedAt);
 
   return (
     <>
@@ -88,9 +107,42 @@ export function Integrations({ meta, notify }: { meta: Meta; notify: Notify }) {
               <div><dt>端点</dt><dd><code>/mcp</code></dd></div>
             </dl>
           </section>
+
+          <section className="panel api-keys-list">
+            <div className="section-head">
+              <h2>Agent API Keys</h2>
+              <KeyRound size={15} className="muted" />
+            </div>
+            {activeKeys.length ? (
+              <div className="keys-quick-copy">
+                {activeKeys.map((key) => {
+                  const revealed = revealedIds.has(key.id) && key.viewable && key.secret;
+                  const display = revealed ? key.secret! : (key.secret && key.viewable ? maskSecret(key.secret) : `rdk_${key.prefix}_••••`);
+                  return (
+                    <div className="key-copy-row" key={key.id}>
+                      <div className="key-copy-info">
+                        <strong>{key.name}</strong>
+                        <code>{display}</code>
+                      </div>
+                      <div className="row-actions">
+                        {key.viewable && (
+                          <IconButton label={revealed ? '隐藏' : '显示'} icon={revealed ? EyeOff : Eye} onClick={() => toggleReveal(key.id)} />
+                        )}
+                        <IconButton label="复制密钥" icon={Copy} onClick={() => key.secret ? copy(key.secret, `${key.name} 已复制`) : notify('error', '此密钥不可复制')} />
+                      </div>
+                    </div>
+                  );
+                })}
+                <p className="panel-note" style={{ borderTop: 0, padding: '8px 16px' }}>已显示 {activeKeys.length} 个有效密钥；<a href="#keys">管理全部密钥 →</a></p>
+              </div>
+            ) : (
+              <p className="panel-note" style={{ borderTop: 0 }}>还没有 Agent Key。<a href="#keys">前往密钥页创建 →</a></p>
+            )}
+          </section>
+
           <section className="panel env-callout">
             <KeyRound size={17} />
-            <div><strong>WALKIE_API_KEY</strong><p>在「密钥」页创建，原始值只显示一次。</p></div>
+            <div><strong>WALKIE_API_KEY</strong><p>配置片段中用环境变量名代替明文密钥，更安全。</p></div>
           </section>
         </aside>
       </div>

@@ -11,7 +11,8 @@ services:
       DELIVERY_WORKERS: "2"
       MAX_DELIVERY_ATTEMPTS: "4"
     volumes:
-      - walkie-data:/app/data
+      # Keep the legacy volume name so upgrading from RelayDock preserves data.
+      - relaydock-data:/app/data
 
 volumes:
-  walkie-data:
+  relaydock-data:

@@ -16,6 +16,7 @@ import type { NotificationService } from './notifications.js';
 import type { ProviderDispatcher } from './providers/dispatcher.js';
 import { PROVIDERS, PROVIDER_MAP, validateProviderConfig } from './providers/catalog.js';
 import type { DeliveryWorker } from './queue.js';
+import { applyUpdate, checkUpdate } from './update.js';
 
 declare global {
   namespace Express { interface Request { agentKey?: ApiKey; auth?: AuthInfo } }
@@ -39,11 +40,14 @@ function bearer(req: Request): string | undefined {
 
 export function createApp(deps: AppDependencies) {
   const { config, repository, notifications, dispatcher, worker } = deps;
-  const app = createMcpExpressApp({ host: config.host });
-  app.use(express.json({ limit: '256kb' }));
+  const app = createMcpExpressApp({ host: config.host, jsonLimit: '256kb' });
+  // createMcpExpressApp 内部已注册 express.json（默认 100kb），此处传入 jsonLimit 统一为 256kb；
+  // 不能再重复注册第二个 json 解析器，否则实际生效的仍是最先注册的 100kb 限制。
   app.use(express.urlencoded({ extended: false, limit: '256kb' }));
-  const publicUrl = () => (config.publicUrl ?? `http://${config.host}:${config.port}`).replace(/\/$/, '');
-  const mcpHandler = createRelayMcpHandler(repository, notifications, publicUrl);
+  // publicUrl：优先显式配置；未配置时用调用方给出的请求 origin（反向代理场景生成可用链接），
+  // 无请求上下文时退回监听地址
+  const publicUrl = (origin?: string) => (config.publicUrl ?? origin ?? `http://${config.host}:${config.port}`).replace(/\/$/, '');
+  const mcpHandler = createRelayMcpHandler(repository, notifications, (request) => publicUrl(request ? new URL(request.url).origin : undefined));
   const nodeMcpHandler = toNodeHandler(mcpHandler, {
     onerror: (error) => console.error('MCP adapter failed:', error.message)
   });
@@ -101,6 +105,15 @@ export function createApp(deps: AppDependencies) {
     const input = channelSchema.partial().parse(req.body);
     const provider = input.provider as ProviderId | undefined;
     if (provider && !PROVIDER_MAP.has(provider)) throw new Error('不支持的渠道类型');
+    // PATCH 换 provider/改 config 后重新校验必填字段，避免存入必然发送失败的配置
+    if (input.config || input.provider) {
+      const current = await repository.getChannel(String(req.params.id));
+      if (!current) return res.status(404).json({ error: '频道不存在' });
+      const providerToCheck = (provider ?? current.provider) as ProviderId;
+      const merged = { ...await repository.getChannelConfig(current.id), ...(input.config ?? {}) };
+      const errors = validateProviderConfig(providerToCheck, merged);
+      if (errors.length) return res.status(400).json({ error: errors.join('；') });
+    }
     res.json(await repository.updateChannel(String(req.params.id), { ...input, provider }));
   }));
   admin.delete('/channels/:id', asyncRoute(async (req, res) => { await repository.deleteChannel(String(req.params.id)); res.status(204).end(); }));
@@ -139,6 +152,8 @@ export function createApp(deps: AppDependencies) {
     res.status(201).json(await repository.createKey(input));
   }));
   admin.post('/keys/:id/revoke', asyncRoute(async (req, res) => { await repository.revokeKey(String(req.params.id)); res.json({ success: true }); }));
+  admin.post('/keys/:id/restore', asyncRoute(async (req, res) => { await repository.restoreKey(String(req.params.id)); res.json({ success: true }); }));
+  admin.delete('/keys/:id', asyncRoute(async (req, res) => { await repository.deleteKey(String(req.params.id)); res.status(204).end(); }));
 
   admin.get('/credentials', asyncRoute(async (_req, res) => res.json(await repository.getCredentialStatus(Boolean(config.adminToken)))));
   admin.post('/credentials/admin-token', asyncRoute(async (req, res) => {
@@ -148,6 +163,18 @@ export function createApp(deps: AppDependencies) {
     res.status(201).json({ token });
   }));
   admin.post('/credentials/master-key/rotate', asyncRoute(async (_req, res) => res.json(await repository.rotateMasterKey())));
+
+  admin.get('/update/check', asyncRoute(async (_req, res) => res.json(await checkUpdate(process.env.UPDATE_REPO))));
+  admin.post('/update/apply', asyncRoute(async (_req, res) => {
+    const result = await applyUpdate();
+    if (result.success && result.needsRestart) {
+      res.json(result);
+      // 给响应 1.5s 发出窗口，然后重启进程（容器管理器会拉起新实例）
+      setTimeout(() => { void repository.close(); process.exit(0); }, 1500);
+    } else {
+      res.json(result);
+    }
+  }));
 
   admin.get('/deliveries', asyncRoute(async (req, res) => res.json({ deliveries: await repository.listDeliveries({ limit: Number(req.query.limit ?? 100), status: typeof req.query.status === 'string' ? req.query.status : undefined }) })));
   admin.get('/deliveries/:id', asyncRoute(async (req, res) => {
@@ -179,9 +206,9 @@ export function createApp(deps: AppDependencies) {
   app.get('/api/v1/deliveries/:id', requireAgent, asyncRoute(async (req, res) => res.json(await notifications.getDelivery(String(req.params.id), req.agentKey))));
   app.post('/api/v1/ask', requireAgent, asyncRoute(async (req, res) => {
     const input = askSchema.parse(req.body);
-    const base = config.publicUrl ? publicUrl() : `${req.protocol}://${req.get('host')}`;
+    const base = publicUrl(`${req.protocol}://${req.get('host')}`);
     const asked = await notifications.ask(input, `agent:${req.agentKey!.id}`, req.agentKey!, base);
-    void worker.drainOnce();
+    void worker.drainOnce().catch(() => undefined);
     res.status(201).json({ conversationId: asked.conversation.id, deliveryId: asked.deliveryId, replyUrl: asked.replyUrl, expiresAt: asked.conversation.expiresAt });
   }));
   app.get('/api/v1/conversations/:id', requireAgent, asyncRoute(async (req, res) => {

@@ -38,6 +38,8 @@ export const api = {
   keys: () => request<{ keys: ApiKey[] }>('/api/admin/keys'),
   createKey: (body: unknown) => request<{ apiKey: ApiKey; secret: string }>('/api/admin/keys', { method: 'POST', body: JSON.stringify(body) }),
   revokeKey: (id: string) => request<{ success: boolean }>(`/api/admin/keys/${id}/revoke`, { method: 'POST' }),
+  restoreKey: (id: string) => request<{ success: boolean }>(`/api/admin/keys/${id}/restore`, { method: 'POST' }),
+  deleteKey: (id: string) => request<void>(`/api/admin/keys/${id}`, { method: 'DELETE' }),
   deliveries: (status = '') => request<{ deliveries: Delivery[] }>(`/api/admin/deliveries${status ? `?status=${status}` : ''}`),
   delivery: (id: string) => request<Delivery>(`/api/admin/deliveries/${id}`),
   send: (body: unknown) => request<Delivery>('/api/admin/send', { method: 'POST', body: JSON.stringify(body) }),
@@ -45,5 +47,7 @@ export const api = {
   replyConversation: (id: string, reply: string) => request<{ success: boolean }>(`/api/admin/conversations/${id}/reply`, { method: 'POST', body: JSON.stringify({ reply }) }),
   credentials: () => request<CredentialStatus>('/api/admin/credentials'),
   rotateAdminToken: (body: unknown) => request<{ token: string }>('/api/admin/credentials/admin-token', { method: 'POST', body: JSON.stringify(body) }),
-  rotateMasterKey: () => request<{ version: number; rotatedAt: string }>('/api/admin/credentials/master-key/rotate', { method: 'POST' })
+  rotateMasterKey: () => request<{ version: number; rotatedAt: string }>('/api/admin/credentials/master-key/rotate', { method: 'POST' }),
+  checkUpdate: () => request<{ currentVersion: string; latestVersion: string; hasUpdate: boolean; releaseNotes?: string; releaseUrl?: string; canApply: boolean; applyHint?: string }>('/api/admin/update/check'),
+  applyUpdate: () => request<{ success: boolean; message: string; needsRestart: boolean }>('/api/admin/update/apply', { method: 'POST' })
 };

@@ -218,6 +218,8 @@ export class RelayRepository {
         input.quietHours !== undefined ? input.quietHours || null : current.quietHours ?? null,
         now(), id
       ]);
+      // 禁用频道后，其未完结的 attempt 再也不会被 claim，必须就地失败并推进投递终态，否则投递永久停在 processing
+      if (input.enabled === false) await this.failAttemptsForDisabledChannel(id);
       await this.audit('admin', 'channel.update', 'channel', id, {});
       return (await this.getChannel(id))!;
     });
@@ -233,10 +235,20 @@ export class RelayRepository {
     const routed = (await this.db.get('SELECT COUNT(*) count FROM routes, json_each(routes.channel_ids) WHERE json_each.value=?', [id])) as { count: number };
     if (used.count > 0 || routed.count > 0) {
       await this.db.run('UPDATE channels SET enabled=0,updated_at=? WHERE id=?', [now(), id]);
+      // 软删除同样要终结未完结 attempt，否则投递永久停在 processing
+      await this.failAttemptsForDisabledChannel(id);
       return;
     }
     await this.db.run('DELETE FROM channels WHERE id=?', [id]);
     await this.audit('admin', 'channel.delete', 'channel', id, {});
+  }
+
+  /** 频道被禁用/软删除后，其 pending/retrying/sending attempt 就地失败，并刷新受影响投递的终态 */
+  private async failAttemptsForDisabledChannel(channelId: string): Promise<void> {
+    const ts = now();
+    const rows = await this.db.all(`SELECT DISTINCT delivery_id FROM attempts WHERE channel_id=? AND status IN ('pending','retrying','sending')`, [channelId]);
+    await this.db.run(`UPDATE attempts SET status='failed',error='频道已禁用，尝试终止',next_attempt_at=NULL,updated_at=? WHERE channel_id=? AND status IN ('pending','retrying','sending')`, [ts, channelId]);
+    for (const row of rows) await this.refreshDeliveryStatus(String(row.delivery_id));
   }
 
   private routeFrom(row: Row): Route {
@@ -358,6 +370,18 @@ export class RelayRepository {
     await this.audit('admin', 'api_key.revoke', 'api_key', id, {});
   }
 
+  /** 重新启用已吊销的密钥：清空 revoked_at，恢复鉴权 */
+  async restoreKey(id: string): Promise<void> {
+    await this.db.run('UPDATE api_keys SET revoked_at=NULL WHERE id=?', [id]);
+    await this.audit('admin', 'api_key.restore', 'api_key', id, {});
+  }
+
+  /** 彻底删除密钥记录（不可恢复）。删除前应先吊销，确保缓存/会话立即失效 */
+  async deleteKey(id: string): Promise<void> {
+    await this.db.run('DELETE FROM api_keys WHERE id=?', [id]);
+    await this.audit('admin', 'api_key.delete', 'api_key', id, {});
+  }
+
   async createDelivery(input: {
     targetType: 'channel' | 'route'; targetId: string; title: string; body: string; severity: Severity;
     url?: string; metadata?: Record<string, unknown>; source: string; idempotencyKey?: string; channelIds: string[];
@@ -465,7 +489,9 @@ export class RelayRepository {
       WHERE a.status IN ('pending','retrying') AND a.next_attempt_at<=? AND c.enabled=1
       AND (r.strategy IS NULL OR r.strategy<>'fallback' OR (
         NOT EXISTS (SELECT 1 FROM attempts won WHERE won.delivery_id=a.delivery_id AND won.status='delivered')
-        AND a.position=(SELECT MIN(next.position) FROM attempts next WHERE next.delivery_id=a.delivery_id AND next.status IN ('pending','sending','retrying'))
+        AND a.position=(SELECT MIN(next.position) FROM attempts next
+          JOIN channels nc ON nc.id=next.channel_id
+          WHERE next.delivery_id=a.delivery_id AND nc.enabled=1 AND next.status IN ('pending','sending','retrying'))
       ))
       ORDER BY a.next_attempt_at,a.position LIMIT ?`, [now(), limit]);
     const claimed: DeliveryAttempt[] = [];
@@ -484,6 +510,12 @@ export class RelayRepository {
   async nextDueAttempt(): Promise<string | undefined> {
     const row = await this.db.get("SELECT MIN(a.next_attempt_at) next_at FROM attempts a JOIN channels c ON c.id=a.channel_id WHERE a.status IN ('pending','retrying') AND c.enabled=1");
     return row?.next_at ? String(row.next_at) : undefined;
+  }
+
+  /** 是否存在滞留 sending 的尝试（回收阈值同 reclaimStuckSending）；Workers 用它设兜底 alarm */
+  async hasStuckSending(): Promise<boolean> {
+    const row = await this.db.get("SELECT 1 stuck FROM attempts WHERE status='sending' AND updated_at<? LIMIT 1", [new Date(Date.now() - 5 * 60_000).toISOString()]);
+    return Boolean(row?.stuck);
   }
 
   /** 终态回调只发一次：原子置位，抢到的调用方返回 true */

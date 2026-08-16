@@ -97,7 +97,7 @@ docker compose up -d --build
 ```
 
 - 默认只绑定 `127.0.0.1:4310`，用 Nginx/Caddy 反代并终结 TLS 后再对外；
-- 数据在 `walkie-data` 卷（`/app/data/walkie.db`），**备份时连同 `MASTER_KEY` 一起保存**，两者缺一不可恢复。
+- 数据在 `relaydock-data` 卷（新安装使用 `/app/data/walkie.db`，旧安装自动继续使用 `relaydock.db`），**备份时连同 `MASTER_KEY` 一起保存**，两者缺一不可恢复。
 
 Caddy 反代两行即可：
 

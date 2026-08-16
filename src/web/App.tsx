@@ -134,8 +134,8 @@ export default function App() {
     : page === 'keys'
     ? <Keys keys={keys} destinations={destinations} refresh={refresh} notify={notify} />
     : page === 'integrations'
-    ? <Integrations meta={meta} notify={notify} />
-    : <SystemPage meta={meta} providers={providers} />;
+    ? <Integrations meta={meta} keys={keys} notify={notify} />
+    : <SystemPage meta={meta} channels={channels} providers={providers} refresh={refresh} notify={notify} />;
 
   return (
     <div className="app-shell">
