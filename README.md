@@ -180,10 +180,20 @@ bearer_token_env_var = "WALKIE_API_KEY"
 | --- | --- |
 | `list_destinations` | 列出该 Key 可用的频道与路由 |
 | `send_notification` | 发送通知，返回 deliveryId |
-| `get_delivery` | 查询投递的总体与分渠道状态 |
+| `get_delivery` | 查询投递的总体与分频道状态 |
 | `ask_user` | 向人类提问，推送一次性回复链接 |
 | `check_reply` | 长轮询等待人类回复 |
 | `list_routes` | 列出可用路由 |
+| `list_channel_types` / `list_channels` | 渠道类型字段定义 / 渠道列表（`config:write`） |
+| `create_channel` / `update_channel` / `delete_channel` | 渠道管理（`config:write`） |
+| `test_channel` | 发送测试消息验证渠道连通性（`config:write`） |
+| `create_route` / `update_route` / `delete_route` | 路由管理（`config:write`） |
+
+给 Key 开启「配置管理」（`config:write`）权限后，可以直接对 Agent 说人话完成配置：
+
+> 「帮我配一个 Telegram，Bot Token 是 123:abc，Chat ID 是 42，配好测一下」
+
+Agent 会调用 `list_channel_types` 查字段 → `create_channel` 建渠道 → `test_channel` 验证连通 → 回报结果。所有变更写审计表（区分管理员与 Agent 操作）；配置工具不含任何 Key 管理能力，Agent 无法给自己提权。
 
 ### REST API
 
@@ -241,7 +251,7 @@ Agent  ── check_reply 长轮询 ──► 拿到答案，继续执行
 - 渠道凭据 AES-256-GCM 加密落盘；两级密钥（env `MASTER_KEY` 为 KEK，数据密钥 DEK 可在控制台在线轮换并原子重加密）；
 - Agent Key 与管理密码只存 sha256 哈希做鉴权；Agent Key 另存一份加密副本供面板查看复制；
 - 出站通知默认拒绝私网/回环/保留地址与明文 HTTP（SSRF 防护），重定向一律拒绝；
-- 每个 Agent Key 可限定 scope（发送/读取）与目的地白名单，一键吊销；
+- 每个 Agent Key 可限定 scope（发送/读取/配置管理）与目的地白名单（如 5 个渠道开 5 个 Key 各管一个），可随时编辑范围，一键吊销；
 - 回复链接带一次性 token，回复后立即失效；所有敏感操作写审计表。
 
 ## 常见问题
