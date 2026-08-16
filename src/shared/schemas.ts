@@ -42,13 +42,18 @@ export const askSchema = z.object({
 /** 自定义密钥/密码通用规则：≥8 位可见 ASCII（要放进 Authorization 头，不能含空格与非 ASCII） */
 const secretSchema = z.string().min(8, '至少 8 个字符').max(200).regex(/^[\x21-\x7e]+$/, '仅支持字母、数字和符号（不含空格）');
 
+export const SCOPE_IDS = ['notifications:send', 'deliveries:read', 'config:write'] as const;
+
 export const keySchema = z.object({
   name: z.string().min(1).max(100),
-  scopes: z.array(z.enum(['notifications:send', 'deliveries:read'])).min(1).optional(),
+  scopes: z.array(z.enum(SCOPE_IDS)).min(1).optional(),
   destinationIds: z.array(z.string()).optional(),
   /** 自定义密钥（像密码一样随意设置）；缺省则服务端生成随机 rdk_ 密钥 */
   secret: secretSchema.optional()
 });
+
+/** 编辑 Key：不允许改密钥本身（换密钥走吊销重建）；strict 拒绝未知键 */
+export const keyUpdateSchema = keySchema.omit({ secret: true }).strict();
 
 /** 管理密码设置：可自定义（≥8 字符）；缺省则服务端随机生成 */
 export const credentialTokenSchema = z.object({
