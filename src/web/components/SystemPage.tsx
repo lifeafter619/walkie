@@ -1,6 +1,6 @@
-import { useState } from 'react';
-import { Activity, Copy, Download, ExternalLink, LoaderCircle, ShieldCheck, TestTube2, AlertTriangle, RefreshCw } from 'lucide-react';
-import type { Channel, ProviderDefinition } from '../../shared/types';
+import { useEffect, useState } from 'react';
+import { Activity, Copy, Download, ExternalLink, LoaderCircle, ShieldCheck, TestTube2, AlertTriangle, RefreshCw, Trash2 } from 'lucide-react';
+import type { Channel, ProviderDefinition, RetentionSettings } from '../../shared/types';
 import { api } from '../api';
 import { Badge, Button, IconButton, Modal, type Notify } from './ui';
 import { ProviderIcon } from './ProviderIcon';
@@ -53,6 +53,41 @@ export function SystemPage({ meta, channels, providers, refresh, notify }: { met
   const [checking, setChecking] = useState(false);
   const [applying, setApplying] = useState(false);
   const [confirmApply, setConfirmApply] = useState(false);
+
+  /* 数据保留：加载当前配置，编辑后保存；立即清理按钮手动触发一轮 purge */
+  const [retention, setRetention] = useState<RetentionSettings>();
+  const [retentionDraft, setRetentionDraft] = useState<RetentionSettings>();
+  const [savingRetention, setSavingRetention] = useState(false);
+  const [purging, setPurging] = useState(false);
+  useEffect(() => {
+    void api.getRetention().then((settings) => { setRetention(settings); setRetentionDraft(settings); }).catch(() => undefined);
+  }, []);
+  const saveRetention = async () => {
+    if (!retentionDraft) return;
+    setSavingRetention(true);
+    try {
+      const saved = await api.setRetention(retentionDraft);
+      setRetention(saved);
+      setRetentionDraft(saved);
+      notify('success', '保留策略已保存，将按计划自动清理');
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : '保存失败');
+    } finally {
+      setSavingRetention(false);
+    }
+  };
+  const purgeNow = async () => {
+    setPurging(true);
+    try {
+      const result = await api.purgeNow();
+      const total = result.deliveries + result.conversations + result.auditEvents;
+      notify('success', total ? `已清理 ${total} 条过期数据` : '当前没有需要清理的数据');
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : '清理失败');
+    } finally {
+      setPurging(false);
+    }
+  };
 
   const testChannel = async (channel: Channel) => {
     setTestingId(channel.id);
@@ -191,6 +226,39 @@ export function SystemPage({ meta, channels, providers, refresh, notify }: { met
             </div>
           ) : (
             <p className="panel-note" style={{ borderTop: 0 }}>还没有频道。前往「频道」页添加一个通知渠道。</p>
+          )}
+        </section>
+
+        <section className="panel retention-panel">
+          <div className="section-head">
+            <h2>数据保留</h2>
+            <IconButton label="立即清理" icon={purging ? LoaderCircle : Trash2} spin={purging} disabled={purging || savingRetention} onClick={purgeNow} />
+          </div>
+          {retentionDraft ? (
+            <div className="retention-body">
+              <label>投递记录保留天数<span className="optional">0 为永久</span>
+                <input type="number" min={0} max={3650} value={retentionDraft.deliveriesDays} onChange={(event) => setRetentionDraft({ ...retentionDraft, deliveriesDays: Number(event.target.value) })} />
+              </label>
+              <label>会话记录保留天数<span className="optional">0 为永久</span>
+                <input type="number" min={0} max={3650} value={retentionDraft.conversationsDays} onChange={(event) => setRetentionDraft({ ...retentionDraft, conversationsDays: Number(event.target.value) })} />
+              </label>
+              <label>审计日志保留天数<span className="optional">0 为永久</span>
+                <input type="number" min={0} max={3650} value={retentionDraft.auditDays} onChange={(event) => setRetentionDraft({ ...retentionDraft, auditDays: Number(event.target.value) })} />
+              </label>
+              <div className="retention-actions">
+                <Button
+                  variant="primary"
+                  loading={savingRetention}
+                  disabled={savingRetention || JSON.stringify(retentionDraft) === JSON.stringify(retention)}
+                  onClick={saveRetention}
+                >
+                  保存策略
+                </Button>
+              </div>
+              <p className="panel-note">自动清理每日执行（Workers 按 alarm 周期、Vercel 按 cron）；只清理已完结投递与已回复/过期会话。0 天表示永久保留，默认全部永久。</p>
+            </div>
+          ) : (
+            <div className="modal-loading"><LoaderCircle className="spin" /></div>
           )}
         </section>
 

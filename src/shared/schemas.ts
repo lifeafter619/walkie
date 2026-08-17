@@ -11,7 +11,9 @@ export const channelSchema = z.object({
   enabled: z.boolean().optional(),
   config: z.record(z.string(), z.unknown()),
   rateLimitPerMin: z.number().int().min(0).max(600).nullish(),
-  quietHours: quietHoursSchema
+  quietHours: quietHoursSchema,
+  /** 每频道重试上限；0 = 继承全局 MAX_DELIVERY_ATTEMPTS */
+  maxAttempts: z.number().int().min(0).max(10).optional()
 });
 export const routeSchema = z.object({
   name: z.string().min(1).max(100),
@@ -62,3 +64,10 @@ export const keyUpdateSchema = keySchema.omit({ secret: true }).partial().strict
 export const credentialTokenSchema = z.object({
   token: secretSchema.optional()
 });
+
+/** 数据保留天数：0 = 永久保留；上限 10 年防误输入 */
+export const retentionSchema = z.object({
+  deliveriesDays: z.number().int().min(0).max(3650).optional(),
+  conversationsDays: z.number().int().min(0).max(3650).optional(),
+  auditDays: z.number().int().min(0).max(3650).optional()
+}).strict();
