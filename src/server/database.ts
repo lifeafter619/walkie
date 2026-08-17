@@ -11,6 +11,7 @@ import type {
   Destination,
   MasterKeyStatus,
   ProviderId,
+  RetentionSettings,
   Route,
   RouteStrategy,
   Severity
@@ -108,8 +109,7 @@ export class RelayRepository {
         provider TEXT NOT NULL, config_encrypted TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
         last_test_status TEXT NOT NULL DEFAULT 'untested', last_test_error TEXT, last_test_at TEXT,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS routes (
+      );      CREATE TABLE IF NOT EXISTS routes (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
         strategy TEXT NOT NULL, channel_ids TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -155,6 +155,8 @@ export class RelayRepository {
     if (!channelColumns.has('rate_limit_per_min')) await this.db.exec('ALTER TABLE channels ADD COLUMN rate_limit_per_min INTEGER');
     if (!channelColumns.has('quiet_hours')) await this.db.exec('ALTER TABLE channels ADD COLUMN quiet_hours TEXT');
     if (!channelColumns.has('last_test_at')) await this.db.exec('ALTER TABLE channels ADD COLUMN last_test_at TEXT');
+    // 每频道重试上限：0/NULL = 继承全局 MAX_DELIVERY_ATTEMPTS
+    if (!channelColumns.has('max_attempts')) await this.db.exec('ALTER TABLE channels ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 0');
     const conversationColumns = new Set((await this.db.all('PRAGMA table_info(conversations)')).map((row) => String(row.name)));
     if (!conversationColumns.has('options')) await this.db.exec('ALTER TABLE conversations ADD COLUMN options TEXT');
     const keyColumns = new Set((await this.db.all('PRAGMA table_info(api_keys)')).map((row) => String(row.name)));
@@ -193,6 +195,7 @@ export class RelayRepository {
       enabled: Boolean(row.enabled), configKeys: Object.keys(config),
       rateLimitPerMin: row.rate_limit_per_min ? Number(row.rate_limit_per_min) : undefined,
       quietHours: row.quiet_hours ? String(row.quiet_hours) : undefined,
+      maxAttempts: Number(row.max_attempts ?? 0),
       lastTestStatus: row.last_test_status as Channel['lastTestStatus'],
       lastTestError: row.last_test_error ? String(row.last_test_error) : undefined,
       lastTestAt: row.last_test_at ? String(row.last_test_at) : undefined,
@@ -233,20 +236,20 @@ export class RelayRepository {
     }
   }
 
-  async createChannel(input: { name: string; slug: string; provider: ProviderId; enabled?: boolean; config: Record<string, unknown>; rateLimitPerMin?: number | null; quietHours?: string | null }, actor = 'admin'): Promise<Channel> {
+  async createChannel(input: { name: string; slug: string; provider: ProviderId; enabled?: boolean; config: Record<string, unknown>; rateLimitPerMin?: number | null; quietHours?: string | null; maxAttempts?: number }, actor = 'admin'): Promise<Channel> {
     return this.withWriteLock(async () => {
       await this.ensureFreshDek();
       const id = randomUUID();
       const timestamp = now();
       await this.db.run(`INSERT INTO channels
-        (id,name,slug,provider,config_encrypted,enabled,rate_limit_per_min,quiet_hours,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?)`, [id, input.name, input.slug, input.provider, encryptJson(input.config, this.encryptionKey()), input.enabled === false ? 0 : 1, input.rateLimitPerMin || null, input.quietHours || null, timestamp, timestamp]);
+        (id,name,slug,provider,config_encrypted,enabled,rate_limit_per_min,quiet_hours,max_attempts,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`, [id, input.name, input.slug, input.provider, encryptJson(input.config, this.encryptionKey()), input.enabled === false ? 0 : 1, input.rateLimitPerMin || null, input.quietHours || null, input.maxAttempts ?? 0, timestamp, timestamp]);
       await this.audit(actor, 'channel.create', 'channel', id, { provider: input.provider });
       return (await this.getChannel(id))!;
     });
   }
 
-  async updateChannel(id: string, input: Partial<{ name: string; slug: string; provider: ProviderId; enabled: boolean; config: Record<string, unknown>; rateLimitPerMin: number | null; quietHours: string | null }>, actor = 'admin'): Promise<Channel> {
+  async updateChannel(id: string, input: Partial<{ name: string; slug: string; provider: ProviderId; enabled: boolean; config: Record<string, unknown>; rateLimitPerMin: number | null; quietHours: string | null; maxAttempts: number }>, actor = 'admin'): Promise<Channel> {
     return this.withWriteLock(async () => {
       const current = await this.getChannel(id);
       if (!current) throw new Error('Channel not found');
@@ -257,11 +260,12 @@ export class RelayRepository {
         if (value === null || value === '') delete config[key];
         else config[key] = value;
       }
-      await this.db.run(`UPDATE channels SET name=?,slug=?,provider=?,enabled=?,config_encrypted=?,rate_limit_per_min=?,quiet_hours=?,updated_at=? WHERE id=?`, [
+      await this.db.run(`UPDATE channels SET name=?,slug=?,provider=?,enabled=?,config_encrypted=?,rate_limit_per_min=?,quiet_hours=?,max_attempts=?,updated_at=? WHERE id=?`, [
         input.name ?? current.name, input.slug ?? current.slug, input.provider ?? current.provider,
         input.enabled ?? current.enabled ? 1 : 0, encryptJson(config, this.encryptionKey()),
         input.rateLimitPerMin !== undefined ? input.rateLimitPerMin || null : current.rateLimitPerMin ?? null,
         input.quietHours !== undefined ? input.quietHours || null : current.quietHours ?? null,
+        input.maxAttempts !== undefined ? input.maxAttempts : current.maxAttempts,
         now(), current.id
       ]);
       // 禁用频道后，其未完结的 attempt 再也不会被 claim，必须就地失败并推进投递终态，否则投递永久停在 processing
@@ -533,15 +537,26 @@ export class RelayRepository {
     return delivery;
   }
 
-  async listDeliveries(options: { limit?: number; status?: string } = {}): Promise<Delivery[]> {
+  async listDeliveries(options: { limit?: number; status?: string; q?: string; before?: string } = {}): Promise<Delivery[]> {
     const limit = clampLimit(options.limit, 50, 200);
     // 与 getDelivery 同样带出目的地名称，前端列表不用拿 UUID 充数
     const base = `SELECT d.*,COALESCE(c.name,r.name) target_name FROM deliveries d
       LEFT JOIN channels c ON d.target_type='channel' AND c.id=d.target_id
       LEFT JOIN routes r ON d.target_type='route' AND r.id=d.target_id`;
-    const rows = options.status
-      ? await this.db.all(`${base} WHERE d.status=? ORDER BY d.created_at DESC LIMIT ?`, [options.status, limit])
-      : await this.db.all(`${base} ORDER BY d.created_at DESC LIMIT ?`, [limit]);
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (options.status) { clauses.push('d.status=?'); params.push(options.status); }
+    // 服务端搜索：标题/正文/ID 子串匹配（LIKE 对 % _ 转义，避免通配符注入改变语义）
+    if (options.q) {
+      const needle = `%${options.q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+      const like = "(d.title LIKE ? ESCAPE '\\' OR d.body LIKE ? ESCAPE '\\' OR d.id LIKE ? ESCAPE '\\')";
+      clauses.push(like);
+      params.push(needle, needle, needle);
+    }
+    // 游标分页：返回比给定 created_at 更旧的行（ISO 字符串字典序与时间序一致）
+    if (options.before) { clauses.push('d.created_at<?'); params.push(options.before); }
+    const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+    const rows = await this.db.all(`${base}${where} ORDER BY d.created_at DESC LIMIT ?`, [...params, limit]);
     return rows.map((row) => this.deliveryFrom(row));
   }
 
@@ -607,6 +622,16 @@ export class RelayRepository {
     const result = await this.db.run(`UPDATE deliveries SET metadata=json_set(metadata,'$.callbackSent',1)
       WHERE id=? AND status IN ('delivered','partial','failed') AND json_extract(metadata,'$.callbackSent') IS NULL`, [deliveryId]);
     return result.changes > 0;
+  }
+
+  /** 已到达终态但回调还没发出去的投递（callbackUrl 存在且未置 callbackSent）。
+   *  禁用频道/回收滞留尝试等旁路终态不经过 processAttempt，靠这里在每轮 drain 末尾补扫。 */
+  async listPendingCallbacks(): Promise<string[]> {
+    const rows = await this.db.all(`SELECT id FROM deliveries
+      WHERE status IN ('delivered','partial','failed')
+        AND json_extract(metadata,'$.callbackUrl') IS NOT NULL
+        AND json_extract(metadata,'$.callbackSent') IS NULL`);
+    return rows.map((row) => String(row.id));
   }
 
   private conversationFrom(row: Row): Conversation {
@@ -795,8 +820,15 @@ export class RelayRepository {
     });
   }
 
-  async listAuditEvents(limit = 100): Promise<Array<{ id: string; actor: string; action: string; resourceType: string; resourceId?: string; details: Record<string, unknown>; createdAt: string }>> {
-    const rows = await this.db.all('SELECT * FROM audit_events ORDER BY created_at DESC LIMIT ?', [limit]);
+  async listAuditEvents(options: { limit?: number; actor?: string; action?: string } = {}): Promise<Array<{ id: string; actor: string; action: string; resourceType: string; resourceId?: string; details: Record<string, unknown>; createdAt: string }>> {
+    const limit = clampLimit(options.limit, 100, 200);
+    // actor/action 按前缀匹配：审计 actor 是 agent:<keyId> 形态，操作者只记得前缀也能查
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (options.actor) { clauses.push('actor LIKE ?'); params.push(`${options.actor}%`); }
+    if (options.action) { clauses.push('action LIKE ?'); params.push(`${options.action}%`); }
+    const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+    const rows = await this.db.all(`SELECT * FROM audit_events${where} ORDER BY created_at DESC LIMIT ?`, [...params, limit]);
     return rows.map((row) => ({
       id: String(row.id), actor: String(row.actor), action: String(row.action), resourceType: String(row.resource_type),
       resourceId: row.resource_id ? String(row.resource_id) : undefined,
@@ -807,5 +839,51 @@ export class RelayRepository {
   async audit(actor: string, action: string, resourceType: string, resourceId: string | undefined, details: Record<string, unknown>): Promise<void> {
     await this.db.run('INSERT INTO audit_events (id,actor,action,resource_type,resource_id,details,created_at) VALUES (?,?,?,?,?,?,?)',
       [randomUUID(), actor, action, resourceType, resourceId ?? null, JSON.stringify(details), now()]);
+  }
+
+  /* ────────────────────────────────────────────────────────────
+   * 数据保留策略：按表保留天数（0 = 永久保留，默认）
+   * ──────────────────────────────────────────────────────────── */
+
+  async getRetention(): Promise<{ deliveriesDays: number; conversationsDays: number; auditDays: number }> {
+    const row = await this.db.get("SELECT value FROM settings WHERE key='retention'");
+    const parsed = row ? JSON.parse(String(row.value)) as Partial<Record<keyof RetentionSettings, number>> : {};
+    return {
+      deliveriesDays: Number(parsed.deliveriesDays ?? 0),
+      conversationsDays: Number(parsed.conversationsDays ?? 0),
+      auditDays: Number(parsed.auditDays ?? 0)
+    };
+  }
+
+  async setRetention(input: Partial<RetentionSettings>): Promise<RetentionSettings> {
+    const merged = { ...(await this.getRetention()), ...input };
+    await this.db.run("INSERT INTO settings (key,value,updated_at) VALUES ('retention',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+      [JSON.stringify(merged), now()]);
+    await this.audit('admin', 'retention.update', 'settings', 'retention', merged as Record<string, unknown>);
+    return merged;
+  }
+
+  /** 删除超过保留窗口的行；0 天 = 永久保留（跳过）。返回各表清理行数。 */
+  async purgeExpiredData(): Promise<{ deliveries: number; conversations: number; auditEvents: number }> {
+    const retention = await this.getRetention();
+    const cutoff = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+    let deliveries = 0;
+    let conversations = 0;
+    let auditEvents = 0;
+    if (retention.deliveriesDays > 0) {
+      // 保留窗口按 created_at 判定：超窗的 queued/processing 必是死数据（正常重试链分钟级完结）
+      const result = await this.db.run('DELETE FROM deliveries WHERE created_at<?', [cutoff(retention.deliveriesDays)]);
+      deliveries = result.changes;
+    }
+    if (retention.conversationsDays > 0) {
+      // 已回复/已过期的会话才可清理；pending 的留着等 Agent 轮询结果
+      const result = await this.db.run(`DELETE FROM conversations WHERE created_at<? AND (replied_at IS NOT NULL OR expires_at<=?)`, [cutoff(retention.conversationsDays), now()]);
+      conversations = result.changes;
+    }
+    if (retention.auditDays > 0) {
+      const result = await this.db.run('DELETE FROM audit_events WHERE created_at<?', [cutoff(retention.auditDays)]);
+      auditEvents = result.changes;
+    }
+    return { deliveries, conversations, auditEvents };
   }
 }

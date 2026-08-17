@@ -87,6 +87,28 @@ describe('ask_user bidirectional flow', () => {
     expect(replied.body).toMatchObject({ status: 'replied', reply: 'production' });
   });
 
+  it('honors X-Forwarded-* behind a reverse proxy when publicUrl is unset', async () => {
+    // 不设 publicUrl 时回复链接取自请求 origin；反代场景必须读 X-Forwarded-Proto/Host，
+    // 否则生成 http://内网地址，ask_user 的回复链接打不开
+    const config = {
+      port: 4310, host: '127.0.0.1', dataDir: '.', databasePath: ':memory:', adminToken: undefined,
+      masterKey: randomBytes(32), allowPrivateWebhooks: true, allowInsecureHttp: false,
+      deliveryWorkers: 1, maxSendsPerMin: 0, maxDeliveryAttempts: 1, retryBaseMs: 1, isProduction: false,
+      publicUrl: undefined
+    } as AppConfig;
+    const repository = await createNodeRepository(':memory:', config.masterKey); repositories.push(repository);
+    const app = createApp({ config, repository, notifications: new NotificationService(repository), dispatcher: new ProviderDispatcher(config, async () => new Response('{}', { status: 200 })), worker: new DeliveryWorker(repository, new ProviderDispatcher(config, async () => new Response('{}', { status: 200 })), config) });
+    const channel = await repository.createChannel({ name: 'Hook', slug: 'hook-fwd', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{}' } });
+    const { secret } = await repository.createKey({ name: 'agent', destinationIds: [channel.id] });
+    // 反代透传真实域名的 Host 头（Express 原生读取），X-Forwarded-Proto 负责还原协议；
+    // trust proxy 未启用时 req.protocol 恒为 http，会生成打不开的 http:// 链接
+    const asked = await request(app).post('/api/v1/ask')
+      .set('Authorization', `Bearer ${secret}`)
+      .set('X-Forwarded-Proto', 'https')
+      .send({ destination: 'hook-fwd', question: 'Q' }).expect(201);
+    expect(asked.body.replyUrl).toMatch(/^https:\/\/127\.0\.0\.1:\d+\/reply\//);
+  });
+
   it('exposes ask_user and check_reply MCP tools', async () => {
     const { app, secret } = await setup();
     const tools = await request(app).post('/mcp')

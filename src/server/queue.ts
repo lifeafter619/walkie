@@ -144,6 +144,11 @@ export class DeliveryWorker {
   private async drain(): Promise<number> {
     const attempts = await this.repository.claimDueAttempts(this.config.deliveryWorkers, this.config.maxDeliveryAttempts);
     await Promise.all(attempts.map((attempt) => this.processAttempt(attempt)));
+    // 旁路终态（禁用频道、滞留回收等）不经过 processAttempt，这里补扫漏发的终态回调；
+    // notifyCallback 内部吞错，不会让 drain 整体失败
+    for (const deliveryId of await this.repository.listPendingCallbacks()) {
+      await this.notifyCallback(deliveryId);
+    }
     return attempts.length;
   }
 
@@ -156,6 +161,14 @@ export class DeliveryWorker {
         await this.repository.completeAttempt(attempt.id, { success: false, error: '投递或频道已不存在' });
         return;
       }
+      // 频道级重试上限：0 = 继承全局 MAX_DELIVERY_ATTEMPTS。
+      // 超限仍被 claim 只会发生在滞留回收场景（reclaim 按全局值判可重试），直接终判不再发送
+      const maxAttempts = channel.maxAttempts || this.config.maxDeliveryAttempts;
+      if (attempt.attemptCount > maxAttempts) {
+        await this.repository.completeAttempt(attempt.id, { success: false, error: '已达频道最大尝试次数' });
+        await this.notifyCallback(delivery.id);
+        return;
+      }
       let outcome: 'sent' | undefined;
       try {
         const quiet = quietUntil(channel.quietHours, delivery.severity);
@@ -165,7 +178,7 @@ export class DeliveryWorker {
         }
         if (this.throttled(channel)) {
           // 持续被限流时消耗尝试次数（consumeAttempt=true），避免无限 defer 循环；达到上限则失败
-          if (attempt.attemptCount >= this.config.maxDeliveryAttempts) {
+          if (attempt.attemptCount >= maxAttempts) {
             await this.repository.completeAttempt(attempt.id, { success: false, error: '频道持续限流，已达最大尝试次数' });
             await this.notifyCallback(delivery.id);
           } else {
@@ -186,7 +199,7 @@ export class DeliveryWorker {
         outcome = 'sent';
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const retryAt = attempt.attemptCount < this.config.maxDeliveryAttempts
+        const retryAt = attempt.attemptCount < maxAttempts
           ? new Date(Date.now() + this.config.retryBaseMs * 2 ** (attempt.attemptCount - 1)).toISOString()
           : undefined;
         const responseCode = /^HTTP (\d+)/.exec(message)?.[1];

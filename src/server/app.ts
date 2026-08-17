@@ -7,7 +7,7 @@ import path from 'node:path';
 import { ZodError } from 'zod';
 import type { ApiKey, ProviderId } from '../shared/types.js';
 import { VERSION } from '../shared/version.js';
-import { askSchema, channelSchema, credentialTokenSchema, keySchema, keyUpdateSchema, notificationSchema, routeSchema } from '../shared/schemas.js';
+import { askSchema, channelSchema, credentialTokenSchema, keySchema, keyUpdateSchema, notificationSchema, retentionSchema, routeSchema } from '../shared/schemas.js';
 import type { AppConfig } from './config.js';
 import { generateAdminToken, safeSecretEqual, safeTokenEqual } from './crypto.js';
 import type { RelayRepository } from './database.js';
@@ -43,6 +43,9 @@ function bearer(req: Request): string | undefined {
 export function createApp(deps: AppDependencies) {
   const { config, repository, notifications, dispatcher, worker } = deps;
   const app = createMcpExpressApp({ host: config.host, jsonLimit: '256kb' });
+  // 信任第一跳代理的 X-Forwarded-Proto/Host：反代 TLS 终止后 req.protocol 才能还原为 https，
+  // 未设 PUBLIC_URL 时回复链接/元数据才不会生成 http://内网地址（req.ip 判定也只信任这一跳）
+  app.set('trust proxy', 1);
   // createMcpExpressApp 内部已注册 express.json（默认 100kb），此处传入 jsonLimit 统一为 256kb；
   // 不能再重复注册第二个 json 解析器，否则实际生效的仍是最先注册的 100kb 限制。
   app.use(express.urlencoded({ extended: false, limit: '256kb' }));
@@ -166,14 +169,25 @@ export function createApp(deps: AppDependencies) {
   admin.post('/keys/:id/restore', asyncRoute(async (req, res) => { await repository.restoreKey(String(req.params.id)); res.json({ success: true }); }));
   admin.delete('/keys/:id', asyncRoute(async (req, res) => { await repository.deleteKey(String(req.params.id)); res.status(204).end(); }));
 
-  admin.get('/credentials', asyncRoute(async (_req, res) => res.json(await repository.getCredentialStatus(Boolean(config.adminToken)))));
-  admin.post('/credentials/admin-token', asyncRoute(async (req, res) => {
+  admin.get('/credentials', asyncRoute(async (_req, res) => res.json(await repository.getCredentialStatus(Boolean(config.adminToken)))));  admin.post('/credentials/admin-token', asyncRoute(async (req, res) => {
     const input = credentialTokenSchema.parse(req.body);
     const token = input.token ?? generateAdminToken();
     await repository.setAdminToken(token);
     res.status(201).json({ token });
   }));
   admin.post('/credentials/master-key/rotate', asyncRoute(async (_req, res) => res.json(await repository.rotateMasterKey())));
+
+  admin.get('/audit', asyncRoute(async (req, res) => res.json({
+    events: await repository.listAuditEvents({
+      limit: Number(req.query.limit ?? 100),
+      actor: typeof req.query.actor === 'string' && req.query.actor ? req.query.actor : undefined,
+      action: typeof req.query.action === 'string' && req.query.action ? req.query.action : undefined
+    })
+  })));
+
+  admin.get('/retention', asyncRoute(async (_req, res) => res.json(await repository.getRetention())));
+  admin.put('/retention', asyncRoute(async (req, res) => res.json(await repository.setRetention(retentionSchema.parse(req.body)))));
+  admin.post('/retention/purge', asyncRoute(async (_req, res) => res.json(await repository.purgeExpiredData())));
 
   admin.get('/update/check', asyncRoute(async (_req, res) => res.json(await checkUpdate(process.env.UPDATE_REPO))));
   admin.post('/update/apply', asyncRoute(async (_req, res) => {
@@ -187,7 +201,12 @@ export function createApp(deps: AppDependencies) {
     }
   }));
 
-  admin.get('/deliveries', asyncRoute(async (req, res) => res.json({ deliveries: await repository.listDeliveries({ limit: Number(req.query.limit ?? 100), status: typeof req.query.status === 'string' ? req.query.status : undefined }) })));
+  admin.get('/deliveries', asyncRoute(async (req, res) => res.json({ deliveries: await repository.listDeliveries({
+    limit: Number(req.query.limit ?? 100),
+    status: typeof req.query.status === 'string' ? req.query.status : undefined,
+    q: typeof req.query.q === 'string' && req.query.q ? req.query.q : undefined,
+    before: typeof req.query.before === 'string' && req.query.before ? req.query.before : undefined
+  }) })));
   admin.get('/deliveries/:id', asyncRoute(async (req, res) => {
     const delivery = await repository.getDelivery(String(req.params.id));
     if (!delivery) return res.status(404).json({ error: '投递不存在' });
@@ -195,7 +214,8 @@ export function createApp(deps: AppDependencies) {
   }));
   admin.post('/send', asyncRoute(async (req, res) => {
     const delivery = await notifications.send(notificationSchema.parse(req.body), 'admin');
-    void worker.drainOnce();
+    // 浮动 drain 必须挂 catch：DB 瞬时错误产生的拒绝若无人处理会击穿进程（Node≥15 默认 throw）
+    void worker.drainOnce().catch(() => undefined);
     res.status(202).json(delivery);
   }));
   admin.post('/queue/drain', asyncRoute(async (_req, res) => res.json({ processed: await worker.drainOnce() })));
@@ -211,7 +231,7 @@ export function createApp(deps: AppDependencies) {
 
   app.post('/api/v1/notify', requireAgent, asyncRoute(async (req, res) => {
     const delivery = await notifications.send(notificationSchema.parse(req.body), `agent:${req.agentKey!.id}`, req.agentKey);
-    void worker.drainOnce();
+    void worker.drainOnce().catch(() => undefined);
     res.status(202).json({ deliveryId: delivery.id, status: delivery.status, createdAt: delivery.createdAt });
   }));
   app.get('/api/v1/deliveries/:id', requireAgent, asyncRoute(async (req, res) => res.json(await notifications.getDelivery(String(req.params.id), req.agentKey))));
@@ -269,7 +289,7 @@ export function createApp(deps: AppDependencies) {
         short: typeof params.short === 'string' ? params.short.slice(0, 200) : undefined,
         metadata: { via: 'serverchan-compat' }
       }, `agent:${apiKey.id}`, apiKey);
-      void worker.drainOnce();
+      void worker.drainOnce().catch(() => undefined);
       res.json({ code: 0, message: '', data: { pushid: delivery.id, readkey: '', error: 'SUCCESS', errno: 0 } });
     } catch (error) {
       res.status(400).json({ code: 40004, message: error instanceof Error ? error.message : '发送失败', data: {} });

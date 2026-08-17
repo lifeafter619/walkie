@@ -32,6 +32,22 @@ describe('delivery callback and global rate limit', () => {
     await repository.close();
   });
 
+  it('fires the callback when a channel is disabled before drain (bypass finalization path)', async () => {
+    const repository = await createNodeRepository(':memory:', randomBytes(32));
+    const channel = await repository.createChannel({ name: 'Hook', slug: 'hook-d', provider: 'webhook', config: { url: 'https://hooks.example.com/d', method: 'POST', bodyTemplate: '{}' } });
+    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
+    const worker = new DeliveryWorker(repository, new ProviderDispatcher(config, fetcher), { deliveryWorkers: 2, maxDeliveryAttempts: 1, retryBaseMs: 1 });
+    const delivery = await new NotificationService(repository).send({ destination: channel.id, title: 'x', body: 'y', callbackUrl: 'https://agent.example.com/cb' }, 'test');
+    // 禁用频道让投递不经 processAttempt 直达 failed：没有兜底扫描的话 callbackUrl 永远不会发出
+    await repository.updateChannel(channel.id, { enabled: false });
+    await worker.drainOnce();
+    await worker.drainOnce(); // 再跑一轮验证 claimCallback 原子去重，不会重发
+    const calls = vi.mocked(fetcher).mock.calls.filter((call) => String(call[0]).includes('agent.example.com'));
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(String(calls[0][1]?.body))).toMatchObject({ deliveryId: delivery.id, status: 'failed' });
+    await repository.close();
+  });
+
   it('deduplicates repeated channel ids in a route', async () => {
     const repository = await createNodeRepository(':memory:', randomBytes(32));
     const channel = await repository.createChannel({ name: 'C', slug: 'dup-c', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{}' } });

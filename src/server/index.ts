@@ -10,13 +10,18 @@ const config = loadConfig();
 const repository = await createNodeRepository(config.databasePath, config.masterKey);
 const dispatcher = new ProviderDispatcher(config);
 let workerRef: DeliveryWorker;
-const notifications = new NotificationService(repository, () => void workerRef.drainOnce());
+const notifications = new NotificationService(repository, () => void workerRef.drainOnce().catch(() => undefined));
 const worker = new DeliveryWorker(repository, dispatcher, config);
 workerRef = worker;
 const app = createApp({ config, repository, notifications, dispatcher, worker });
 const server = createServer(app);
 
 worker.start();
+// 数据保留清理：每日一次（幂等；retention 全 0 时 purgeExpiredData 零开销直接返回）
+setInterval(() => {
+  void repository.purgeExpiredData().catch((error) =>
+    console.error(JSON.stringify({ event: 'retention.purge.failed', message: error instanceof Error ? error.message : String(error) })));
+}, 24 * 60 * 60 * 1000).unref();
 server.listen(config.port, config.host, () => {
   console.log(`Walkie listening on http://${config.host}:${config.port}`);
   if (!config.adminToken) console.log('Local development mode: admin API does not require a token.');
