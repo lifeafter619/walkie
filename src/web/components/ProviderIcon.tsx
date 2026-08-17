@@ -11,20 +11,44 @@ const SLUG_OVERRIDES: Partial<Record<ProviderId, string>> = {
   'synology-chat': 'synology'
 };
 
-const assetModules = import.meta.glob('../assets/providers/*.svg', {
-  eager: true,
-  query: '?url',
-  import: 'default'
-}) as Record<string, string>;
+const assetModules = {
+  ...import.meta.glob('../assets/providers/*.svg', { eager: true, query: '?url', import: 'default' }),
+  ...import.meta.glob('../assets/providers/*.png', { eager: true, query: '?url', import: 'default' }),
+  ...import.meta.glob('../assets/providers/*.ico', { eager: true, query: '?url', import: 'default' })
+} as Record<string, string>;
 
 const ICON_URL: Partial<Record<ProviderId, string>> = {};
 for (const [path, url] of Object.entries(assetModules)) {
-  const slug = path.split('/').pop()!.replace('.svg', '');
+  const slug = path.split('/').pop()!.replace(/\.(svg|png|ico)$/, '');
   ICON_URL[slug as ProviderId] = url;
 }
 
 /** 各渠道的品牌主色，用于触发器边框 / 装饰等 CSS 变量 --brand */
 const BRAND_HEX: Record<ProviderId, string> = {
+  join: '00AEEF',
+  ifttt: '000000',
+  novu: '4700FF',
+  knock: '6C5CE7',
+  courier: '7C3AED',
+  'honor-push': '00A6A6',
+  'oppo-push': '006B3C',
+  'vivo-push': '415FFF',
+  'meizu-push': '00C3F5',
+  pushy: '4CAF50',
+  pushsafer: 'FF6600',
+  simplepush: '2563EB',
+  'huawei-push': 'CF0A2C',
+  'xiaomi-push': 'FF6900',
+  jpush: '3B82F6',
+  getui: '1677FF',
+  'aws-sns': 'FF9900',
+  'pusher-beams': '300D4F',
+  pushpad: '4A90E2',
+  'vonage-sms': '000000',
+  'plivo-sms': '00AEEF',
+  'telnyx-sms': '00B3B8',
+  'bird-sms': 'FF5A5F',
+  'infobip-sms': 'FF4F12',
   whatsapp: '25D366',
   signal: '3A76F0',
   'wecom-app': '07C160',

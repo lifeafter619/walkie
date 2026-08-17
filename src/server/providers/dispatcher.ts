@@ -24,9 +24,10 @@ const color: Record<Severity, string> = { info: '#267365', success: '#178458', w
 const BODY_LIMITS: Partial<Record<ProviderId, number>> = {
   telegram: 3600, wecom: 1200, dingtalk: 16000, discord: 3600,
   'google-chat': 3600, qmsg: 900, twilio: 1400, onebot: 3500, line: 4500,
-  whatsapp: 3900, 'wecom-app': 1800, kook: 3500, signal: 3500, 'qq-bot': 3500
+  whatsapp: 3900, 'wecom-app': 1800, kook: 3500, signal: 3500, 'qq-bot': 3500,
+  'oppo-push': 200, 'vivo-push': 100, 'meizu-push': 100, pushsafer: 1000
 };
-const BODY_BYTE_LIMITS: Partial<Record<ProviderId, number>> = { wecom: 2600, webex: 6000, ntfy: 4096, pushover: 900 };
+const BODY_BYTE_LIMITS: Partial<Record<ProviderId, number>> = { wecom: 2600, webex: 6000, ntfy: 4096, pushover: 900, pushy: 3000 };
 
 /** 按上限切分正文，优先在换行处断开 */
 export function splitBody(body: string, limit: number): string[] {
@@ -77,6 +78,7 @@ function renderTemplate(template: string, message: ProviderMessage): string {
 
 const base64url = (value: string) => Buffer.from(value).toString('base64url');
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
+const md5 = (value: string) => createHash('md5').update(value).digest('hex');
 const hmac = (algorithm: string, key: string | Buffer, value: string, encoding?: 'hex' | 'base64') => {
   const digest = createHmac(algorithm, key).update(value);
   return encoding ? digest.digest(encoding) : digest.digest();
@@ -120,6 +122,54 @@ export function buildTencentSmsRequest(config: Record<string, unknown>, message:
   const signature = hmac('sha256', secretSigning, stringToSign, 'hex') as string;
   const authorization = `TC3-HMAC-SHA256 Credential=${string(config, 'secretId')}/${scope}, SignedHeaders=content-type;host, Signature=${signature}`;
   return { url: `https://${host}/`, init: { method: 'POST', headers: { Authorization: authorization, 'Content-Type': 'application/json; charset=utf-8', 'X-TC-Action': 'SendSms', 'X-TC-Version': '2021-01-11', 'X-TC-Timestamp': String(timestamp), 'X-TC-Region': string(config, 'region') || 'ap-guangzhou' }, body: payload } };
+}
+
+export function buildAwsSnsRequest(config: Record<string, unknown>, message: ProviderMessage, date = new Date()): { url: string; init: RequestInit } {
+  const region = string(config, 'region') || 'us-east-1';
+  const host = `sns.${region}.${region.startsWith('cn-') ? 'amazonaws.com.cn' : 'amazonaws.com'}`;
+  const amzDate = date.toISOString().replace(/[-:]|\.\d{3}/g, '').replace(/Z$/, 'Z');
+  const shortDate = amzDate.slice(0, 8);
+  const scope = `${shortDate}/${region}/sns/aws4_request`;
+  const params = new URLSearchParams({ Action: 'Publish', Version: '2010-03-31', Message: text(message) });
+  const targetType = string(config, 'targetType') || 'topicArn';
+  params.set(targetType === 'targetArn' ? 'TargetArn' : targetType === 'phoneNumber' ? 'PhoneNumber' : 'TopicArn', string(config, 'target'));
+  if (targetType === 'phoneNumber') {
+    params.set('MessageAttributes.entry.1.Name', 'AWS.SNS.SMS.SMSType');
+    params.set('MessageAttributes.entry.1.Value.DataType', 'String');
+    params.set('MessageAttributes.entry.1.Value.StringValue', string(config, 'smsType') || 'Transactional');
+    if (config.senderId) {
+      params.set('MessageAttributes.entry.2.Name', 'AWS.SNS.SMS.SenderID');
+      params.set('MessageAttributes.entry.2.Value.DataType', 'String');
+      params.set('MessageAttributes.entry.2.Value.StringValue', string(config, 'senderId'));
+    }
+  }
+  const payload = params.toString();
+  const contentType = 'application/x-www-form-urlencoded; charset=utf-8';
+  const payloadHash = sha256(payload);
+  const sessionToken = string(config, 'sessionToken');
+  const canonicalHeaders = [
+    `content-type:${contentType}`,
+    `host:${host}`,
+    `x-amz-date:${amzDate}`,
+    ...(sessionToken ? [`x-amz-security-token:${sessionToken}`] : [])
+  ].join('\n') + '\n';
+  const signedHeaders = ['content-type', 'host', 'x-amz-date', ...(sessionToken ? ['x-amz-security-token'] : [])].join(';');
+  const canonicalRequest = `POST\n/\n\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
+  const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${sha256(canonicalRequest)}`;
+  const dateKey = hmac('sha256', `AWS4${string(config, 'secretAccessKey')}`, shortDate) as Buffer;
+  const regionKey = hmac('sha256', dateKey, region) as Buffer;
+  const serviceKey = hmac('sha256', regionKey, 'sns') as Buffer;
+  const signingKey = hmac('sha256', serviceKey, 'aws4_request') as Buffer;
+  const signature = hmac('sha256', signingKey, stringToSign, 'hex') as string;
+  const authorization = `AWS4-HMAC-SHA256 Credential=${string(config, 'accessKeyId')}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+  return {
+    url: `https://${host}/`,
+    init: {
+      method: 'POST',
+      headers: { 'Content-Type': contentType, 'X-Amz-Date': amzDate, ...(sessionToken ? { 'X-Amz-Security-Token': sessionToken } : {}), Authorization: authorization },
+      body: payload
+    }
+  };
 }
 
 export class ProviderDispatcher {
@@ -195,6 +245,66 @@ export class ProviderDispatcher {
     });
   }
 
+  private async huaweiToken(config: Record<string, unknown>): Promise<string> {
+    const key = `huawei:${sha256(`${string(config, 'appId')}:${string(config, 'appSecret')}`)}`;
+    return this.cachedToken(key, async () => {
+      const result = await safeFetch('https://oauth-login.cloud.huawei.com/oauth2/v3/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'client_credentials', client_id: string(config, 'appId'), client_secret: string(config, 'appSecret') }) }, this.appConfig, this.fetcher, this.resolveHost);
+      const body = JSON.parse(result.body) as Record<string, unknown>;
+      if (!body.access_token) throw new Error(String(body.error_description ?? body.error ?? '华为 Push Kit 获取 access token 失败'));
+      return { value: String(body.access_token), expiresIn: Number(body.expires_in ?? 3600) };
+    });
+  }
+
+  private async honorToken(config: Record<string, unknown>): Promise<string> {
+    const key = `honor:${sha256(`${string(config, 'clientId')}:${string(config, 'clientSecret')}`)}`;
+    return this.cachedToken(key, async () => {
+      const result = await safeFetch('https://iam.developer.honor.com/auth/realms/developer/protocol/openid-connect/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'client_credentials', client_id: string(config, 'clientId'), client_secret: string(config, 'clientSecret') }) }, this.appConfig, this.fetcher, this.resolveHost);
+      const body = JSON.parse(result.body) as Record<string, unknown>;
+      if (!body.access_token) throw new Error(String(body.error_description ?? body.error ?? 'HONOR Push 获取 access token 失败'));
+      return { value: String(body.access_token), expiresIn: Number(body.expires_in ?? 3600) };
+    });
+  }
+
+  private async oppoToken(config: Record<string, unknown>): Promise<string> {
+    const key = `oppo:${sha256(`${string(config, 'appKey')}:${string(config, 'masterSecret')}`)}`;
+    return this.cachedToken(key, async () => {
+      const timestamp = String(Date.now());
+      const sign = sha256(`${string(config, 'appKey')}${timestamp}${string(config, 'masterSecret')}`);
+      const result = await safeFetch('https://api.push.oppomobile.com/server/v1/auth', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ app_key: string(config, 'appKey'), sign, timestamp }) }, this.appConfig, this.fetcher, this.resolveHost);
+      const body = JSON.parse(result.body) as Record<string, unknown>;
+      if (Number(body.code) !== 0) throw new Error(String(body.message ?? `OPPO Push 鉴权失败（${body.code}）`));
+      const data = typeof body.data === 'string' ? JSON.parse(body.data) as Record<string, unknown> : body.data as Record<string, unknown> | undefined;
+      return { value: String(data?.auth_token ?? ''), expiresIn: 86_400 };
+    });
+  }
+
+  private async vivoToken(config: Record<string, unknown>): Promise<string> {
+    const key = `vivo:${sha256(`${string(config, 'appId')}:${string(config, 'appKey')}:${string(config, 'appSecret')}`)}`;
+    return this.cachedToken(key, async () => {
+      const timestamp = Date.now();
+      const appId = Number(string(config, 'appId')) || string(config, 'appId');
+      const sign = md5(`${appId}${string(config, 'appKey')}${timestamp}${string(config, 'appSecret')}`.trim());
+      const result = await safeFetch('https://api-push.vivo.com.cn/message/auth', this.json({ appId, appKey: string(config, 'appKey'), timestamp, sign }), this.appConfig, this.fetcher, this.resolveHost);
+      const body = JSON.parse(result.body) as Record<string, unknown>;
+      if (Number(body.result) !== 0 || !body.authToken) throw new Error(String(body.desc ?? `vivo Push 鉴权失败（${body.result}）`));
+      return { value: String(body.authToken), expiresIn: 86_400 };
+    });
+  }
+
+  private async getuiToken(config: Record<string, unknown>): Promise<string> {
+    const key = `getui:${sha256(`${string(config, 'appId')}:${string(config, 'appKey')}:${string(config, 'masterSecret')}`)}`;
+    return this.cachedToken(key, async () => {
+      const timestamp = String(Date.now());
+      const sign = sha256(`${string(config, 'appKey')}${timestamp}${string(config, 'masterSecret')}`);
+      const result = await safeFetch(`https://restapi.getui.com/v2/${encodeURIComponent(string(config, 'appId'))}/auth`, this.json({ sign, timestamp, appkey: string(config, 'appKey') }), this.appConfig, this.fetcher, this.resolveHost);
+      const body = JSON.parse(result.body) as Record<string, unknown>;
+      if (Number(body.code) !== 0) throw new Error(String(body.msg ?? `个推鉴权失败（${body.code}）`));
+      const data = body.data as Record<string, unknown> | undefined;
+      const expiresAt = Number(data?.expire_time ?? 0);
+      return { value: String(data?.token ?? ''), expiresIn: expiresAt > Date.now() ? (expiresAt - Date.now()) / 1000 : 3600 };
+    });
+  }
+
   private async fcmToken(config: Record<string, unknown>): Promise<{ value: string; projectId: string }> {
     const account = JSON.parse(string(config, 'serviceAccountJson')) as Record<string, unknown>;
     const clientEmail = String(account.client_email ?? '');
@@ -215,6 +325,131 @@ export class ProviderDispatcher {
   private async buildRequest(provider: ProviderId, config: Record<string, unknown>, message: ProviderMessage): Promise<{ url: string; init: RequestInit }> {
     const bodyText = text(message);
     switch (provider) {
+      case 'join': {
+        const endpoint = new URL('https://joinjoaomgcd.appspot.com/_ah/api/messaging/v1/sendPush');
+        endpoint.search = new URLSearchParams({ apikey: string(config, 'apiKey'), deviceIds: lines(config.deviceIds).join(','), title: message.title, text: message.body, ...(message.url ? { url: message.url } : {}), priority: String(message.severity === 'critical' ? 2 : message.severity === 'warning' ? 1 : 0) }).toString();
+        return { url: endpoint.toString(), init: { method: 'POST' } };
+      }
+      case 'ifttt': {
+        const endpoint = `https://maker.ifttt.com/trigger/${encodeURIComponent(string(config, 'event'))}/with/key/${encodeURIComponent(string(config, 'key'))}`;
+        return { url: endpoint, init: this.json({ value1: message.title, value2: message.body, value3: message.url ?? message.severity }) };
+      }
+      case 'novu': {
+        const subscribers = lines(config.subscriberIds);
+        const payload = { ...message.metadata, title: message.title, body: message.body, severity: message.severity, ...(message.url ? { url: message.url } : {}) };
+        return { url: `${(string(config, 'server') || 'https://api.novu.co').replace(/\/$/, '')}/v1/events/trigger`, init: this.json({ name: string(config, 'workflowId'), to: subscribers.length === 1 ? subscribers[0] : subscribers, payload }, { Authorization: `ApiKey ${string(config, 'apiKey')}` }) };
+      }
+      case 'knock': {
+        const payload = { ...message.metadata, title: message.title, body: message.body, severity: message.severity, ...(message.url ? { url: message.url } : {}) };
+        return { url: `https://api.knock.app/v1/workflows/${encodeURIComponent(string(config, 'workflowKey'))}/trigger`, init: this.json({ recipients: lines(config.recipients), data: payload }, { Authorization: `Bearer ${string(config, 'apiKey')}` }) };
+      }
+      case 'courier': {
+        const recipientType = string(config, 'recipientType') || 'user_id';
+        const data = { ...message.metadata, title: message.title, body: message.body, severity: message.severity, ...(message.url ? { url: message.url } : {}) };
+        return { url: 'https://api.courier.com/send', init: this.json({ message: { to: { [recipientType]: string(config, 'recipient') }, template: string(config, 'templateId'), data } }, { Authorization: `Bearer ${string(config, 'apiKey')}` }) };
+      }
+      case 'honor-push': {
+        const token = await this.honorToken(config);
+        const notification = { title: message.title, body: message.body };
+        const androidNotification = { ...notification, ...(message.url ? { clickAction: { type: 2, url: message.url } } : {}) };
+        return { url: `https://push-api.cloud.hihonor.com/api/v1/${encodeURIComponent(string(config, 'appId'))}/sendMessage`, init: this.json({ notification, android: { notification: androidNotification }, token: lines(config.targets) }, { Authorization: `Bearer ${token}` }) };
+      }
+      case 'oppo-push': {
+        const token = await this.oppoToken(config);
+        const targetType = string(config, 'targetType') === 'alias' ? 5 : 2;
+        const notification = { title: message.title.slice(0, 50), content: message.body.slice(0, 200), ...(message.url ? { click_action_type: 2, click_action_url: message.url } : {}) };
+        const messages = lines(config.targets).map((target) => ({ target_type: targetType, target_value: target, notification }));
+        return { url: 'https://api.push.oppomobile.com/server/v1/message/notification/unicast_batch', init: { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', auth_token: token }, body: new URLSearchParams({ messages: JSON.stringify(messages) }) } };
+      }
+      case 'vivo-push': {
+        const token = await this.vivoToken(config);
+        const targetKey = string(config, 'targetType') === 'alias' ? 'alias' : 'regId';
+        const payload = { [targetKey]: string(config, 'target'), notifyType: 4, title: message.title.slice(0, 40), content: message.body.slice(0, 100), timeToLive: 86_400, skipType: message.url ? 2 : 1, ...(message.url ? { skipContent: message.url } : {}), networkType: -1, requestId: randomUUID().replace(/-/g, '').slice(0, 32) };
+        return { url: 'https://api-push.vivo.com.cn/message/send', init: this.json(payload, { authToken: token }) };
+      }
+      case 'meizu-push': {
+        const targetKey = string(config, 'targetType') === 'alias' ? 'alias' : 'pushIds';
+        const targets = lines(config.targets).join(',');
+        const messageJson = JSON.stringify({ noticeBarInfo: { noticeMsgType: 0, noticeBarType: 0, title: message.title.slice(0, 32), content: message.body.slice(0, 100) }, clickTypeInfo: message.url ? { clickType: 2, url: message.url } : { clickType: 0 }, pushTimeInfo: { offLine: 1, validTime: 24 } });
+        const params: Record<string, string> = { appId: string(config, 'appId'), [targetKey]: targets, messageJson };
+        const canonical = Object.entries(params).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}=${value}`).join('') + string(config, 'appSecret');
+        return { url: `https://server-api-push.meizu.com/garcia/api/server/push/varnished/${string(config, 'targetType') === 'alias' ? 'pushByAlias' : 'pushByPushId'}`, init: { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8' }, body: new URLSearchParams({ ...params, sign: md5(canonical) }) } };
+      }
+      case 'pushy': {
+        const targets = lines(config.targets);
+        const notification = { title: message.title, body: message.body };
+        return { url: `https://api.pushy.me/push?api_key=${encodeURIComponent(string(config, 'apiKey'))}`, init: this.json({ to: targets.length === 1 ? targets[0] : targets, data: { title: message.title, message: message.body, ...(message.url ? { url: message.url } : {}) }, notification }) };
+      }
+      case 'pushsafer': {
+        const form = new URLSearchParams({ k: string(config, 'privateKey'), t: message.title, m: bodyText });
+        if (config.device) form.set('d', string(config, 'device'));
+        if (message.url) { form.set('u', message.url); form.set('ut', '查看详情'); }
+        return { url: 'https://www.pushsafer.com/api', init: { method: 'POST', body: form } };
+      }
+      case 'simplepush':
+        return { url: 'https://simplepu.sh/', init: this.json({ key: string(config, 'key'), title: message.title, msg: bodyText, ...(config.event ? { event: string(config, 'event') } : {}) }) };
+      case 'huawei-push': {
+        const token = await this.huaweiToken(config);
+        const targetType = string(config, 'targetType') || 'token';
+        const targets = lines(config.targets);
+        const target = targetType === 'condition' ? { condition: targets[0] } : { [targetType]: targets };
+        const notification = { title: message.title, body: message.body, ...(config.category ? { category: string(config, 'category') } : {}), ...(message.url ? { clickAction: { type: 2, url: message.url } } : {}) };
+        return { url: `https://push-api.cloud.huawei.com/v1/${encodeURIComponent(string(config, 'appId'))}/messages:send`, init: this.json({ message: { notification, android: { notification }, ...target } }, { Authorization: `Bearer ${token}` }) };
+      }
+      case 'xiaomi-push': {
+        const targetType = string(config, 'targetType') || 'regid';
+        const params: Record<string, string> = { restricted_package_name: string(config, 'packageName'), title: message.title.slice(0, 50), description: message.body.slice(0, 128), payload: bodyText, notify_type: '-1' };
+        if (targetType !== 'all') params[targetType === 'regid' ? 'registration_id' : targetType] = lines(config.target).join(',');
+        if (message.url) { params['extra.notify_effect'] = '3'; params['extra.web_uri'] = message.url; }
+        return { url: `https://api.xmpush.xiaomi.com/v3/message/${targetType}`, init: { method: 'POST', headers: { Authorization: `key=${string(config, 'appSecret')}` }, body: new URLSearchParams(params) } };
+      }
+      case 'jpush': {
+        const platform = string(config, 'platform') || 'all';
+        const targetType = string(config, 'targetType') || 'registration_id';
+        const targets = lines(config.targets);
+        const audience = targetType === 'all' ? 'all' : { [targetType]: targets };
+        const notification = platform === 'android'
+          ? { alert: message.body, android: { alert: message.body, title: message.title } }
+          : platform === 'ios'
+            ? { alert: { title: message.title, body: message.body }, ios: { alert: { title: message.title, body: message.body }, sound: 'default' } }
+            : { alert: message.body, android: { alert: message.body, title: message.title }, ios: { alert: { title: message.title, body: message.body }, sound: 'default' } };
+        return { url: 'https://api.jpush.cn/v3/push', init: this.json({ platform: platform === 'all' ? 'all' : [platform], audience, notification, options: { apns_production: config.apnsProduction !== false } }, { Authorization: `Basic ${Buffer.from(`${string(config, 'appKey')}:${string(config, 'masterSecret')}`).toString('base64')}` }) };
+      }
+      case 'getui': {
+        const token = await this.getuiToken(config);
+        const targetType = string(config, 'targetType') || 'cid';
+        const audience = targetType === 'all' ? 'all' : { [targetType]: [string(config, 'target')] };
+        const notification = { title: message.title, body: message.body, click_type: message.url ? 'url' : 'startapp', ...(message.url ? { url: message.url } : {}) };
+        const payload = { request_id: randomUUID().replace(/-/g, '').slice(0, 32), audience, push_message: { notification }, push_channel: { android: { ups: { notification } }, ios: { type: 'notify', aps: { alert: { title: message.title, body: message.body }, sound: 'default' }, ...(message.url ? { payload: JSON.stringify({ url: message.url }) } : {}) } } };
+        const path = targetType === 'all' ? '/push/all' : `/push/single/${targetType}`;
+        return { url: `https://restapi.getui.com/v2/${encodeURIComponent(string(config, 'appId'))}${path}`, init: this.json(payload, { token }) };
+      }
+      case 'aws-sns':
+        return buildAwsSnsRequest(config, message);
+      case 'pusher-beams': {
+        const targets = lines(config.targets);
+        const targetType = string(config, 'targetType') || 'interests';
+        const audience = targetType === 'users' ? { users: targets } : { interests: targets };
+        const data = { severity: message.severity, ...(message.url ? { url: message.url } : {}) };
+        return { url: `https://${encodeURIComponent(string(config, 'instanceId'))}.pushnotifications.pusher.com/publish_api/v1/instances/${encodeURIComponent(string(config, 'instanceId'))}/publishes/${targetType}`, init: this.json({ ...audience, web: { notification: { title: message.title, body: message.body, ...(message.url ? { deep_link: message.url } : {}) } }, fcm: { notification: { title: message.title, body: message.body }, data }, apns: { aps: { alert: { title: message.title, body: message.body }, sound: 'default' }, data } }, { Authorization: `Bearer ${string(config, 'secretKey')}` }) };
+      }
+      case 'pushpad': {
+        const uids = lines(config.uids);
+        const tags = lines(config.tags);
+        return { url: `https://pushpad.xyz/api/v1/projects/${encodeURIComponent(string(config, 'projectId'))}/notifications`, init: this.json({ body: message.body, title: message.title, ...(message.url ? { target_url: message.url } : {}), ...(message.severity === 'critical' ? { urgent: true } : {}), ...(uids.length ? { uids } : {}), ...(tags.length ? { tags } : {}) }, { Authorization: `Bearer ${string(config, 'accessToken')}`, Accept: 'application/json' }) };
+      }
+      case 'vonage-sms': {
+        const body = new URLSearchParams({ from: string(config, 'from'), to: string(config, 'to'), text: bodyText, type: /[^\x20-\x7e\r\n]/.test(bodyText) ? 'unicode' : 'text' });
+        return { url: 'https://rest.nexmo.com/sms/json', init: { method: 'POST', headers: { Authorization: `Basic ${Buffer.from(`${string(config, 'apiKey')}:${string(config, 'apiSecret')}`).toString('base64')}` }, body } };
+      }
+      case 'plivo-sms':
+        return { url: `https://api.plivo.com/v1/Account/${encodeURIComponent(string(config, 'authId'))}/Message/`, init: this.json({ src: string(config, 'from'), dst: string(config, 'to'), text: bodyText }, { Authorization: `Basic ${Buffer.from(`${string(config, 'authId')}:${string(config, 'authToken')}`).toString('base64')}` }) };
+      case 'telnyx-sms':
+        return { url: 'https://api.telnyx.com/v2/messages', init: this.json({ from: string(config, 'from'), to: string(config, 'to'), text: bodyText }, { Authorization: `Bearer ${string(config, 'apiKey')}` }) };
+      case 'bird-sms':
+        return { url: `https://api.bird.com/workspaces/${encodeURIComponent(string(config, 'workspaceId'))}/channels/${encodeURIComponent(string(config, 'channelId'))}/messages`, init: this.json({ receiver: { contacts: [{ identifierValue: string(config, 'to') }] }, body: { type: 'text', text: { text: bodyText } } }, { Authorization: `AccessKey ${string(config, 'accessKey')}` }) };
+      case 'infobip-sms':
+        return { url: `${string(config, 'baseUrl').replace(/\/$/, '')}/sms/3/messages`, init: this.json({ messages: [{ ...(config.from ? { sender: string(config, 'from') } : {}), destinations: lines(config.to).map((to) => ({ to })), content: { text: bodyText } }] }, { Authorization: `App ${string(config, 'apiKey')}` }) };
       case 'whatsapp': {
         const parameters = lines(config.templateParameters).map((value) => ({ type: 'text', text: renderTemplate(value, message) }));
         const payload = config.mode === 'template'
@@ -437,12 +672,49 @@ export class ProviderDispatcher {
   }
 
   private assertProviderResponse(provider: ProviderId, body: string): void {
+    if (provider === 'aws-sns' && !/<MessageId>[\s\S]+<\/MessageId>/.test(body)) throw new Error('Amazon SNS 未返回 MessageId');
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body) as Record<string, unknown>; } catch {
-      if (['whatsapp', 'wecom-app', 'qq-bot', 'kook', 'fcm', 'expo', 'onesignal', 'resend', 'postmark', 'mailgun', 'brevo', 'aliyun-sms', 'tencent-sms', 'nextcloud-talk', 'jira-service-management'].includes(provider)) {
+      if (['honor-push', 'oppo-push', 'vivo-push', 'meizu-push', 'pushy', 'pushsafer', 'simplepush', 'novu', 'knock', 'courier', 'huawei-push', 'jpush', 'getui', 'pusher-beams', 'pushpad', 'vonage-sms', 'plivo-sms', 'telnyx-sms', 'bird-sms', 'infobip-sms', 'whatsapp', 'wecom-app', 'qq-bot', 'kook', 'fcm', 'expo', 'onesignal', 'resend', 'postmark', 'mailgun', 'brevo', 'aliyun-sms', 'tencent-sms', 'nextcloud-talk', 'jira-service-management'].includes(provider)) {
         throw new Error(`${provider} 未返回有效 JSON`);
       }
       return;
+    }
+    if (provider === 'novu') {
+      const result = (parsed.data && typeof parsed.data === 'object' ? parsed.data : parsed) as Record<string, unknown>;
+      if (result.acknowledged !== true || result.status !== 'processed') throw new Error(String((result.error as string[] | undefined)?.join('; ') ?? `Novu 未处理工作流: ${result.status ?? 'unknown'}`));
+    }
+    if (provider === 'knock' && !parsed.workflow_run_id) throw new Error(String(parsed.error ?? 'Knock 未返回 workflow run ID'));
+    if (provider === 'courier' && !parsed.requestId) throw new Error(String(parsed.message ?? 'Courier 未返回 requestId'));
+    if (provider === 'honor-push' && parsed.code !== undefined && !['0', '200', '80000000'].includes(String(parsed.code))) throw new Error(String(parsed.msg ?? parsed.message ?? `HONOR Push 返回错误码 ${parsed.code}`));
+    if (provider === 'oppo-push' && parsed.code !== undefined && Number(parsed.code) !== 0) throw new Error(String(parsed.message ?? `OPPO Push 返回错误码 ${parsed.code}`));
+    if (provider === 'vivo-push' && Number(parsed.result) !== 0) throw new Error(String(parsed.desc ?? `vivo Push 返回错误码 ${parsed.result}`));
+    if (provider === 'meizu-push') {
+      if (String(parsed.code) !== '200') throw new Error(String(parsed.message ?? `魅族 Push 返回错误码 ${parsed.code}`));
+      const failures = parsed.value && typeof parsed.value === 'object' ? Object.keys(parsed.value as object) : [];
+      if (failures.length) throw new Error(`魅族 Push 存在无效目标: ${failures.join(', ')}`);
+    }
+    if (provider === 'pushy' && (parsed.success !== true || !parsed.id)) throw new Error(String(parsed.error ?? 'Pushy 未返回通知 ID'));
+    if (provider === 'pushsafer' && Number(parsed.status) !== 1) throw new Error(String((parsed.error as Array<Record<string, unknown>> | undefined)?.map((item) => item.message).join('; ') ?? 'Pushsafer 拒绝了消息'));
+    if (provider === 'simplepush' && parsed.success === false) throw new Error(String(parsed.error ?? 'Simplepush 拒绝了消息'));
+    if (provider === 'huawei-push' && String(parsed.code) !== '80000000') throw new Error(String(parsed.msg ?? `华为 Push Kit 返回错误码 ${parsed.code}`));
+    if (provider === 'xiaomi-push' && (Number(parsed.code) !== 0 || parsed.result !== 'ok')) throw new Error(String(parsed.description ?? parsed.info ?? `小米推送返回错误码 ${parsed.code}`));
+    if (provider === 'jpush' && !parsed.msg_id) throw new Error(String(parsed.error ?? 'JPush 未返回消息 ID'));
+    if (provider === 'getui' && Number(parsed.code) !== 0) throw new Error(String(parsed.msg ?? `个推返回错误码 ${parsed.code}`));
+    if (provider === 'pusher-beams' && !parsed.publishId) throw new Error(String(parsed.error ?? 'Pusher Beams 未返回 publishId'));
+    if (provider === 'pushpad' && !parsed.id) throw new Error(String(parsed.error ?? 'Pushpad 未返回通知 ID'));
+    if (provider === 'vonage-sms') {
+      const messages = parsed.messages as Array<Record<string, unknown>> | undefined;
+      const failed = messages?.find((item) => String(item.status) !== '0');
+      if (!messages?.length || failed) throw new Error(String(failed?.['error-text'] ?? 'Vonage SMS 拒绝了消息'));
+    }
+    if (provider === 'plivo-sms' && !Array.isArray(parsed.message_uuid)) throw new Error(String(parsed.message ?? 'Plivo 未返回 message UUID'));
+    if (provider === 'telnyx-sms' && !(parsed.data as Record<string, unknown> | undefined)?.id) throw new Error(String(parsed.errors ?? 'Telnyx 未返回消息 ID'));
+    if (provider === 'bird-sms' && (!parsed.id || String(parsed.status) === 'failed')) throw new Error(String(parsed.reason ?? 'Bird SMS 拒绝了消息'));
+    if (provider === 'infobip-sms') {
+      const messages = parsed.messages as Array<Record<string, unknown>> | undefined;
+      const failed = messages?.find((item) => ['REJECTED', 'UNDELIVERABLE', 'EXPIRED'].includes(String((item.status as Record<string, unknown> | undefined)?.groupName)));
+      if (!messages?.length || failed) throw new Error(String((failed?.status as Record<string, unknown> | undefined)?.description ?? 'Infobip SMS 拒绝了消息'));
     }
     if (provider === 'whatsapp' && !Array.isArray(parsed.messages)) throw new Error(String((parsed.error as Record<string, unknown> | undefined)?.message ?? 'WhatsApp 未返回消息 ID'));
     if (provider === 'wecom-app' && Number(parsed.errcode) !== 0) throw new Error(String(parsed.errmsg ?? `企业微信返回错误码 ${parsed.errcode}`));

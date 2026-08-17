@@ -1,12 +1,42 @@
 import { generateKeyPairSync } from 'node:crypto';
+import { readdirSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../src/server/config.js';
-import { PROVIDER_MAP, validateProviderConfig } from '../src/server/providers/catalog.js';
-import { buildAliyunSmsRequest, buildTencentSmsRequest, ProviderDispatcher, type ProviderMessage } from '../src/server/providers/dispatcher.js';
+import { PROVIDER_MAP, PROVIDERS, validateProviderConfig } from '../src/server/providers/catalog.js';
+import { buildAliyunSmsRequest, buildAwsSnsRequest, buildTencentSmsRequest, ProviderDispatcher, type ProviderMessage } from '../src/server/providers/dispatcher.js';
 
 const appConfig = { allowPrivateWebhooks: true, allowInsecureHttp: true } as AppConfig;
 const message: ProviderMessage = { title: 'Database alert', body: 'CPU 95%', severity: 'critical', url: 'https://status.example.com/i/42', metadata: {} };
 const responseFor = (url: string) => {
+  if (url.includes('joinjoaomgcd.appspot.com')) return { success: true };
+  if (url.includes('maker.ifttt.com')) return { success: true };
+  if (url.includes('api.novu.co')) return { acknowledged: true, status: 'processed', transactionId: 'novu-1' };
+  if (url.includes('api.knock.app')) return { workflow_run_id: 'knock-1' };
+  if (url.includes('api.courier.com')) return { requestId: 'courier-1' };
+  if (url.includes('iam.developer.honor.com')) return { access_token: 'honor-token', expires_in: 3600 };
+  if (url.includes('push-api.cloud.hihonor.com')) return { code: '0', message: 'success', requestId: 'honor-1' };
+  if (url.includes('oppomobile.com/server/v1/auth')) return { code: 0, message: 'success', data: { auth_token: 'oppo-token' } };
+  if (url.includes('oppomobile.com/server/v1/message')) return { code: 0, message: 'success', data: [{ messageId: 'oppo-1' }] };
+  if (url.includes('vivo.com.cn/message/auth')) return { result: 0, desc: '请求成功', authToken: 'vivo-token' };
+  if (url.includes('vivo.com.cn/message/send')) return { result: 0, desc: '请求成功', taskId: 'vivo-1' };
+  if (url.includes('server-api-push.meizu.com')) return { code: '200', message: '', value: {}, msgId: 'meizu-1' };
+  if (url.includes('api.pushy.me')) return { success: true, id: 'pushy-1', info: { devices: 1 } };
+  if (url.includes('pushsafer.com')) return { status: 1, request: 'pushsafer-1' };
+  if (url.includes('simplepu.sh')) return { success: true };
+  if (url.includes('oauth-login.cloud.huawei.com')) return { access_token: 'huawei-token', expires_in: 3600 };
+  if (url.includes('push-api.cloud.huawei.com')) return { code: '80000000', msg: 'Success', requestId: 'huawei-1' };
+  if (url.includes('xmpush.xiaomi.com')) return { result: 'ok', code: 0, description: '成功', data: { id: 'xiaomi-1' } };
+  if (url.includes('api.jpush.cn')) return { sendno: '1', msg_id: 'jpush-1' };
+  if (url.includes('restapi.getui.com') && url.endsWith('/auth')) return { code: 0, data: { token: 'getui-token', expire_time: String(Date.now() + 86_400_000) } };
+  if (url.includes('restapi.getui.com')) return { code: 0, msg: 'SUCCESS', data: { taskid: 'getui-task' } };
+  if (url.includes('pushnotifications.pusher.com')) return { publishId: 'pusher-1' };
+  if (url.includes('pushpad.xyz')) return { id: 12345, scheduled: 1 };
+  if (url.includes('rest.nexmo.com')) return { 'message-count': '1', messages: [{ status: '0', 'message-id': 'vonage-1' }] };
+  if (url.includes('api.plivo.com')) return { message: 'message(s) queued', message_uuid: ['plivo-1'], api_id: 'plivo-api' };
+  if (url.includes('api.telnyx.com')) return { data: { id: 'telnyx-1' } };
+  if (url.includes('api.bird.com')) return { id: 'bird-1', status: 'accepted' };
+  if (url.includes('infobip.com')) return { bulkId: 'bulk-1', messages: [{ messageId: 'info-1', status: { groupName: 'PENDING', description: 'accepted' } }] };
   if (url.includes('graph.facebook.com')) return { messages: [{ id: 'wamid.1' }] };
   if (url.includes('exp.host')) return { data: { status: 'ok', id: 'expo-1' } };
   if (url.includes('onesignal.com')) return { id: 'one-1' };
@@ -23,8 +53,13 @@ const responseFor = (url: string) => {
 };
 
 describe('expanded provider catalog', () => {
+  it('ships a local image asset for every provider', () => {
+    const files = new Set(readdirSync(resolve(process.cwd(), 'src/web/assets/providers')).map((file) => file.replace(/\.(svg|png|ico)$/, '')));
+    for (const provider of PROVIDERS) expect(files.has(provider.id === 'synology-chat' ? 'synology' : provider.id), provider.id).toBe(true);
+  });
+
   it('publishes every new provider with a maintained documentation URL and support level', () => {
-    const ids = ['whatsapp', 'signal', 'wecom-app', 'qq-bot', 'kook', 'fcm', 'expo', 'onesignal', 'sendgrid', 'resend', 'postmark', 'mailgun', 'brevo', 'aliyun-sms', 'tencent-sms', 'home-assistant', 'nextcloud-talk', 'alertmanager', 'jira-service-management'] as const;
+    const ids = ['join', 'ifttt', 'novu', 'knock', 'courier', 'honor-push', 'oppo-push', 'vivo-push', 'meizu-push', 'pushy', 'pushsafer', 'simplepush', 'huawei-push', 'xiaomi-push', 'jpush', 'getui', 'aws-sns', 'pusher-beams', 'pushpad', 'vonage-sms', 'plivo-sms', 'telnyx-sms', 'bird-sms', 'infobip-sms', 'whatsapp', 'signal', 'wecom-app', 'qq-bot', 'kook', 'fcm', 'expo', 'onesignal', 'sendgrid', 'resend', 'postmark', 'mailgun', 'brevo', 'aliyun-sms', 'tencent-sms', 'home-assistant', 'nextcloud-talk', 'alertmanager', 'jira-service-management'] as const;
     for (const id of ids) {
       const provider = PROVIDER_MAP.get(id);
       expect(provider, id).toBeDefined();
@@ -41,6 +76,14 @@ describe('expanded provider catalog', () => {
     expect(validateProviderConfig('fcm', { serviceAccountJson: '{}', targetType: 'token', target: 't' })).toContain('服务账号 JSON 必须包含 project_id、client_email 和 private_key');
     expect(validateProviderConfig('aliyun-sms', { accessKeyId: 'a', accessKeySecret: 'b', phoneNumbers: '1', signName: 's', templateCode: 't', templateParam: '[]' })).toContain('模板参数必须是 JSON 对象');
     expect(validateProviderConfig('expo', { pushTokens: 'not-a-token' })).toContain('Expo Push Token 格式无效');
+    expect(validateProviderConfig('xiaomi-push', { appSecret: 's', packageName: 'com.example', targetType: 'alias' })).toContain('非全量推送必须填写目标值');
+    expect(validateProviderConfig('jpush', { appKey: 'a', masterSecret: 's', platform: 'all', targetType: 'alias' })).toContain('非全量推送必须填写目标');
+    expect(validateProviderConfig('getui', { appId: 'a', appKey: 'k', masterSecret: 's', targetType: 'cid' })).toContain('非全量推送必须填写目标值');
+    expect(validateProviderConfig('huawei-push', { appId: 'a', appSecret: 's', targetType: 'topic', targets: 'a\nb' })).toContain('Topic 或 Condition 只能填写一个目标');
+    expect(validateProviderConfig('oppo-push', { appKey: 'a', masterSecret: 's', targetType: 'registrationId', targets: Array.from({ length: 1001 }, (_, index) => `id-${index}`).join('\n') })).toContain('OPPO Push 单次最多支持 1000 个目标');
+    expect(validateProviderConfig('simplepush', { key: 'short' })).toContain('Simplepush Key 至少需要 6 个字符');
+    expect(validateProviderConfig('novu', { server: 'https://api.novu.co', apiKey: 'k', workflowId: 'w', subscriberIds: Array.from({ length: 101 }, (_, index) => `s-${index}`).join('\n') })).toContain('Novu 单次最多支持 100 个 Subscriber');
+    expect(validateProviderConfig('knock', { apiKey: 'k', workflowKey: 'w', recipients: Array.from({ length: 1001 }, (_, index) => `r-${index}`).join('\n') })).toContain('Knock 单次最多支持 1000 个 Recipient');
   });
 });
 
@@ -183,5 +226,185 @@ describe('expanded provider request contracts', () => {
     await expect(kook.send('kook', { token: 't', targetId: 'c' }, message)).rejects.toThrow('bad request');
     const malformed = new ProviderDispatcher(appConfig, async () => new Response('not json', { status: 200 }));
     await expect(malformed.send('kook', { token: 't', targetId: 'c' }, message)).rejects.toThrow('kook 未返回有效 JSON');
+  });
+});
+
+describe('additional provider request contracts', () => {
+  it('builds Join, IFTTT, Novu, Knock and Courier requests', async () => {
+    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: 200 })) as unknown as typeof fetch;
+    const dispatcher = new ProviderDispatcher(appConfig, fetcher);
+    await dispatcher.send('join', { apiKey: 'join-key', deviceIds: 'device-1\ndevice-2' }, message);
+    await dispatcher.send('ifttt', { key: 'ifttt-key', event: 'database_alert' }, message);
+    await dispatcher.send('novu', { server: 'https://api.novu.co', apiKey: 'novu-key', workflowId: 'database-alert', subscriberIds: 'user-1\nuser-2' }, message);
+    await dispatcher.send('knock', { apiKey: 'knock-key', workflowKey: 'database-alert', recipients: 'user-1\nuser-2' }, message);
+    await dispatcher.send('courier', { apiKey: 'courier-key', templateId: 'template-1', recipientType: 'user_id', recipient: 'user-1' }, message);
+
+    const join = fetcher.mock.calls.find(([url]) => String(url).includes('joinjoaomgcd.appspot.com'))!;
+    const joinParams = new URL(String(join[0])).searchParams;
+    expect(joinParams.get('apikey')).toBe('join-key');
+    expect(joinParams.get('deviceIds')).toBe('device-1,device-2');
+    expect(joinParams.get('title')).toBe('Database alert');
+    expect(joinParams.get('text')).toBe('CPU 95%');
+    expect(joinParams.get('url')).toBe(message.url);
+    const ifttt = fetcher.mock.calls.find(([url]) => String(url).includes('maker.ifttt.com'))!;
+    expect(String(ifttt[0])).toContain('/trigger/database_alert/with/key/ifttt-key');
+    expect(JSON.parse(String(ifttt[1]?.body))).toEqual({ value1: 'Database alert', value2: 'CPU 95%', value3: message.url });
+    const novu = fetcher.mock.calls.find(([url]) => String(url).includes('api.novu.co'))!;
+    expect(new Headers(novu[1]?.headers).get('authorization')).toBe('ApiKey novu-key');
+    expect(JSON.parse(String(novu[1]?.body))).toMatchObject({ name: 'database-alert', to: ['user-1', 'user-2'], payload: { title: 'Database alert', body: 'CPU 95%', severity: 'critical' } });
+    const knock = fetcher.mock.calls.find(([url]) => String(url).includes('api.knock.app'))!;
+    expect(new Headers(knock[1]?.headers).get('authorization')).toBe('Bearer knock-key');
+    expect(JSON.parse(String(knock[1]?.body))).toMatchObject({ recipients: ['user-1', 'user-2'], data: { title: 'Database alert', body: 'CPU 95%' } });
+    const courier = fetcher.mock.calls.find(([url]) => String(url).includes('api.courier.com'))!;
+    expect(new Headers(courier[1]?.headers).get('authorization')).toBe('Bearer courier-key');
+    expect(JSON.parse(String(courier[1]?.body))).toMatchObject({ message: { to: { user_id: 'user-1' }, template: 'template-1', data: { title: 'Database alert', body: 'CPU 95%' } } });
+  });
+
+  it('surfaces logical failures from notification gateways', async () => {
+    const cases: Array<[Parameters<ProviderDispatcher['send']>[0], Record<string, unknown>, string]> = [
+      ['novu', { server: 'https://api.novu.co', apiKey: 'k', workflowId: 'w', subscriberIds: 's' }, 'Novu 失败'],
+      ['knock', { apiKey: 'k', workflowKey: 'w', recipients: 'r' }, 'Knock 失败'],
+      ['courier', { apiKey: 'k', templateId: 't', recipientType: 'user_id', recipient: 'r' }, 'Courier 失败']
+    ];
+    for (const [provider, config, error] of cases) {
+      const failed = new ProviderDispatcher(appConfig, async (url) => {
+        const target = String(url);
+        if (provider === 'novu') return new Response(JSON.stringify({ acknowledged: false, status: 'error', error: [error] }), { status: 200 });
+        if (provider === 'knock') return new Response(JSON.stringify({ error }), { status: 200 });
+        return new Response(JSON.stringify({ message: error }), { status: 200 });
+      });
+      await expect(failed.send(provider, config, message)).rejects.toThrow(error);
+    }
+  });
+
+  it('builds HONOR, OPPO, vivo, Meizu, Pushy, Pushsafer and Simplepush requests', async () => {
+    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: 200 })) as unknown as typeof fetch;
+    const dispatcher = new ProviderDispatcher(appConfig, fetcher);
+    await dispatcher.send('honor-push', { appId: 'honor-app', clientId: 'honor-client', clientSecret: 'honor-secret', targets: 'honor-token-1\nhonor-token-2' }, message);
+    await dispatcher.send('oppo-push', { appKey: 'oppo-key', masterSecret: 'oppo-secret', targetType: 'registrationId', targets: 'oppo-token' }, message);
+    await dispatcher.send('vivo-push', { appId: '10004', appKey: 'vivo-key', appSecret: 'vivo-secret', targetType: 'regId', target: 'vivo-token' }, message);
+    await dispatcher.send('meizu-push', { appId: 'meizu-app', appSecret: 'meizu-secret', targetType: 'pushId', targets: 'meizu-token' }, message);
+    await dispatcher.send('pushy', { apiKey: 'pushy-secret', targets: 'pushy-token' }, message);
+    await dispatcher.send('pushsafer', { privateKey: 'pushsafer-key', device: '42' }, message);
+    await dispatcher.send('simplepush', { key: 'simple-key', event: 'critical' }, message);
+
+    const honor = fetcher.mock.calls.find(([url]) => String(url).includes('push-api.cloud.hihonor.com'))!;
+    expect(String(honor[0])).toContain('/api/v1/honor-app/sendMessage');
+    expect(new Headers(honor[1]?.headers).get('authorization')).toBe('Bearer honor-token');
+    expect(JSON.parse(String(honor[1]?.body)).token).toEqual(['honor-token-1', 'honor-token-2']);
+
+    const oppoAuth = fetcher.mock.calls.find(([url]) => String(url).endsWith('/server/v1/auth'))!;
+    expect(String((oppoAuth[1]?.body as URLSearchParams).get('sign'))).toMatch(/^[a-f0-9]{64}$/);
+    const oppo = fetcher.mock.calls.find(([url]) => String(url).includes('/unicast_batch'))!;
+    expect(new Headers(oppo[1]?.headers).get('auth_token')).toBe('oppo-token');
+    expect(JSON.parse(String((oppo[1]?.body as URLSearchParams).get('messages')))[0]).toMatchObject({ target_type: 2, target_value: 'oppo-token', notification: { title: 'Database alert' } });
+
+    const vivoAuth = fetcher.mock.calls.find(([url]) => String(url).endsWith('/message/auth'))!;
+    expect(JSON.parse(String(vivoAuth[1]?.body)).sign).toMatch(/^[a-f0-9]{32}$/);
+    const vivo = fetcher.mock.calls.find(([url]) => String(url).endsWith('/message/send'))!;
+    expect(new Headers(vivo[1]?.headers).get('authtoken')).toBe('vivo-token');
+    expect(JSON.parse(String(vivo[1]?.body))).toMatchObject({ regId: 'vivo-token', skipType: 2, skipContent: message.url });
+
+    const meizu = fetcher.mock.calls.find(([url]) => String(url).includes('server-api-push.meizu.com'))!;
+    const meizuForm = meizu[1]?.body as URLSearchParams;
+    expect(meizuForm.get('pushIds')).toBe('meizu-token');
+    expect(meizuForm.get('sign')).toBe('7307a93165a96557a1fc06aa61ac7dd0');
+
+    const pushy = fetcher.mock.calls.find(([url]) => String(url).includes('api.pushy.me'))!;
+    expect(String(pushy[0])).toContain('api_key=pushy-secret');
+    expect(JSON.parse(String(pushy[1]?.body))).toMatchObject({ to: 'pushy-token', data: { message: 'CPU 95%' }, notification: { title: 'Database alert' } });
+    const pushsafer = fetcher.mock.calls.find(([url]) => String(url).includes('pushsafer.com'))!;
+    expect((pushsafer[1]?.body as URLSearchParams).get('d')).toBe('42');
+    const simplepush = fetcher.mock.calls.find(([url]) => String(url).includes('simplepu.sh'))!;
+    expect(JSON.parse(String(simplepush[1]?.body))).toMatchObject({ key: 'simple-key', event: 'critical', msg: expect.stringContaining('CPU 95%') });
+  });
+
+  it('surfaces logical failures from the additional push providers', async () => {
+    const cases: Array<[Parameters<ProviderDispatcher['send']>[0], Record<string, unknown>, string]> = [
+      ['honor-push', { appId: 'a', clientId: 'c', clientSecret: 's', targets: 't' }, 'HONOR 失败'],
+      ['oppo-push', { appKey: 'a', masterSecret: 's', targetType: 'registrationId', targets: 't' }, 'OPPO 失败'],
+      ['vivo-push', { appId: '1', appKey: 'a', appSecret: 's', targetType: 'regId', target: 't' }, 'vivo 失败'],
+      ['meizu-push', { appId: 'a', appSecret: 's', targetType: 'pushId', targets: 't' }, '魅族 Push 存在无效目标'],
+      ['pushy', { apiKey: 'a', targets: 't' }, 'Pushy 失败'],
+      ['pushsafer', { privateKey: 'a' }, 'Pushsafer 失败'],
+      ['simplepush', { key: 'abcdef' }, 'Simplepush 失败']
+    ];
+    for (const [provider, config, error] of cases) {
+      const dispatcher = new ProviderDispatcher(appConfig, async (url) => {
+        const target = String(url);
+        if (target.includes('iam.developer.honor.com')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+        if (target.endsWith('/server/v1/auth')) return new Response(JSON.stringify({ code: 0, data: { auth_token: 'token' } }), { status: 200 });
+        if (target.endsWith('/message/auth')) return new Response(JSON.stringify({ result: 0, authToken: 'token' }), { status: 200 });
+        const body = provider === 'honor-push' ? { code: 42, message: error }
+          : provider === 'oppo-push' ? { code: 42, message: error }
+            : provider === 'vivo-push' ? { result: 42, desc: error }
+              : provider === 'meizu-push' ? { code: '200', value: { 110002: ['t'] } }
+                : provider === 'pushy' ? { success: false, error }
+                  : provider === 'pushsafer' ? { status: 0, error: [{ message: error }] }
+                    : { success: false, error };
+        return new Response(JSON.stringify(body), { status: 200 });
+      });
+      await expect(dispatcher.send(provider, config, message)).rejects.toThrow(error);
+    }
+  });
+
+  it('builds Huawei, Xiaomi, JPush, Getui, Pusher Beams and Pushpad requests', async () => {
+    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: 200 })) as unknown as typeof fetch;
+    const dispatcher = new ProviderDispatcher(appConfig, fetcher);
+    await dispatcher.send('huawei-push', { appId: 'hms-app', appSecret: 'hms-secret', targetType: 'token', targets: 'hms-token' }, message);
+    await dispatcher.send('xiaomi-push', { appSecret: 'mi-secret', packageName: 'com.example', targetType: 'alias', target: 'user-1' }, message);
+    await dispatcher.send('jpush', { appKey: 'j-app', masterSecret: 'j-secret', platform: 'all', targetType: 'alias', targets: 'user-1' }, message);
+    await dispatcher.send('getui', { appId: 'gt-app', appKey: 'gt-key', masterSecret: 'gt-secret', targetType: 'cid', target: 'cid-1' }, message);
+    await dispatcher.send('pusher-beams', { instanceId: 'instance-1', secretKey: 'pusher-secret', targetType: 'interests', targets: 'ops\ncritical' }, message);
+    await dispatcher.send('pushpad', { accessToken: 'pushpad-token', projectId: 'project-1', uids: 'user-1' }, message);
+
+    expect(String(fetcher.mock.calls.find(([url]) => String(url).includes('push-api.cloud.huawei.com'))?.[0])).toContain('/v1/hms-app/messages:send');
+    expect(new Headers(fetcher.mock.calls.find(([url]) => String(url).includes('push-api.cloud.huawei.com'))?.[1]?.headers).get('authorization')).toBe('Bearer huawei-token');
+    expect(String(fetcher.mock.calls.find(([url]) => String(url).includes('xmpush.xiaomi.com'))?.[0])).toContain('/v3/message/alias');
+    expect(new Headers(fetcher.mock.calls.find(([url]) => String(url).includes('api.jpush.cn'))?.[1]?.headers).get('authorization')).toMatch(/^Basic /);
+    expect(fetcher.mock.calls.filter(([url]) => String(url).includes('restapi.getui.com/v2/') && String(url).endsWith('/auth'))).toHaveLength(1);
+    expect(new Headers(fetcher.mock.calls.find(([url]) => String(url).includes('/push/single/cid'))?.[1]?.headers).get('token')).toBe('getui-token');
+    expect(String(fetcher.mock.calls.find(([url]) => String(url).includes('pushnotifications.pusher.com'))?.[0])).toContain('/publishes/interests');
+    expect(new Headers(fetcher.mock.calls.find(([url]) => String(url).includes('pushpad.xyz'))?.[1]?.headers).get('authorization')).toBe('Bearer pushpad-token');
+  });
+
+  it('builds AWS SigV4, Vonage, Plivo, Telnyx, Bird and Infobip SMS requests', async () => {
+    const aws = buildAwsSnsRequest({ accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'secret', region: 'us-east-1', targetType: 'phoneNumber', target: '+15551234567', smsType: 'Transactional' }, message, new Date('2026-08-17T00:00:00Z'));
+    expect(String(aws.url)).toBe('https://sns.us-east-1.amazonaws.com/');
+    expect(String(aws.init.body)).toContain('Action=Publish');
+    expect(new Headers(aws.init.headers).get('authorization')).toBe('AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260817/us-east-1/sns/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=cb971f2b9c00fb63667ea62086a25c3a88c967339b19cc6d1d95ad2c9a991996');
+    expect(new Headers(aws.init.headers).get('x-amz-date')).toBe('20260817T000000Z');
+
+    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: String(url).includes('api.bird.com') ? 202 : 200 })) as unknown as typeof fetch;
+    const dispatcher = new ProviderDispatcher(appConfig, fetcher);
+    await dispatcher.send('vonage-sms', { apiKey: 'vonage-key', apiSecret: 'vonage-secret', from: 'RelayDock', to: '15551234567' }, message);
+    await dispatcher.send('plivo-sms', { authId: 'MA123', authToken: 'plivo-secret', from: '+15551234567', to: '+15559876543' }, message);
+    await dispatcher.send('telnyx-sms', { apiKey: 'telnyx-key', from: '+15551234567', to: '+15559876543' }, message);
+    await dispatcher.send('bird-sms', { accessKey: 'bird-key', workspaceId: 'workspace-1', channelId: 'channel-1', to: '+15559876543' }, message);
+    await dispatcher.send('infobip-sms', { baseUrl: 'https://example.api.infobip.com', apiKey: 'infobip-key', from: 'RelayDock', to: '+15559876543' }, message);
+    expect(new Headers(fetcher.mock.calls[0][1]?.headers).get('authorization')).toMatch(/^Basic /);
+    expect(String(fetcher.mock.calls[1][0])).toContain('/Account/MA123/Message/');
+    expect(new Headers(fetcher.mock.calls[2][1]?.headers).get('authorization')).toBe('Bearer telnyx-key');
+    expect(new Headers(fetcher.mock.calls[3][1]?.headers).get('authorization')).toBe('AccessKey bird-key');
+    expect(String(fetcher.mock.calls[4][0])).toBe('https://example.api.infobip.com/sms/3/messages');
+  });
+
+  it('surfaces logical failures from the new JSON providers', async () => {
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ['xiaomi-push', { appSecret: 's', packageName: 'p', targetType: 'all' }, '小米失败'],
+      ['jpush', { appKey: 'a', masterSecret: 's', targetType: 'all', platform: 'all' }, 'JPush 失败'],
+      ['getui', { appId: 'a', appKey: 'k', masterSecret: 's', targetType: 'all' }, '个推失败'],
+      ['pusher-beams', { instanceId: 'i', secretKey: 's', targetType: 'interests', targets: 'ops' }, 'Pusher 失败']
+    ];
+    for (const [provider, config, error] of cases) {
+      const failed = new ProviderDispatcher(appConfig, async (url) => {
+        if (String(url).includes('restapi.getui.com') && String(url).endsWith('/auth')) return new Response(JSON.stringify({ code: 0, data: { token: 't', expire_time: String(Date.now() + 60_000) } }), { status: 200 });
+        if (provider === 'xiaomi-push') return new Response(JSON.stringify({ code: 500, description: error }), { status: 200 });
+        if (provider === 'jpush') return new Response(JSON.stringify({ error }), { status: 200 });
+        if (provider === 'getui') return new Response(JSON.stringify({ code: 10001, msg: error }), { status: 200 });
+        return new Response(JSON.stringify({ error }), { status: 200 });
+      });
+      await expect(failed.send(provider as never, config, message)).rejects.toThrow(error);
+    }
   });
 });
