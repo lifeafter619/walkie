@@ -22,13 +22,13 @@ Agent 干完活呼叫你、拿不准主意时问你，你在任何设备上按�
 
 AI Agent 跑长任务时，你不想盯着终端。Walkie 是一个自托管的通知控制平面：
 
-- **Agent → 你**：构建完成、部署失败、审批请求，推送到 Telegram、企业微信、飞书、Bark、ntfy……30+ 渠道任选；
+- **Agent → 你**：构建完成、部署失败、审批请求，推送到 Telegram、WhatsApp、企业微信、飞书、Expo、OneSignal、邮件、短信……50+ 渠道任选；
 - **你 → Agent**：Agent 调用 `ask_user` 把问题推到你手机，你点开一次性链接（或直接在控制台）回复，Agent 拿到答案继续干活；
 - **一个入口**：MCP（Streamable HTTP）、REST API、Server酱兼容 URL 三种接入方式，凭据加密存储，全部跑在你自己的基础设施上。
 
 ## 核心特性
 
-- 📡 **30+ 通知渠道**——聊天（Telegram / 企业微信 / 飞书 / 钉钉 / Slack / Discord / Teams / Google Chat / Matrix / QQ(OneBot) / LINE…）、推送（Bark / ntfy / Gotify / Pushover / Server酱 / PushPlus / WxPusher…）、邮件 SMTP、短信 Twilio、PagerDuty、Apprise、通用 Webhook
+- 📡 **50+ 通知渠道**——聊天（Telegram / WhatsApp / 企业微信应用 / 飞书 / 钉钉 / Slack / Discord / Teams / Google Chat / KOOK / QQ 官方机器人 / Matrix / LINE…）、推送（FCM / Expo / OneSignal / Bark / ntfy / Gotify / Pushover / Server酱 / PushPlus / WxPusher…）、邮件（SMTP / SendGrid / Resend / Postmark / Mailgun / Brevo）、短信（Twilio / 阿里云 / 腾讯云）、PagerDuty、Jira Service Management、Alertmanager、Apprise、通用 Webhook。新增渠道的官方契约和验证边界见 [`docs/providers.md`](docs/providers.md)。
 - 🔁 **双向会话**——`ask_user` 提问 + 一次性回复链接 + 控制台会话页直接回复，`check_reply` 长轮询取答案
 - 🧭 **路由**——多个频道组成「并发广播」或「故障转移链」，一个稳定标识符对外
 - 🔑 **密钥即密码**——Agent Key 和管理密码都可以自定义成任意想要的值（≥8 位），也可一键随机生成

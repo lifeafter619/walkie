@@ -1,4 +1,5 @@
 import type { ProviderId } from '../../shared/types';
+import { Bell } from 'lucide-react';
 
 /**
  * 渠道品牌图标 —— 每个渠道都使用从官方/品牌库下载的真实 logo SVG。
@@ -24,6 +25,25 @@ for (const [path, url] of Object.entries(assetModules)) {
 
 /** 各渠道的品牌主色，用于触发器边框 / 装饰等 CSS 变量 --brand */
 const BRAND_HEX: Record<ProviderId, string> = {
+  whatsapp: '25D366',
+  signal: '3A76F0',
+  'wecom-app': '07C160',
+  'qq-bot': '12B7F5',
+  kook: '7F6AFF',
+  fcm: 'FFCA28',
+  expo: '11181C',
+  onesignal: 'E54B4D',
+  sendgrid: '1A82E2',
+  resend: '111111',
+  postmark: 'FFDE00',
+  mailgun: 'F06B66',
+  brevo: '0B996E',
+  'aliyun-sms': 'FF6A00',
+  'tencent-sms': '006EFF',
+  'home-assistant': '18BCF2',
+  'nextcloud-talk': '0082C9',
+  alertmanager: 'E6522C',
+  'jira-service-management': '1868DB',
   telegram: '26A5E4',
   wecom: '07C160',
   feishu: '00D6B9',
@@ -75,7 +95,7 @@ export function ProviderIcon({ provider, name, size = 22 }: { provider: Provider
       role="img"
       aria-label={name ?? provider}
     >
-      {url && <img src={url} alt="" width={size} height={size} draggable={false} />}
+      {url ? <img src={url} alt="" width={size} height={size} draggable={false} /> : <Bell size={Math.max(14, Math.round(size * .62))} aria-hidden="true" />}
     </span>
   );
 }

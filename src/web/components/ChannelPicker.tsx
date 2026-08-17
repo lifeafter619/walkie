@@ -117,7 +117,7 @@ export function ChannelPicker({
               <ProviderIcon provider={provider.id} name={provider.name} size={30} />
               <span className="picker-tile-name">
                 <strong>{provider.name}</strong>
-                <small>{provider.description}</small>
+                <small>{provider.support === 'gateway' ? '兼容网关' : provider.support === 'custom' ? '自定义' : '原生直连'} · {provider.description}</small>
               </span>
               {provider.id === current && <span className="picker-current">当前</span>}
             </button>

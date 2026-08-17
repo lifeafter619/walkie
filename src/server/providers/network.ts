@@ -64,7 +64,7 @@ export async function safeFetch(
     const parsed = JSON.parse(body) as Record<string, unknown>;
     const code = parsed.errcode ?? parsed.code;
     // 0/'0'/200 为通用成功码；1000 是 WxPusher 的成功码（其余平台错误码均不落在 1000）
-    if (code !== undefined && code !== 0 && code !== '0' && code !== 200 && code !== 1000) throw new Error(String(parsed.errmsg ?? parsed.msg ?? `平台返回错误码 ${code}`));
+    if (code !== undefined && code !== 0 && code !== '0' && code !== 200 && code !== 1000) throw new Error(String(parsed.errmsg ?? parsed.msg ?? parsed.message ?? `平台返回错误码 ${code}`));
     if (parsed.ok === false) throw new Error(String(parsed.description ?? '平台拒绝了消息'));
   } catch (error) {
     if (error instanceof SyntaxError) return { status: response.status, body };

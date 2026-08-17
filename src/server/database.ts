@@ -106,7 +106,7 @@ export class RelayRepository {
       CREATE TABLE IF NOT EXISTS channels (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
         provider TEXT NOT NULL, config_encrypted TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
-        last_test_status TEXT NOT NULL DEFAULT 'untested', last_test_error TEXT,
+        last_test_status TEXT NOT NULL DEFAULT 'untested', last_test_error TEXT, last_test_at TEXT,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS routes (
@@ -154,6 +154,7 @@ export class RelayRepository {
     const channelColumns = new Set((await this.db.all('PRAGMA table_info(channels)')).map((row) => String(row.name)));
     if (!channelColumns.has('rate_limit_per_min')) await this.db.exec('ALTER TABLE channels ADD COLUMN rate_limit_per_min INTEGER');
     if (!channelColumns.has('quiet_hours')) await this.db.exec('ALTER TABLE channels ADD COLUMN quiet_hours TEXT');
+    if (!channelColumns.has('last_test_at')) await this.db.exec('ALTER TABLE channels ADD COLUMN last_test_at TEXT');
     const conversationColumns = new Set((await this.db.all('PRAGMA table_info(conversations)')).map((row) => String(row.name)));
     if (!conversationColumns.has('options')) await this.db.exec('ALTER TABLE conversations ADD COLUMN options TEXT');
     const keyColumns = new Set((await this.db.all('PRAGMA table_info(api_keys)')).map((row) => String(row.name)));
@@ -194,6 +195,7 @@ export class RelayRepository {
       quietHours: row.quiet_hours ? String(row.quiet_hours) : undefined,
       lastTestStatus: row.last_test_status as Channel['lastTestStatus'],
       lastTestError: row.last_test_error ? String(row.last_test_error) : undefined,
+      lastTestAt: row.last_test_at ? String(row.last_test_at) : undefined,
       createdAt: String(row.created_at), updatedAt: String(row.updated_at)
     };
   }
@@ -270,8 +272,9 @@ export class RelayRepository {
   }
 
   async setChannelTest(id: string, success: boolean, error?: string): Promise<void> {
-    await this.db.run('UPDATE channels SET last_test_status=?,last_test_error=?,updated_at=? WHERE id=?',
-      [success ? 'success' : 'failed', error ?? null, now(), id]);
+    const timestamp = now();
+    await this.db.run('UPDATE channels SET last_test_status=?,last_test_error=?,last_test_at=?,updated_at=? WHERE id=?',
+      [success ? 'success' : 'failed', error ?? null, timestamp, timestamp, id]);
   }
 
   async deleteChannel(id: string, actor = 'admin'): Promise<void> {

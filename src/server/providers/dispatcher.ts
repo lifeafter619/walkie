@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import nodemailer from 'nodemailer';
 import type { ProviderId, Severity } from '../../shared/types.js';
 import type { AppConfig } from '../config.js';
@@ -15,6 +15,7 @@ export interface ProviderMessage {
 export interface ProviderResult { responseCode?: number; response?: string }
 
 const string = (config: Record<string, unknown>, key: string) => String(config[key] ?? '');
+const lines = (value: unknown) => String(value ?? '').split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
 const text = (message: ProviderMessage) => `${message.title}\n\n${message.body}${message.url ? `\n\n${message.url}` : ''}`;
 const markdown = (message: ProviderMessage) => `**${message.title}**\n\n${message.body}${message.url ? `\n\n[查看详情](${message.url})` : ''}`;
 const color: Record<Severity, string> = { info: '#267365', success: '#178458', warning: '#b26b16', critical: '#b83b32' };
@@ -22,7 +23,8 @@ const color: Record<Severity, string> = { info: '#267365', success: '#178458', w
 // 有严格正文长度上限的渠道（字符数，留出标题/链接/多字节余量）；未列出的渠道不分片
 const BODY_LIMITS: Partial<Record<ProviderId, number>> = {
   telegram: 3600, wecom: 1200, dingtalk: 16000, discord: 3600,
-  'google-chat': 3600, qmsg: 900, twilio: 1400, onebot: 3500, line: 4500
+  'google-chat': 3600, qmsg: 900, twilio: 1400, onebot: 3500, line: 4500,
+  whatsapp: 3900, 'wecom-app': 1800, kook: 3500, signal: 3500, 'qq-bot': 3500
 };
 const BODY_BYTE_LIMITS: Partial<Record<ProviderId, number>> = { wecom: 2600, webex: 6000, ntfy: 4096, pushover: 900 };
 
@@ -73,7 +75,56 @@ function renderTemplate(template: string, message: ProviderMessage): string {
   });
 }
 
+const base64url = (value: string) => Buffer.from(value).toString('base64url');
+const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
+const hmac = (algorithm: string, key: string | Buffer, value: string, encoding?: 'hex' | 'base64') => {
+  const digest = createHmac(algorithm, key).update(value);
+  return encoding ? digest.digest(encoding) : digest.digest();
+};
+const rfc3986 = (value: string) => encodeURIComponent(value).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+const signRs256 = async (value: string, pem: string): Promise<string> => {
+  const der = new Uint8Array(Buffer.from(pem.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s/g, ''), 'base64'));
+  const key = await globalThis.crypto.subtle.importKey('pkcs8', der, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+  return Buffer.from(await globalThis.crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(value))).toString('base64url');
+};
+
+export function buildAliyunSmsRequest(config: Record<string, unknown>, message: ProviderMessage, nonce = randomUUID(), date = new Date()): { url: string; init: RequestInit } {
+  const params: Record<string, string> = {
+    AccessKeyId: string(config, 'accessKeyId'), Action: 'SendSms', Format: 'JSON',
+    PhoneNumbers: string(config, 'phoneNumbers'), RegionId: string(config, 'regionId') || 'cn-hangzhou',
+    SignName: string(config, 'signName'), SignatureMethod: 'HMAC-SHA1', SignatureNonce: nonce,
+    SignatureVersion: '1.0', TemplateCode: string(config, 'templateCode'),
+    TemplateParam: renderTemplate(string(config, 'templateParam'), message),
+    Timestamp: date.toISOString().replace(/\.\d{3}Z$/, 'Z'), Version: '2017-05-25'
+  };
+  const canonical = Object.entries(params).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, value]) => `${rfc3986(key)}=${rfc3986(value)}`).join('&');
+  const signature = hmac('sha1', `${string(config, 'accessKeySecret')}&`, `POST&%2F&${rfc3986(canonical)}`, 'base64') as string;
+  return { url: 'https://dysmsapi.aliyuncs.com/', init: { method: 'POST', body: new URLSearchParams({ ...params, Signature: signature }) } };
+}
+
+export function buildTencentSmsRequest(config: Record<string, unknown>, message: ProviderMessage, timestamp = Math.floor(Date.now() / 1000)): { url: string; init: RequestInit } {
+  const host = 'sms.tencentcloudapi.com';
+  const payload = JSON.stringify({
+    PhoneNumberSet: lines(config.phoneNumbers), SmsSdkAppId: string(config, 'smsSdkAppId'),
+    SignName: string(config, 'signName'), TemplateId: string(config, 'templateId'),
+    TemplateParamSet: lines(config.templateParams).map((value) => renderTemplate(value, message))
+  });
+  const canonicalHeaders = `content-type:application/json; charset=utf-8\nhost:${host}\n`;
+  const canonicalRequest = `POST\n/\n\n${canonicalHeaders}\ncontent-type;host\n${sha256(payload)}`;
+  const date = new Date(timestamp * 1000).toISOString().slice(0, 10);
+  const scope = `${date}/sms/tc3_request`;
+  const stringToSign = `TC3-HMAC-SHA256\n${timestamp}\n${scope}\n${sha256(canonicalRequest)}`;
+  const secretDate = hmac('sha256', `TC3${string(config, 'secretKey')}`, date) as Buffer;
+  const secretService = hmac('sha256', secretDate, 'sms') as Buffer;
+  const secretSigning = hmac('sha256', secretService, 'tc3_request') as Buffer;
+  const signature = hmac('sha256', secretSigning, stringToSign, 'hex') as string;
+  const authorization = `TC3-HMAC-SHA256 Credential=${string(config, 'secretId')}/${scope}, SignedHeaders=content-type;host, Signature=${signature}`;
+  return { url: `https://${host}/`, init: { method: 'POST', headers: { Authorization: authorization, 'Content-Type': 'application/json; charset=utf-8', 'X-TC-Action': 'SendSms', 'X-TC-Version': '2021-01-11', 'X-TC-Timestamp': String(timestamp), 'X-TC-Region': string(config, 'region') || 'ap-guangzhou' }, body: payload } };
+}
+
 export class ProviderDispatcher {
+  private readonly tokenCache = new Map<string, { value: string; expiresAt: number }>();
+  private readonly tokenInflight = new Map<string, Promise<string>>();
   constructor(
     private readonly appConfig: Pick<AppConfig, 'allowPrivateWebhooks' | 'allowInsecureHttp'>,
     private readonly fetcher: typeof fetch = fetch,
@@ -94,7 +145,7 @@ export class ProviderDispatcher {
         // 链接只挂最后一片，避免每片都带按钮
         url: index === chunks.length - 1 ? message.url : undefined
       };
-      const request = this.buildRequest(provider, config, part);
+      const request = await this.buildRequest(provider, config, part);
       const response = await safeFetch(request.url, request.init, this.appConfig, this.fetcher, this.resolveHost);
       this.assertProviderResponse(provider, response.body);
       result = { responseCode: response.status, response: response.body };
@@ -111,9 +162,130 @@ export class ProviderDispatcher {
     return { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) };
   }
 
-  private buildRequest(provider: ProviderId, config: Record<string, unknown>, message: ProviderMessage): { url: string; init: RequestInit } {
+  private async cachedToken(key: string, load: () => Promise<{ value: string; expiresIn: number }>): Promise<string> {
+    const cached = this.tokenCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const existing = this.tokenInflight.get(key);
+    if (existing) return existing;
+    const pending = load().then((token) => {
+      if (!token.value) throw new Error('平台未返回 access token');
+      this.tokenCache.set(key, { value: token.value, expiresAt: Date.now() + Math.max(30, token.expiresIn - 120) * 1000 });
+      return token.value;
+    }).finally(() => this.tokenInflight.delete(key));
+    this.tokenInflight.set(key, pending);
+    return pending;
+  }
+
+  private async wecomToken(config: Record<string, unknown>): Promise<string> {
+    const key = `wecom:${sha256(`${string(config, 'corpId')}:${string(config, 'secret')}`)}`;
+    return this.cachedToken(key, async () => {
+      const query = new URLSearchParams({ corpid: string(config, 'corpId'), corpsecret: string(config, 'secret') });
+      const result = await safeFetch(`https://qyapi.weixin.qq.com/cgi-bin/gettoken?${query}`, { method: 'GET' }, this.appConfig, this.fetcher, this.resolveHost);
+      const body = JSON.parse(result.body) as Record<string, unknown>;
+      return { value: String(body.access_token ?? ''), expiresIn: Number(body.expires_in ?? 7200) };
+    });
+  }
+
+  private async qqToken(config: Record<string, unknown>): Promise<string> {
+    const key = `qq:${sha256(`${string(config, 'appId')}:${string(config, 'clientSecret')}`)}`;
+    return this.cachedToken(key, async () => {
+      const result = await safeFetch('https://api.bot.qq.com/app/getAppAccessToken', this.json({ appId: string(config, 'appId'), clientSecret: string(config, 'clientSecret') }), this.appConfig, this.fetcher, this.resolveHost);
+      const body = JSON.parse(result.body) as Record<string, unknown>;
+      return { value: String(body.access_token ?? ''), expiresIn: Number(body.expires_in ?? 7200) };
+    });
+  }
+
+  private async fcmToken(config: Record<string, unknown>): Promise<{ value: string; projectId: string }> {
+    const account = JSON.parse(string(config, 'serviceAccountJson')) as Record<string, unknown>;
+    const clientEmail = String(account.client_email ?? '');
+    const projectId = String(account.project_id ?? '');
+    const privateKey = String(account.private_key ?? '');
+    const key = `fcm:${sha256(`${clientEmail}:${projectId}:${privateKey}`)}`;
+    const value = await this.cachedToken(key, async () => {
+      const now = Math.floor(Date.now() / 1000);
+      const unsigned = `${base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))}.${base64url(JSON.stringify({ iss: clientEmail, scope: 'https://www.googleapis.com/auth/firebase.messaging', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 }))}`;
+      const assertion = `${unsigned}.${await signRs256(unsigned, privateKey)}`;
+      const result = await safeFetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion }) }, this.appConfig, this.fetcher, this.resolveHost);
+      const body = JSON.parse(result.body) as Record<string, unknown>;
+      return { value: String(body.access_token ?? ''), expiresIn: Number(body.expires_in ?? 3600) };
+    });
+    return { value, projectId };
+  }
+
+  private async buildRequest(provider: ProviderId, config: Record<string, unknown>, message: ProviderMessage): Promise<{ url: string; init: RequestInit }> {
     const bodyText = text(message);
     switch (provider) {
+      case 'whatsapp': {
+        const parameters = lines(config.templateParameters).map((value) => ({ type: 'text', text: renderTemplate(value, message) }));
+        const payload = config.mode === 'template'
+          ? { messaging_product: 'whatsapp', recipient_type: 'individual', to: string(config, 'to'), type: 'template', template: { name: string(config, 'templateName'), language: { code: string(config, 'languageCode') || 'zh_CN' }, ...(parameters.length ? { components: [{ type: 'body', parameters }] } : {}) } }
+          : { messaging_product: 'whatsapp', recipient_type: 'individual', to: string(config, 'to'), type: 'text', text: { preview_url: Boolean(message.url), body: bodyText } };
+        return { url: `https://graph.facebook.com/${encodeURIComponent(string(config, 'graphVersion') || 'v25.0')}/${encodeURIComponent(string(config, 'phoneNumberId'))}/messages`, init: this.json(payload, { Authorization: `Bearer ${string(config, 'accessToken')}` }) };
+      }
+      case 'signal':
+        return { url: `${string(config, 'server').replace(/\/$/, '')}/v2/send`, init: this.json({ message: bodyText, number: string(config, 'number'), recipients: lines(config.recipients) }) };
+      case 'wecom-app': {
+        const token = await this.wecomToken(config);
+        return { url: `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(token)}`, init: this.json({ touser: string(config, 'toUser') || undefined, toparty: string(config, 'toParty') || undefined, totag: string(config, 'toTag') || undefined, msgtype: 'text', agentid: Number(config.agentId), text: { content: bodyText }, enable_duplicate_check: 1, duplicate_check_interval: 1800 }) };
+      }
+      case 'qq-bot': {
+        const token = await this.qqToken(config);
+        const targetType = string(config, 'targetType') || 'channel';
+        const targetId = encodeURIComponent(string(config, 'targetId'));
+        const base = config.sandbox ? 'https://sandbox.api.sgroup.qq.com' : 'https://api.bot.qq.com';
+        const path = targetType === 'group' ? `/v2/groups/${targetId}/messages` : targetType === 'user' ? `/v2/users/${targetId}/messages` : `/channels/${targetId}/messages`;
+        return { url: `${base}${path}`, init: this.json(targetType === 'channel' ? { content: bodyText } : { content: bodyText, msg_type: 0 }, { Authorization: `QQBot ${token}` }) };
+      }
+      case 'kook':
+        return { url: `https://www.kookapp.cn/api/v3/${config.direct ? 'direct-message' : 'message'}/create`, init: this.json({ type: 9, target_id: string(config, 'targetId'), content: markdown(message) }, { Authorization: `Bot ${string(config, 'token')}` }) };
+      case 'fcm': {
+        const token = await this.fcmToken(config);
+        const targetType = string(config, 'targetType') || 'token';
+        const target = targetType === 'topic' ? string(config, 'target').replace(/^\/topics\//, '') : string(config, 'target');
+        return { url: `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(token.projectId)}/messages:send`, init: this.json({ message: { [targetType]: target, notification: { title: message.title, body: message.body, ...(config.imageUrl ? { image: string(config, 'imageUrl') } : {}) }, data: { severity: message.severity, ...(message.url ? { url: message.url } : {}) } } }, { Authorization: `Bearer ${token.value}` }) };
+      }
+      case 'expo': {
+        const tokens = lines(config.pushTokens);
+        const payload = { to: tokens.length === 1 ? tokens[0] : tokens, title: message.title, body: message.body, sound: string(config, 'sound') || 'default', priority: message.severity === 'critical' ? 'high' : 'default', ...(config.channelId ? { channelId: string(config, 'channelId') } : {}), data: { severity: message.severity, ...(message.url ? { url: message.url } : {}) } };
+        return { url: 'https://exp.host/--/api/v2/push/send', init: this.json(payload, config.accessToken ? { Authorization: `Bearer ${string(config, 'accessToken')}` } : {}) };
+      }
+      case 'onesignal': {
+        const subscriptions = lines(config.subscriptionIds);
+        const externalIds = lines(config.externalIds);
+        const audience = subscriptions.length ? { include_subscription_ids: subscriptions }
+          : externalIds.length ? { include_aliases: { external_id: externalIds }, target_channel: 'push' }
+          : { included_segments: [string(config, 'segment')] };
+        return { url: 'https://api.onesignal.com/notifications', init: this.json({ app_id: string(config, 'appId'), ...audience, headings: { en: message.title }, contents: { en: message.body }, ...(message.url ? { url: message.url } : {}), ...(config.imageUrl ? { big_picture: string(config, 'imageUrl'), ios_attachments: { image: string(config, 'imageUrl') }, chrome_web_image: string(config, 'imageUrl') } : {}) }, { Authorization: `Key ${string(config, 'apiKey')}` }) };
+      }
+      case 'sendgrid':
+        return { url: config.eu ? 'https://api.eu.sendgrid.com/v3/mail/send' : 'https://api.sendgrid.com/v3/mail/send', init: this.json({ personalizations: [{ to: lines(config.to).map((email) => ({ email })) }], from: { email: string(config, 'from') }, subject: message.title, content: [{ type: 'text/plain', value: bodyText }] }, { Authorization: `Bearer ${string(config, 'apiKey')}` }) };
+      case 'resend':
+        return { url: 'https://api.resend.com/emails', init: this.json({ from: string(config, 'from'), to: lines(config.to), subject: message.title, text: bodyText }, { Authorization: `Bearer ${string(config, 'apiKey')}` }) };
+      case 'postmark':
+        return { url: 'https://api.postmarkapp.com/email', init: this.json({ From: string(config, 'from'), To: string(config, 'to'), Subject: message.title, TextBody: bodyText, MessageStream: string(config, 'messageStream') || 'outbound' }, { Accept: 'application/json', 'X-Postmark-Server-Token': string(config, 'serverToken') }) };
+      case 'mailgun': {
+        const form = new FormData();
+        form.set('from', string(config, 'from')); form.set('to', string(config, 'to')); form.set('subject', message.title); form.set('text', bodyText);
+        const host = config.region === 'eu' ? 'api.eu.mailgun.net' : 'api.mailgun.net';
+        return { url: `https://${host}/v3/${encodeURIComponent(string(config, 'domain'))}/messages`, init: { method: 'POST', headers: { Authorization: `Basic ${Buffer.from(`api:${string(config, 'apiKey')}`).toString('base64')}` }, body: form } };
+      }
+      case 'brevo':
+        return { url: 'https://api.brevo.com/v3/smtp/email', init: this.json({ sender: { email: string(config, 'from'), ...(config.fromName ? { name: string(config, 'fromName') } : {}) }, to: lines(config.to).map((email) => ({ email })), subject: message.title, textContent: bodyText }, { Accept: 'application/json', 'api-key': string(config, 'apiKey') }) };
+      case 'aliyun-sms':
+        return buildAliyunSmsRequest(config, message);
+      case 'tencent-sms':
+        return buildTencentSmsRequest(config, message);
+      case 'home-assistant':
+        return { url: `${string(config, 'server').replace(/\/$/, '')}/api/services/notify/${encodeURIComponent(string(config, 'service'))}`, init: this.json({ title: message.title, message: message.body, ...(message.url ? { data: { url: message.url, clickAction: message.url } } : {}) }, { Authorization: `Bearer ${string(config, 'accessToken')}` }) };
+      case 'nextcloud-talk':
+        return { url: `${string(config, 'server').replace(/\/$/, '')}/ocs/v2.php/apps/spreed/api/v1/chat/${encodeURIComponent(string(config, 'conversationToken'))}`, init: this.json({ message: bodyText, referenceId: sha256(`${message.title}:${message.body}:${Date.now()}`) }, { Accept: 'application/json', 'OCS-APIRequest': 'true', Authorization: `Basic ${Buffer.from(`${string(config, 'username')}:${string(config, 'appPassword')}`).toString('base64')}` }) };
+      case 'alertmanager': {
+        const startsAt = new Date();
+        const endsAt = new Date(startsAt.getTime() + 5 * 60_000);
+        return { url: `${string(config, 'server').replace(/\/$/, '')}/api/v2/alerts`, init: this.json([{ labels: { alertname: message.title.slice(0, 128), severity: message.severity, source: string(config, 'source') || 'walkie' }, annotations: { summary: message.title, description: message.body }, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), ...(message.url ? { generatorURL: message.url } : {}) }], config.bearerToken ? { Authorization: `Bearer ${string(config, 'bearerToken')}` } : {}) };
+      }
+      case 'jira-service-management':
+        return { url: `${string(config, 'site').replace(/\/$/, '')}/rest/servicedeskapi/request`, init: this.json({ serviceDeskId: string(config, 'serviceDeskId'), requestTypeId: string(config, 'requestTypeId'), requestFieldValues: { summary: message.title, description: bodyText } }, { Accept: 'application/json', Authorization: `Basic ${Buffer.from(`${string(config, 'email')}:${string(config, 'apiToken')}`).toString('base64')}` }) };
       case 'telegram':
         return { url: `https://api.telegram.org/bot${string(config, 'botToken')}/sendMessage`, init: this.json({
           chat_id: string(config, 'chatId'), text: bodyText, disable_notification: Boolean(config.disableNotification),
@@ -266,7 +438,42 @@ export class ProviderDispatcher {
 
   private assertProviderResponse(provider: ProviderId, body: string): void {
     let parsed: Record<string, unknown>;
-    try { parsed = JSON.parse(body) as Record<string, unknown>; } catch { return; }
+    try { parsed = JSON.parse(body) as Record<string, unknown>; } catch {
+      if (['whatsapp', 'wecom-app', 'qq-bot', 'kook', 'fcm', 'expo', 'onesignal', 'resend', 'postmark', 'mailgun', 'brevo', 'aliyun-sms', 'tencent-sms', 'nextcloud-talk', 'jira-service-management'].includes(provider)) {
+        throw new Error(`${provider} 未返回有效 JSON`);
+      }
+      return;
+    }
+    if (provider === 'whatsapp' && !Array.isArray(parsed.messages)) throw new Error(String((parsed.error as Record<string, unknown> | undefined)?.message ?? 'WhatsApp 未返回消息 ID'));
+    if (provider === 'wecom-app' && Number(parsed.errcode) !== 0) throw new Error(String(parsed.errmsg ?? `企业微信返回错误码 ${parsed.errcode}`));
+    if (provider === 'qq-bot' && !parsed.id) throw new Error(String(parsed.message ?? 'QQ 机器人未返回消息 ID'));
+    if (provider === 'kook' && Number(parsed.code) !== 0) throw new Error(String(parsed.message ?? `KOOK 返回错误码 ${parsed.code}`));
+    if (provider === 'fcm' && !parsed.name) throw new Error('FCM 未返回消息 ID');
+    if (provider === 'resend' && !parsed.id) throw new Error(String(parsed.message ?? 'Resend 未返回邮件 ID'));
+    if (provider === 'mailgun' && !parsed.id) throw new Error(String(parsed.message ?? 'Mailgun 未返回邮件 ID'));
+    if (provider === 'brevo' && !parsed.messageId) throw new Error(String(parsed.message ?? 'Brevo 未返回邮件 ID'));
+    if (provider === 'jira-service-management' && !parsed.issueKey) throw new Error('Jira Service Management 未返回请求编号');
+    if (provider === 'onesignal' && !parsed.id) throw new Error(String((parsed.errors as string[] | undefined)?.join('; ') ?? 'OneSignal 未创建通知（可能没有有效订阅者）'));
+    if (provider === 'expo') {
+      if (parsed.data === undefined) throw new Error('Expo 未返回 push ticket');
+      const entries = Array.isArray(parsed.data) ? parsed.data : [parsed.data];
+      const failed = entries.find((entry) => entry && typeof entry === 'object' && (entry as Record<string, unknown>).status === 'error') as Record<string, unknown> | undefined;
+      if (failed) throw new Error(String(failed.message ?? (failed.details as Record<string, unknown> | undefined)?.error ?? 'Expo 拒绝了通知'));
+    }
+    if (provider === 'postmark' && parsed.ErrorCode !== undefined && Number(parsed.ErrorCode) !== 0) throw new Error(String(parsed.Message ?? `Postmark 返回错误码 ${parsed.ErrorCode}`));
+    if (provider === 'aliyun-sms' && parsed.Code !== 'OK') throw new Error(String(parsed.Message ?? `阿里云短信返回错误码 ${parsed.Code}`));
+    if (provider === 'tencent-sms') {
+      const response = parsed.Response as Record<string, unknown> | undefined;
+      if (response?.Error) throw new Error(String((response.Error as Record<string, unknown>).Message ?? '腾讯云短信调用失败'));
+      const statuses = response?.SendStatusSet as Array<Record<string, unknown>> | undefined;
+      if (!statuses?.length) throw new Error('腾讯云短信未返回发送状态');
+      const failed = statuses.find((item) => item.Code !== 'Ok');
+      if (failed) throw new Error(String(failed.Message ?? `腾讯云短信返回错误码 ${failed.Code}`));
+    }
+    if (provider === 'nextcloud-talk') {
+      const meta = (parsed.ocs as Record<string, unknown> | undefined)?.meta as Record<string, unknown> | undefined;
+      if (meta?.statuscode !== undefined && Number(meta.statuscode) !== 100) throw new Error(String(meta.message ?? 'Nextcloud Talk 拒绝了消息'));
+    }
     if (provider === 'onebot') {
       if (parsed.status !== undefined && parsed.status !== 'ok') throw new Error(String(parsed.message ?? parsed.wording ?? 'OneBot 拒绝了消息'));
       if (parsed.retcode !== undefined && Number(parsed.retcode) !== 0) throw new Error(String(parsed.message ?? parsed.wording ?? `OneBot 返回错误码 ${parsed.retcode}`));

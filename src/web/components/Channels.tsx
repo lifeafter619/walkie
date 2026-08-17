@@ -24,6 +24,7 @@ const SMTP_PRESETS: Record<string, { host: string; port: number; secure: boolean
 };
 
 const SMTP_LOCKED_KEYS = new Set(['host', 'port', 'secure']);
+const supportLabel = (support?: ProviderDefinition['support']) => support === 'gateway' ? '兼容网关' : support === 'custom' ? '自定义' : '原生直连';
 
 /* 静默时段时区下拉的常用项；浏览器当前时区不在列表时动态插到最前 */
 const COMMON_TIMEZONES = [
@@ -113,7 +114,7 @@ export function ChannelForm({
             <ProviderIcon provider={definition.id} name={definition.name} size={30} />
             <div>
               <strong>{definition.name}</strong>
-              <p>{definition.description}</p>
+              <p>{supportLabel(definition.support)} · {definition.description}</p>
             </div>
             <a href={definition.docsUrl} target="_blank" rel="noreferrer" title="打开官方文档"><ExternalLink size={15} /></a>
             <Button type="button" onClick={() => setPicking(true)} disabled={Boolean(channel)} title={channel ? '编辑时不可更换渠道类型' : undefined}>更换</Button>
@@ -322,7 +323,7 @@ export function Channels({
                         <ProviderIcon provider={channel.provider} name={provider?.name} size={30} />
                         <span>
                           {provider?.name ?? channel.provider}
-                          <small>{provider?.category}</small>
+                          <small>{supportLabel(provider?.support)} · {provider?.category}</small>
                         </span>
                       </span>
                     </td>
@@ -331,8 +332,8 @@ export function Channels({
                     </td>
                     <td>
                       {channel.lastTestStatus === 'untested'
-                        ? <span className="muted">未测试</span>
-                        : <Badge status={channel.lastTestStatus} />}
+                        ? <span className="muted">未真实测试</span>
+                        : <span title={channel.lastTestError}><Badge status={channel.lastTestStatus} />{channel.lastTestAt && <small className="muted"> {new Date(channel.lastTestAt).toLocaleString()}</small>}</span>}
                     </td>
                     <td>
                       <button className={`switch ${channel.enabled ? 'on' : ''}`} aria-label={channel.enabled ? '停用频道' : '启用频道'} onClick={() => act(channel, 'toggle')} disabled={busyId !== ''}>

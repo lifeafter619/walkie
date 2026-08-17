@@ -1,4 +1,23 @@
 export type ProviderId =
+  | 'whatsapp'
+  | 'signal'
+  | 'wecom-app'
+  | 'qq-bot'
+  | 'kook'
+  | 'fcm'
+  | 'expo'
+  | 'onesignal'
+  | 'sendgrid'
+  | 'resend'
+  | 'postmark'
+  | 'mailgun'
+  | 'brevo'
+  | 'aliyun-sms'
+  | 'tencent-sms'
+  | 'home-assistant'
+  | 'nextcloud-talk'
+  | 'alertmanager'
+  | 'jira-service-management'
   | 'pushdeer'
   | 'chanify'
   | 'pushme'
@@ -57,6 +76,9 @@ export interface ProviderDefinition {
   description: string;
   docsUrl: string;
   fields: ConfigField[];
+  /** 原生直连、外部网关兼容层或用户自定义请求。 */
+  support?: 'native' | 'gateway' | 'custom';
+  capabilities?: Array<'text' | 'markdown' | 'link' | 'image' | 'email' | 'sms' | 'incident' | 'receipt'>;
 }
 
 export interface Channel {
@@ -72,6 +94,7 @@ export interface Channel {
   quietHours?: string;
   lastTestStatus: 'untested' | 'success' | 'failed';
   lastTestError?: string;
+  lastTestAt?: string;
   createdAt: string;
   updatedAt: string;
 }
