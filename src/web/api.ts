@@ -1,4 +1,4 @@
-import type { ApiKey, Channel, Conversation, CredentialStatus, DashboardStats, Delivery, Destination, ProviderDefinition, Route } from '../shared/types';
+import type { ApiKey, AuditEvent, Channel, Conversation, CredentialStatus, DashboardStats, Delivery, Destination, ProviderDefinition, RetentionSettings, Route } from '../shared/types';
 
 const TOKEN_KEY = 'walkie_admin_token';
 export const getToken = () => localStorage.getItem(TOKEN_KEY) ?? '';
@@ -41,14 +41,32 @@ export const api = {
   revokeKey: (id: string) => request<{ success: boolean }>(`/api/admin/keys/${id}/revoke`, { method: 'POST' }),
   restoreKey: (id: string) => request<{ success: boolean }>(`/api/admin/keys/${id}/restore`, { method: 'POST' }),
   deleteKey: (id: string) => request<void>(`/api/admin/keys/${id}`, { method: 'DELETE' }),
-  deliveries: (status = '') => request<{ deliveries: Delivery[] }>(`/api/admin/deliveries${status ? `?status=${status}` : ''}`),
+  deliveries: (status = '', q = '', before = '') => {
+    const query = new URLSearchParams();
+    if (status) query.set('status', status);
+    if (q) query.set('q', q);
+    if (before) query.set('before', before);
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return request<{ deliveries: Delivery[] }>(`/api/admin/deliveries${suffix}`);
+  },
   delivery: (id: string) => request<Delivery>(`/api/admin/deliveries/${id}`),
   send: (body: unknown) => request<Delivery>('/api/admin/send', { method: 'POST', body: JSON.stringify(body) }),
   conversations: (pending = false) => request<{ conversations: Conversation[] }>(`/api/admin/conversations${pending ? '?pending=1' : ''}`),
   replyConversation: (id: string, reply: string) => request<{ success: boolean }>(`/api/admin/conversations/${id}/reply`, { method: 'POST', body: JSON.stringify({ reply }) }),
   credentials: () => request<CredentialStatus>('/api/admin/credentials'),
+  auditEvents: (params: { limit?: number; actor?: string; action?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (params.limit) query.set('limit', String(params.limit));
+    if (params.actor) query.set('actor', params.actor);
+    if (params.action) query.set('action', params.action);
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return request<{ events: AuditEvent[] }>(`/api/admin/audit${suffix}`);
+  },
   rotateAdminToken: (body: unknown) => request<{ token: string }>('/api/admin/credentials/admin-token', { method: 'POST', body: JSON.stringify(body) }),
   rotateMasterKey: () => request<{ version: number; rotatedAt: string }>('/api/admin/credentials/master-key/rotate', { method: 'POST' }),
   checkUpdate: () => request<{ currentVersion: string; latestVersion: string; hasUpdate: boolean; releaseNotes?: string; releaseUrl?: string; canApply: boolean; applyHint?: string }>('/api/admin/update/check'),
-  applyUpdate: () => request<{ success: boolean; message: string; needsRestart: boolean }>('/api/admin/update/apply', { method: 'POST' })
+  applyUpdate: () => request<{ success: boolean; message: string; needsRestart: boolean }>('/api/admin/update/apply', { method: 'POST' }),
+  getRetention: () => request<RetentionSettings>('/api/admin/retention'),
+  setRetention: (body: RetentionSettings) => request<RetentionSettings>('/api/admin/retention', { method: 'PUT', body: JSON.stringify(body) }),
+  purgeNow: () => request<{ deliveries: number; conversations: number; auditEvents: number }>('/api/admin/retention/purge', { method: 'POST' })
 };

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity, Code2, EllipsisVertical, KeyRound, LayoutDashboard, LoaderCircle, LogOut, Radio, Menu,
-  MessageCircleQuestion, MessageSquareText, RefreshCw, Route as RouteIcon, ServerCog, X
+  MessageCircleQuestion, MessageSquareText, RefreshCw, Route as RouteIcon, ScrollText, ServerCog, X
 } from 'lucide-react';
 import type { ApiKey, Channel, DashboardStats, Delivery, Destination, ProviderDefinition, Route } from '../shared/types';
 import { api, ApiError, getToken, setToken } from './api';
@@ -15,8 +15,9 @@ import { Conversations } from './components/Conversations';
 import { Keys } from './components/Keys';
 import { Integrations } from './components/Integrations';
 import { SystemPage } from './components/SystemPage';
+import { Audit } from './components/Audit';
 
-type Page = 'overview' | 'channels' | 'routes' | 'deliveries' | 'conversations' | 'keys' | 'integrations' | 'system';
+type Page = 'overview' | 'channels' | 'routes' | 'deliveries' | 'conversations' | 'keys' | 'integrations' | 'audit' | 'system';
 type Meta = Awaited<ReturnType<typeof api.meta>>;
 
 const nav: Array<{ id: Page; label: string; icon: typeof Radio }> = [
@@ -27,6 +28,7 @@ const nav: Array<{ id: Page; label: string; icon: typeof Radio }> = [
   { id: 'conversations', label: '会话', icon: MessageCircleQuestion },
   { id: 'keys', label: '密钥', icon: KeyRound },
   { id: 'integrations', label: '接入', icon: Code2 },
+  { id: 'audit', label: '审计', icon: ScrollText },
   { id: 'system', label: '系统', icon: ServerCog }
 ];
 
@@ -53,6 +55,8 @@ export default function App() {
   const [routes, setRoutes] = useState<Route[]>([]);
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
+  // 概览「最近投递」专用：不受投递页状态筛选影响，始终是最新全量
+  const [recentDeliveries, setRecentDeliveries] = useState<Delivery[]>([]);
   const [destinations, setDestinations] = useState<Destination[]>([]);
   const [pendingConversations, setPendingConversations] = useState(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -85,18 +89,30 @@ export default function App() {
     deliveryFilterRef.current = status;
     setDeliveryFilter(status);
   }, []);
+  // 服务端搜索词同模式提升（防抖在 Deliveries 组件内做，这里只存已提交的值）
+  const deliverySearchRef = useRef('');
+  const changeDeliverySearch = useCallback((q: string) => {
+    deliverySearchRef.current = q;
+  }, []);
 
   const loadAll = useCallback(async (quiet = false) => {
     try {
-      const [nextStats, channelData, routeData, keyData, deliveryData, destinationData, providerData, conversationData] = await Promise.all([
+      // 概览的「最近投递」永远展示未筛选数据：投递页筛选激活时补拉一份全量，
+      // 否则筛选「失败」后概览会只显示失败投递（甚至误报「暂无投递」）
+      const filter = deliveryFilterRef.current;
+      const search = deliverySearchRef.current;
+      const filteredDeliveries = api.deliveries(filter, search);
+      const recentDeliveries = filter || search ? api.deliveries() : filteredDeliveries;
+      const [nextStats, channelData, routeData, keyData, deliveryData, recentData, destinationData, providerData, conversationData] = await Promise.all([
         api.stats(), api.channels(), api.routes(), api.keys(),
-        api.deliveries(deliveryFilterRef.current), api.destinations(), api.providers(), api.conversations(true)
+        filteredDeliveries, recentDeliveries, api.destinations(), api.providers(), api.conversations(true)
       ]);
       setStats(nextStats);
       setChannels(channelData.channels);
       setRoutes(routeData.routes);
       setKeys(keyData.keys);
       setDeliveries(deliveryData.deliveries);
+      setRecentDeliveries(recentData.deliveries);
       setDestinations(destinationData.destinations);
       setProviders(providerData.providers);
       setPendingConversations(conversationData.conversations.length);
@@ -137,10 +153,18 @@ export default function App() {
     return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
   }, [authenticated, loadAll]);
 
-  // 投递列表轻量轮询（Deliveries 页内有未终结投递时调用，quiet 避免轮询失败刷 toast）
-  const refreshDeliveries = useCallback(async (status = '', quiet = false) => {
+  // 投递列表轻量轮询/分页（Deliveries 页使用；quiet 避免轮询失败刷 toast）
+  const refreshDeliveries = useCallback(async (status = '', q = '', before = '', quiet = false, append = false) => {
     try {
-      setDeliveries((await api.deliveries(status)).deliveries);
+      const result = await api.deliveries(status, q, before);
+      setDeliveries((old) => {
+        if (!append) return result.deliveries;
+        // 加载更多：按 id 去重合并（before 游标页与当前页理论上不重叠，稳妥起见仍去重）
+        const seen = new Set(old.map((item) => item.id));
+        return [...old, ...result.deliveries.filter((item) => !seen.has(item.id))];
+      });
+      // 筛选/搜索激活时这份是子集，不能覆盖概览的全量「最近投递」；无筛选时恰好是全量最新页
+      if (!status && !q && !before) setRecentDeliveries(result.deliveries);
     } catch (error) {
       if (!quiet) notify('error', error instanceof Error ? error.message : '加载失败');
     }
@@ -167,19 +191,21 @@ export default function App() {
   if (!authenticated) return <><Login meta={meta} onSuccess={loadAll} />{toastStack}</>;
 
   const content = page === 'overview'
-    ? <Overview stats={stats} deliveries={deliveries} destinations={destinations} refresh={refresh} notify={notify} />
+    ? <Overview stats={stats} deliveries={recentDeliveries} destinations={destinations} refresh={refresh} notify={notify} />
     : page === 'channels'
     ? <Channels channels={channels} providers={providers} refresh={refresh} notify={notify} />
     : page === 'routes'
     ? <Routes routes={routes} channels={channels} refresh={refresh} notify={notify} />
     : page === 'deliveries'
-    ? <Deliveries deliveries={deliveries} refresh={refreshDeliveries} notify={notify} filterStatus={deliveryFilter} onFilterChange={changeDeliveryFilter} />
+    ? <Deliveries deliveries={deliveries} refresh={refreshDeliveries} notify={notify} filterStatus={deliveryFilter} onFilterChange={changeDeliveryFilter} onSearchChange={changeDeliverySearch} />
     : page === 'conversations'
     ? <Conversations notify={notify} onChanged={refresh} />
     : page === 'keys'
     ? <Keys keys={keys} destinations={destinations} refresh={refresh} notify={notify} />
     : page === 'integrations'
     ? <Integrations meta={meta} keys={keys} notify={notify} />
+    : page === 'audit'
+    ? <Audit notify={notify} />
     : <SystemPage meta={meta} channels={channels} providers={providers} refresh={refresh} notify={notify} />;
 
   return (
@@ -205,7 +231,7 @@ export default function App() {
             <button
               type="button"
               className="logout-button"
-              onClick={() => { setToken(''); setAuthenticated(false); }}
+              onClick={() => { setToken(''); setSheet(false); setAuthenticated(false); }}
             >
               <LogOut size={13} />
               退出登录
@@ -262,7 +288,7 @@ export default function App() {
             <div className="sheet-actions">
               <IconButton label="刷新数据" icon={RefreshCw} onClick={refresh} />
               <span className="version-badge" title={`Walkie v${meta.version} · ${meta.runtime}`}>v{meta.version}</span>
-              <button type="button" className="logout-button" onClick={() => { setToken(''); setAuthenticated(false); }}>
+              <button type="button" className="logout-button" onClick={() => { setToken(''); setSheet(false); setAuthenticated(false); }}>
                 <LogOut size={13} />
                 退出登录
               </button>

@@ -5,7 +5,7 @@ import { ZodError } from 'zod';
 import type { AuthInfo } from '@modelcontextprotocol/server';
 import type { ApiKey, ProviderId } from '../shared/types.js';
 import { VERSION } from '../shared/version.js';
-import { askSchema, channelSchema, credentialTokenSchema, keySchema, keyUpdateSchema, notificationSchema, routeSchema } from '../shared/schemas.js';
+import { askSchema, channelSchema, credentialTokenSchema, keySchema, keyUpdateSchema, notificationSchema, retentionSchema, routeSchema } from '../shared/schemas.js';
 import { RelayRepository } from '../server/database.js';
 import { generateAdminToken, safeSecretEqual, safeTokenEqual } from '../server/crypto.js';
 import { createRelayMcpHandler } from '../server/mcp.js';
@@ -86,6 +86,10 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
 
   async alarm(): Promise<void> {
     await this.drainAndSchedule();
+    // 数据保留清理挂在 alarm 上（幂等，retention 全 0 时零开销）。空闲实例无 alarm，
+    // 但空闲时也无新数据产生；下一次活动触发 alarm 后过期行自然被清
+    try { await this.repository.purgeExpiredData(); }
+    catch (error) { console.error(JSON.stringify({ event: 'retention.purge.failed', message: error instanceof Error ? error.message : String(error) })); }
   }
 
   private async drainAndSchedule(): Promise<void> {
@@ -306,6 +310,18 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     }
     if (path === '/api/admin/credentials/master-key/rotate' && request.method === 'POST') return json(await this.repository.rotateMasterKey());
 
+    if (path === '/api/admin/audit' && request.method === 'GET') {
+      return json({ events: await this.repository.listAuditEvents({
+        limit: Number(url.searchParams.get('limit') ?? 100),
+        actor: url.searchParams.get('actor') || undefined,
+        action: url.searchParams.get('action') || undefined
+      }) });
+    }
+
+    if (path === '/api/admin/retention' && request.method === 'GET') return json(await this.repository.getRetention());
+    if (path === '/api/admin/retention' && request.method === 'PUT') return json(await this.repository.setRetention(retentionSchema.parse(await readBody(request))));
+    if (path === '/api/admin/retention/purge' && request.method === 'POST') return json(await this.repository.purgeExpiredData());
+
     if (path === '/api/admin/update/check' && request.method === 'GET') {
       const repo = this.env.UPDATE_REPO ?? 'lifeafter619/walkie';
       const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`;
@@ -325,7 +341,12 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       return json({ success: false, message: 'Cloudflare Workers 不支持应用内更新，请运行 npm run deploy:cf 重新部署。', needsRestart: false });
     }
 
-    if (path === '/api/admin/deliveries' && request.method === 'GET') return json({ deliveries: await this.repository.listDeliveries({ limit: Number(url.searchParams.get('limit') ?? 100), status: url.searchParams.get('status') ?? undefined }) });
+    if (path === '/api/admin/deliveries' && request.method === 'GET') return json({ deliveries: await this.repository.listDeliveries({
+      limit: Number(url.searchParams.get('limit') ?? 100),
+      status: url.searchParams.get('status') ?? undefined,
+      q: url.searchParams.get('q') || undefined,
+      before: url.searchParams.get('before') || undefined
+    }) });
     const delivery = /^\/api\/admin\/deliveries\/([^/]+)$/.exec(path);
     if (delivery && request.method === 'GET') {
       const item = await this.repository.getDelivery(delivery[1]);

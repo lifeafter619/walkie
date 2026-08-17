@@ -116,6 +116,8 @@ export interface Channel {
   rateLimitPerMin?: number;
   /** 静默时段 "HH:MM-HH:MM"（服务器本地时间），critical 消息穿透 */
   quietHours?: string;
+  /** 每频道重试上限；0 = 继承全局 MAX_DELIVERY_ATTEMPTS */
+  maxAttempts?: number;
   lastTestStatus: 'untested' | 'success' | 'failed';
   lastTestError?: string;
   lastTestAt?: string;
@@ -252,4 +254,22 @@ export interface MasterKeyStatus {
 export interface CredentialStatus {
   admin: AdminTokenStatus;
   masterKey: MasterKeyStatus;
+}
+
+/** 审计事件：管理员与 Agent 的全部变更操作（channel/key/route/credential/conversation） */
+export interface AuditEvent {
+  id: string;
+  actor: string;
+  action: string;
+  resourceType: string;
+  resourceId?: string;
+  details: Record<string, unknown>;
+  createdAt: string;
+}
+
+/** 数据保留策略：各表保留天数，0 = 永久保留（默认） */
+export interface RetentionSettings {
+  deliveriesDays: number;
+  conversationsDays: number;
+  auditDays: number;
 }
