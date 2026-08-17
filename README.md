@@ -239,7 +239,7 @@ Agent  ── check_reply 长轮询 ──► 拿到答案，继续执行
 | `ALLOW_INSECURE_HTTP` | `false` | 允许 HTTP 通知地址 |
 | `DELIVERY_WORKERS` | `2` | 每轮并发投递数 |
 | `MAX_SENDS_PER_MIN` | `0` | 全局每分钟发送上限，0 不限 |
-| `MAX_DELIVERY_ATTEMPTS` | `4` | 单渠道最大尝试次数（指数退避） |
+| `MAX_DELIVERY_ATTEMPTS` | `4` | 单渠道最大尝试次数（指数退避）；频道可单独设「重试上限」覆盖 |
 | `RETRY_BASE_MS` | `2000` | 重试退避基数 |
 | `PUBLIC_URL` | — | 站点对外地址（回复链接、MCP 配置展示用） |
 | `UPDATE_REPO` | `lifeafter619/walkie` | 应用内版本检查指向的 GitHub 仓库（owner/name，自建 fork 时改这里） |
@@ -252,7 +252,8 @@ Agent  ── check_reply 长轮询 ──► 拿到答案，继续执行
 - Agent Key 与管理密码只存 sha256 哈希做鉴权；Agent Key 另存一份加密副本供面板查看复制；
 - 出站通知默认拒绝私网/回环/保留地址与明文 HTTP（SSRF 防护），重定向一律拒绝；
 - 每个 Agent Key 可限定 scope（发送/读取/配置管理）与目的地白名单（如 5 个渠道开 5 个 Key 各管一个），可随时编辑范围，一键吊销；
-- 回复链接带一次性 token，回复后立即失效；所有敏感操作写审计表。
+- 回复链接带一次性 token，回复后立即失效；所有敏感操作写审计表，「审计」页可按操作者与动作类型检索；
+- 「系统」页可配置数据保留策略（投递/会话/审计各自保留天数，0 为永久），每日自动清理过期数据，也可手动触发。
 
 ## 常见问题
 

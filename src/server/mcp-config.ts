@@ -44,7 +44,8 @@ export function registerConfigTools(server: McpServer, repository: RelayReposito
       config: z.record(z.string(), z.unknown()),
       enabled: z.boolean().optional(),
       rateLimitPerMin: z.number().int().min(0).max(600).nullish(),
-      quietHours: quietHoursSchema
+      quietHours: quietHoursSchema,
+      maxAttempts: z.number().int().min(0).max(10).optional()
     }),
     annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false }
   }, async (input) => {
@@ -64,7 +65,8 @@ export function registerConfigTools(server: McpServer, repository: RelayReposito
       config: z.record(z.string(), z.unknown()).optional(),
       enabled: z.boolean().optional(),
       rateLimitPerMin: z.number().int().min(0).max(600).nullish(),
-      quietHours: quietHoursSchema
+      quietHours: quietHoursSchema,
+      maxAttempts: z.number().int().min(0).max(10).optional()
     }),
     annotations: { destructiveHint: false, openWorldHint: false }
   }, async ({ channel: ref, provider, config, ...rest }) => {
