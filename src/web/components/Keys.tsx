@@ -86,7 +86,7 @@ export function KeyForm({
       ) : (
         <form className="modal-body" onSubmit={submit}>
           <label>名称
-            <input autoFocus value={name} onChange={(event) => setName(event.target.value)} required placeholder="CI 发布 Agent" />
+            <input autoFocus maxLength={100} value={name} onChange={(event) => setName(event.target.value)} required placeholder="CI 发布 Agent" />
           </label>
           {!editing && (
             <label>自定义密钥<span className="optional">可选，留空自动生成</span>
@@ -145,7 +145,7 @@ export function Keys({
 }: {
   keys: ApiKey[];
   destinations: Destination[];
-  refresh: () => void;
+  refresh: () => Promise<void> | void;
   notify: Notify;
 }) {
   const [creating, setCreating] = useState(false);
@@ -163,7 +163,7 @@ export function Keys({
       await api.revokeKey(key.id);
       notify('success', '密钥已吊销');
       setRevealId(null);
-      refresh();
+      await refresh();
     } catch (error) {
       notify('error', error instanceof Error ? error.message : '吊销失败');
     } finally {
@@ -177,7 +177,7 @@ export function Keys({
     try {
       await api.restoreKey(key.id);
       notify('success', '密钥已重新启用');
-      refresh();
+      await refresh();
     } catch (error) {
       notify('error', error instanceof Error ? error.message : '启用失败');
     } finally {
@@ -192,7 +192,7 @@ export function Keys({
       await api.deleteKey(deletingId);
       notify('success', '密钥已彻底删除');
       setDeletingId(null);
-      refresh();
+      await refresh();
     } catch (error) {
       notify('error', error instanceof Error ? error.message : '删除失败');
     } finally {

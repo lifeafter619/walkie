@@ -73,30 +73,53 @@ export function DeliveryDetail({ id, close, notify }: { id: string; close: () =>
 }
 
 export function Deliveries({
-  deliveries, refresh, notify, filterStatus: status, onFilterChange
+  deliveries, refresh, notify, filterStatus: status, onFilterChange, onSearchChange
 }: {
   deliveries: Delivery[];
-  refresh: (status?: string, quiet?: boolean) => void;
+  refresh: (status?: string, q?: string, before?: string, quiet?: boolean, append?: boolean) => Promise<void>;
   notify: Notify;
   /** 筛选状态由 App 持有：30s 全量轮询要沿用当前筛选，否则无筛选数据会覆盖列表 */
   filterStatus: string;
   onFilterChange: (status: string) => void;
+  /** 服务端搜索词提交回调（App 存 ref 供轮询沿用） */
+  onSearchChange: (q: string) => void;
 }) {
   const [selected, setSelected] = useState('');
   const [query, setQuery] = useState('');
+  const [loadingMore, setLoadingMore] = useState(false);
 
-  const filtered = deliveries.filter((item) =>
-    `${item.title} ${item.targetName ?? ''} ${item.id}`.toLowerCase().includes(query.toLowerCase())
-  );
-  const changeStatus = (next: string) => { onFilterChange(next); refresh(next); };
+  // 服务端搜索：300ms 防抖提交（q 透传到 SQL LIKE，不再局限于已加载的 100 条）
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      onSearchChange(query);
+      void refresh(status, query);
+    }, 300);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
 
-  // 有未终结投递时每 5 秒静默刷新，全部到终态后自动停止
+  const changeStatus = (next: string) => { onFilterChange(next); void refresh(next, query); };
+
+  // 有未终结投递时每 5 秒静默刷新（仅第一页），全部到终态后自动停止；后台标签暂停
   const hasActive = deliveries.some((item) => item.status === 'queued' || item.status === 'processing');
   useEffect(() => {
     if (!hasActive) return;
-    const timer = window.setInterval(() => refresh(status, true), 5000);
+    const timer = window.setInterval(() => { if (!document.hidden) void refresh(status, query, '', true); }, 5000);
     return () => window.clearInterval(timer);
-  }, [hasActive, status, refresh]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasActive, status, query]);
+
+  const loadMore = async () => {
+    if (loadingMore || deliveries.length < 50) return;
+    setLoadingMore(true);
+    try {
+      // 以当前最旧一条的 createdAt 为游标取更早的一页
+      const oldest = deliveries[deliveries.length - 1];
+      await refresh(status, query, oldest.createdAt, false, true);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   return (
     <>
@@ -129,7 +152,7 @@ export function Deliveries({
               <tr><th>通知</th><th>目的地</th><th>级别</th><th>来源</th><th>状态</th><th>创建时间</th><th /></tr>
             </thead>
             <tbody>
-              {filtered.map((item) => (
+              {deliveries.map((item) => (
                 <tr className="clickable-row" key={item.id} onClick={() => setSelected(item.id)}>
                   <td>
                     <strong className="table-title">{item.title}</strong>
@@ -145,8 +168,16 @@ export function Deliveries({
               ))}
             </tbody>
           </table>
-          {!filtered.length && (
+          {!deliveries.length ? (
             <Empty icon={Activity} title="暂无投递记录" text="符合当前筛选条件的投递会显示在这里。" />
+          ) : (
+            <div className="list-footer">
+              {/* 服务端按时间倒序取页；页满说明可能还有更早的记录 */}
+              {deliveries.length >= 50 && (
+                <Button onClick={loadMore} loading={loadingMore} disabled={loadingMore}>加载更早的投递</Button>
+              )}
+              {deliveries.length < 50 && <span className="muted" style={{ fontSize: 12 }}>已到最早记录</span>}
+            </div>
           )}
         </div>
       </section>

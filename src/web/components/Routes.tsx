@@ -54,10 +54,10 @@ export function RouteForm({
       <form className="modal-body" onSubmit={submit}>
         <div className="form-grid">
           <label>名称
-            <input autoFocus required value={name} onChange={(event) => { setName(event.target.value); if (!route) setSlug(slugify(event.target.value)); }} placeholder="生产事故通知" />
+            <input autoFocus required maxLength={100} value={name} onChange={(event) => { setName(event.target.value); if (!route) setSlug(slugify(event.target.value)); }} placeholder="生产事故通知" />
           </label>
           <label>标识符
-            <input required value={routeSlug} onChange={(event) => setSlug(event.target.value)} pattern="[a-z0-9](?:[a-z0-9]|-)*" placeholder="prod-incidents" />
+            <input required value={routeSlug} onChange={(event) => setSlug(event.target.value)} minLength={2} maxLength={80} pattern="[a-z0-9](?:[a-z0-9]|-)*" placeholder="prod-incidents" />
           </label>
         </div>
 

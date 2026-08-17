@@ -16,9 +16,10 @@ type Client = 'codex' | 'claude' | 'cursor' | 'generic';
  * MCP 接入：端点 + 客户端配置片段 + 已有 API Key 快速复制。
  * ──────────────────────────────────────────────────────────── */
 
+/* 掩码至少遮住一半：短密钥（自定义密钥最短 8 位）按老算法会亮出一半甚至更多字符 */
 function maskSecret(secret: string): string {
-  if (secret.length <= 12) return secret.slice(0, 4) + '••••';
-  return secret.slice(0, 8) + '••••' + secret.slice(-4);
+  const hide = Math.max(4, Math.ceil(secret.length / 2));
+  return secret.slice(0, Math.max(2, secret.length - hide - 4)) + '••••' + secret.slice(-2);
 }
 
 export function Integrations({ meta, keys, notify }: { meta: Meta; keys: ApiKey[]; notify: Notify }) {

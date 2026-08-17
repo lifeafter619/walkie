@@ -53,6 +53,8 @@ export function ChannelForm({
   const [provider, setProvider] = useState<ProviderId>(channel?.provider ?? providers[0]?.id ?? 'telegram');
   const [config, setConfig] = useState<Record<string, unknown>>({});
   const [rateLimit, setRateLimit] = useState(channel?.rateLimitPerMin ?? 0);
+  // 每频道重试上限：0 = 继承全局 MAX_DELIVERY_ATTEMPTS；付费渠道可设 1 只发一次
+  const [maxAttempts, setMaxAttempts] = useState(channel?.maxAttempts ?? 0);
   // 静默时段拆成三个选择器输入（time 滚轮 + 时区下拉），提交时拼回 "HH:MM-HH:MM@TZ" 存储格式
   const quietStored = channel?.quietHours ?? '';
   const quietParsed = /^(\d{2}:\d{2})-(\d{2}:\d{2})(?:@(.+))?$/.exec(quietStored);
@@ -84,7 +86,7 @@ export function ChannelForm({
         : config;
       // 静默时段：起止都选了才生效；只选了一半按未设置处理（后端无法表达半段区间）
       const quietHours = quietStart && quietEnd ? `${quietStart}-${quietEnd}@${quietTz}` : null;
-      const body = { name, slug: channelSlug || slugify(name), provider, config: cleanedConfig, rateLimitPerMin: rateLimit || null, quietHours };
+      const body = { name, slug: channelSlug || slugify(name), provider, config: cleanedConfig, rateLimitPerMin: rateLimit || null, quietHours, maxAttempts: maxAttempts || 0 };
       channel ? await api.updateChannel(channel.id, body) : await api.createChannel(body);
       notify('success', channel ? '频道已更新' : '频道已创建');
       saved();
@@ -101,10 +103,10 @@ export function ChannelForm({
       <form onSubmit={submit} className="modal-body">
         <div className="form-grid">
           <label>名称
-            <input autoFocus value={name} onChange={(event) => { setName(event.target.value); if (!channel) setSlug(slugify(event.target.value)); }} required placeholder="生产告警群" />
+            <input autoFocus maxLength={100} value={name} onChange={(event) => { setName(event.target.value); if (!channel) setSlug(slugify(event.target.value)); }} required placeholder="生产告警群" />
           </label>
           <label>标识符
-            <input value={channelSlug} onChange={(event) => setSlug(event.target.value)} required pattern="[a-z0-9](?:[a-z0-9]|-)*" placeholder="prod-alerts" />
+            <input value={channelSlug} onChange={(event) => setSlug(event.target.value)} required minLength={2} maxLength={80} pattern="[a-z0-9](?:[a-z0-9]|-)*" placeholder="prod-alerts" />
           </label>
         </div>
 
@@ -213,20 +215,24 @@ export function ChannelForm({
           <label>每分钟限流<span className="optional">0 为不限</span>
             <input type="number" min={0} max={600} value={rateLimit} onChange={(event) => setRateLimit(Number(event.target.value))} />
           </label>
-          <label>静默时段<span className="optional">可选</span>
-            <div className="quiet-hours-inputs">
-              <input type="time" value={quietStart} onChange={(event) => setQuietStart(event.target.value)} aria-label="静默开始时间" />
-              <span className="quiet-sep">至</span>
-              <input type="time" value={quietEnd} onChange={(event) => setQuietEnd(event.target.value)} aria-label="静默结束时间" />
-            </div>
-            <select value={quietTz} onChange={(event) => setQuietTz(event.target.value)} aria-label="静默时段时区">
-              {Array.from(new Set([quietTz, ...COMMON_TIMEZONES])).map((tz) => (
-                <option key={tz} value={tz}>{tz}</option>
-              ))}
-            </select>
-            <small>静默期内消息延后发送，critical 级别照常送达；起止时间都选择后生效，清空任一即关闭</small>
+          <label>重试上限<span className="optional">0 为继承全局</span>
+            <input type="number" min={0} max={10} value={maxAttempts} onChange={(event) => setMaxAttempts(Number(event.target.value))} />
           </label>
         </div>
+
+        <label>静默时段<span className="optional">可选</span>
+          <div className="quiet-hours-inputs">
+            <input type="time" value={quietStart} onChange={(event) => setQuietStart(event.target.value)} aria-label="静默开始时间" />
+            <span className="quiet-sep">至</span>
+            <input type="time" value={quietEnd} onChange={(event) => setQuietEnd(event.target.value)} aria-label="静默结束时间" />
+          </div>
+          <select value={quietTz} onChange={(event) => setQuietTz(event.target.value)} aria-label="静默时段时区">
+            {Array.from(new Set([quietTz, ...COMMON_TIMEZONES])).map((tz) => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+          <small>静默期内消息延后发送，critical 级别照常送达；起止时间都选择后生效，清空任一即关闭</small>
+        </label>
 
         <footer className="modal-actions">
           <Button type="button" onClick={close}>取消</Button>
@@ -242,7 +248,7 @@ export function Channels({
 }: {
   channels: Channel[];
   providers: ProviderDefinition[];
-  refresh: () => void;
+  refresh: () => Promise<void> | void;
   notify: Notify;
 }) {
   const [query, setQuery] = useState('');
@@ -256,6 +262,8 @@ export function Channels({
       && `${channel.name} ${channel.slug} ${provider?.name}`.toLowerCase().includes(query.toLowerCase());
   });
 
+  // refresh 是 async loadAll；等它完成再清 busy 态，否则开关仍渲染旧 enabled，
+  // 用户在刷新窗口内再点一次会发出反向预期外的一次 toggle（SystemPage 同款约定）
   const act = async (channel: Channel, action: 'toggle' | 'test' | 'delete') => {
     setBusyId(channel.id + action);
     try {
@@ -270,10 +278,10 @@ export function Channels({
         await api.deleteChannel(channel.id);
         notify('success', '频道已删除');
       }
-      refresh();
+      await refresh();
     } catch (error) {
       notify('error', error instanceof Error ? error.message : '操作失败');
-      refresh();
+      await refresh();
     } finally {
       setBusyId('');
     }
