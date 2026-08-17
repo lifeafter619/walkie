@@ -313,7 +313,7 @@ export function Channels({
 
       <section className="panel">
         <div className="table-wrap">
-          <table>
+          <table className="responsive-table">
             <thead>
               <tr><th>频道</th><th>服务</th><th>配置</th><th>测试状态</th><th>启用</th><th className="actions-col">操作</th></tr>
             </thead>
@@ -322,11 +322,11 @@ export function Channels({
                 const provider = providers.find((item) => item.id === channel.provider);
                 return (
                   <tr key={channel.id} className={!channel.enabled ? 'disabled-row' : ''}>
-                    <td>
+                    <td data-label="频道">
                       <strong className="table-title">{channel.name}</strong>
                       <code>{channel.slug}</code>
                     </td>
-                    <td>
+                    <td data-label="服务">
                       <span className="provider-cell">
                         <ProviderIcon provider={channel.provider} name={provider?.name} size={30} />
                         <span>
@@ -335,20 +335,20 @@ export function Channels({
                         </span>
                       </span>
                     </td>
-                    <td>
+                    <td data-label="配置">
                       <span className="config-count"><KeyRound size={14} />{channel.configKeys.length} 项凭据</span>
                     </td>
-                    <td>
+                    <td data-label="测试状态">
                       {channel.lastTestStatus === 'untested'
                         ? <span className="muted">未真实测试</span>
                         : <span title={channel.lastTestError}><Badge status={channel.lastTestStatus} />{channel.lastTestAt && <small className="muted"> {new Date(channel.lastTestAt).toLocaleString()}</small>}</span>}
                     </td>
-                    <td>
+                    <td data-label="启用">
                       <button className={`switch ${channel.enabled ? 'on' : ''}`} aria-label={channel.enabled ? '停用频道' : '启用频道'} onClick={() => act(channel, 'toggle')} disabled={busyId !== ''}>
                         <span />
                       </button>
                     </td>
-                    <td>
+                    <td data-label="操作">
                       <div className="row-actions">
                         <IconButton label="发送测试" icon={busyId === channel.id + 'test' ? LoaderCircle : TestTube2} spin={busyId === channel.id + 'test'} disabled={busyId !== ''} onClick={() => act(channel, 'test')} />
                         <IconButton label="编辑" icon={Edit3} disabled={busyId !== ''} onClick={() => setEditing(channel)} />

@@ -115,21 +115,21 @@ export function Overview({
           </div>
           {deliveries.length ? (
             <div className="table-wrap">
-              <table>
+              <table className="responsive-table">
                 <thead>
                   <tr><th>消息</th><th>目的地</th><th>来源</th><th>状态</th><th>时间</th></tr>
                 </thead>
                 <tbody>
                   {deliveries.slice(0, 8).map((item) => (
                     <tr key={item.id}>
-                      <td>
+                      <td data-label="消息">
                         <strong className="table-title">{item.title}</strong>
                         <span className="muted-row">{item.id.slice(0, 8)}</span>
                       </td>
-                      <td>{item.targetName ?? item.targetId.slice(0, 8)}</td>
-                      <td>{item.source === 'admin' ? '控制台' : 'Agent'}</td>
-                      <td><Badge status={item.status} /></td>
-                      <td className="nowrap">{formatDate(item.createdAt)}</td>
+                      <td data-label="目的地">{item.targetName ?? item.targetId.slice(0, 8)}</td>
+                      <td data-label="来源">{item.source === 'admin' ? '控制台' : 'Agent'}</td>
+                      <td data-label="状态"><Badge status={item.status} /></td>
+                      <td data-label="时间" className="nowrap">{formatDate(item.createdAt)}</td>
                     </tr>
                   ))}
                 </tbody>

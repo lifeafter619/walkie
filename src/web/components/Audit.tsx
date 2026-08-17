@@ -62,18 +62,18 @@ export function Audit({ notify }: { notify: Notify }) {
 
       <section className="panel">
         <div className="table-wrap">
-          <table>
+          <table className="responsive-table">
             <thead>
               <tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>详情</th></tr>
             </thead>
             <tbody>
               {items?.map((event) => (
                 <tr key={event.id}>
-                  <td>{formatDate(event.createdAt)}</td>
-                  <td>{actorLabel(event.actor)}</td>
-                  <td>{actionLabel(event.action)}</td>
-                  <td><code>{event.resourceId ? event.resourceId.slice(0, 8) : '—'}</code></td>
-                  <td className="audit-details">{Object.keys(event.details).length ? JSON.stringify(event.details) : '—'}</td>
+                  <td data-label="时间">{formatDate(event.createdAt)}</td>
+                  <td data-label="操作者">{actorLabel(event.actor)}</td>
+                  <td data-label="动作">{actionLabel(event.action)}</td>
+                  <td data-label="对象"><code>{event.resourceId ? event.resourceId.slice(0, 8) : '—'}</code></td>
+                  <td data-label="详情" className="audit-details">{Object.keys(event.details).length ? JSON.stringify(event.details) : '—'}</td>
                 </tr>
               ))}
             </tbody>

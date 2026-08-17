@@ -147,23 +147,23 @@ export function Deliveries({
 
       <section className="panel">
         <div className="table-wrap">
-          <table>
+          <table className="responsive-table">
             <thead>
               <tr><th>通知</th><th>目的地</th><th>级别</th><th>来源</th><th>状态</th><th>创建时间</th><th /></tr>
             </thead>
             <tbody>
               {deliveries.map((item) => (
                 <tr className="clickable-row" key={item.id} onClick={() => setSelected(item.id)}>
-                  <td>
+                  <td data-label="通知">
                     <strong className="table-title">{item.title}</strong>
                     <code>{item.id.slice(0, 12)}</code>
                   </td>
-                  <td>{item.targetName ?? item.targetId.slice(0, 8)}</td>
-                  <td><span className={`severity severity-${item.severity}`}>{SEVERITY_LABEL[item.severity]}</span></td>
-                  <td>{item.source === 'admin' ? '控制台' : 'Agent'}</td>
-                  <td><Badge status={item.status} /></td>
-                  <td>{formatDate(item.createdAt)}</td>
-                  <td><ChevronRight size={16} /></td>
+                  <td data-label="目的地">{item.targetName ?? item.targetId.slice(0, 8)}</td>
+                  <td data-label="级别"><span className={`severity severity-${item.severity}`}>{SEVERITY_LABEL[item.severity]}</span></td>
+                  <td data-label="来源">{item.source === 'admin' ? '控制台' : 'Agent'}</td>
+                  <td data-label="状态"><Badge status={item.status} /></td>
+                  <td data-label="创建时间">{formatDate(item.createdAt)}</td>
+                  <td className="card-chevron"><ChevronRight size={16} /></td>
                 </tr>
               ))}
             </tbody>

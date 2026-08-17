@@ -23,6 +23,17 @@ for (const [path, url] of Object.entries(assetModules)) {
   ICON_URL[slug as ProviderId] = url;
 }
 
+const TINTED_ICONS = new Set<ProviderId>([
+  'ifttt', 'honor-push', 'oppo-push', 'vivo-push', 'meizu-push', 'huawei-push', 'xiaomi-push',
+  'pusher-beams', 'vonage-sms', 'plivo-sms', 'wecom-app', 'qq-bot', 'expo', 'resend', 'brevo',
+  'aliyun-sms', 'tencent-sms', 'home-assistant', 'matrix'
+]);
+
+/** 官方只提供黑/白标识的品牌，随主题切换以保持可见。 */
+const ADAPTIVE_ICONS = new Set<ProviderId>([
+  'ifttt', 'honor-push', 'vonage-sms', 'expo', 'resend', 'matrix'
+]);
+
 /** 各渠道的品牌主色，用于触发器边框 / 装饰等 CSS 变量 --brand */
 const BRAND_HEX: Record<ProviderId, string> = {
   join: '00AEEF',
@@ -30,7 +41,7 @@ const BRAND_HEX: Record<ProviderId, string> = {
   novu: '4700FF',
   knock: '6C5CE7',
   courier: '7C3AED',
-  'honor-push': '00A6A6',
+  'honor-push': '000000',
   'oppo-push': '006B3C',
   'vivo-push': '415FFF',
   'meizu-push': '00C3F5',
@@ -45,7 +56,7 @@ const BRAND_HEX: Record<ProviderId, string> = {
   'pusher-beams': '300D4F',
   pushpad: '4A90E2',
   'vonage-sms': '000000',
-  'plivo-sms': '00AEEF',
+  'plivo-sms': '323DFE',
   'telnyx-sms': '00B3B8',
   'bird-sms': 'FF5A5F',
   'infobip-sms': 'FF4F12',
@@ -112,14 +123,31 @@ export function ProviderIcon({ provider, name, size = 22 }: { provider: Provider
   const slug = (SLUG_OVERRIDES[provider] ?? provider) as ProviderId;
   const url = ICON_URL[slug];
   const brand = providerBrand(provider);
+  const tinted = Boolean(url && TINTED_ICONS.has(provider));
   return (
     <span
       className="provider-icon"
-      style={{ width: size, height: size, '--brand': `#${brand.hex}` } as React.CSSProperties}
+      style={{
+        width: size,
+        height: size,
+        '--brand': `#${brand.hex}`,
+        '--icon-url': url ? `url("${url}")` : undefined,
+        '--icon-paint': provider === 'plivo-sms'
+          ? 'linear-gradient(135deg, #CD3EF9, #323DFE)'
+          : provider === 'pusher-beams'
+            ? 'light-dark(#300D4F, #B786D7)'
+            : provider === 'oppo-push'
+              ? 'light-dark(#006B3C, #29C878)'
+              : undefined
+      } as React.CSSProperties}
       role="img"
       aria-label={name ?? provider}
     >
-      {url ? <img src={url} alt="" width={size} height={size} draggable={false} /> : <Bell size={Math.max(14, Math.round(size * .62))} aria-hidden="true" />}
+      {url ? (
+        tinted
+          ? <i className={`provider-icon-mask${ADAPTIVE_ICONS.has(provider) ? ' adaptive' : ''}`} aria-hidden="true" />
+          : <img src={url} alt="" width={size} height={size} draggable={false} />
+      ) : <Bell size={Math.max(14, Math.round(size * .62))} aria-hidden="true" />}
     </span>
   );
 }
