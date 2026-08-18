@@ -695,7 +695,12 @@ export class ProviderDispatcher {
       if (failures.length) throw new Error(`魅族 Push 存在无效目标: ${failures.join(', ')}`);
     }
     if (provider === 'pushy' && (parsed.success !== true || !parsed.id)) throw new Error(String(parsed.error ?? 'Pushy 未返回通知 ID'));
-    if (provider === 'pushsafer' && Number(parsed.status) !== 1) throw new Error(String((parsed.error as Array<Record<string, unknown>> | undefined)?.map((item) => item.message).join('; ') ?? 'Pushsafer 拒绝了消息'));
+    if (provider === 'pushsafer' && Number(parsed.status) !== 1) {
+      // Pushsafer 失败时 error 可能是字符串或对象数组，统一转成可读消息
+      const error = parsed.error;
+      const detail = typeof error === 'string' ? error : Array.isArray(error) ? error.map((item) => String((item as Record<string, unknown>).message ?? '')).join('; ') : '';
+      throw new Error(detail || 'Pushsafer 拒绝了消息');
+    }
     if (provider === 'simplepush' && parsed.success === false) throw new Error(String(parsed.error ?? 'Simplepush 拒绝了消息'));
     if (provider === 'huawei-push' && String(parsed.code) !== '80000000') throw new Error(String(parsed.msg ?? `华为 Push Kit 返回错误码 ${parsed.code}`));
     if (provider === 'xiaomi-push' && (Number(parsed.code) !== 0 || parsed.result !== 'ok')) throw new Error(String(parsed.description ?? parsed.info ?? `小米推送返回错误码 ${parsed.code}`));

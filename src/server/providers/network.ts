@@ -57,7 +57,10 @@ export async function safeFetch(
   const url = await assertSafeUrl(rawUrl, config, resolveHost);
   // ponytail: 解析校验与实际 fetch 之间存在 DNS TOCTOU 窗口（rebinding）。不能用「解析出 IP 后改写主机名」防御：
   // HTTPS 的 TLS SNI/证书校验必须用原始主机名，改写成 IP 会让所有 HTTPS 发送握手失败。真正钉死 IP 需自定义连接层。
-  const response = await fetcher(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(12_000) });
+  // redirect 用 'manual' 而非 Node 独有的 'error'：workerd 只接受 follow/manual，传 'error' 会让
+  // 所有 HTTP 渠道在 Cloudflare Workers 上直接抛 TypeError。manual 下 3xx 响应原样返回，
+  // 由下方 !response.ok 统一按失败处理，SSRF 防重定向语义在 Node 与 workerd 上一致
+  const response = await fetcher(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(12_000) });
   const body = (await response.text()).slice(0, 4096);
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${body || response.statusText}`);
   try {
