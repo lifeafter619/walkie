@@ -35,6 +35,13 @@ describe('HTTP API and MCP', () => {
     expect(JSON.stringify(created.body)).not.toContain('hooks.example.com');
   });
 
+  it('rejects an empty provider on channel update', async () => {
+    const { app, repository } = await setup();
+    const channel = await repository.createChannel({ name: 'Ops', slug: 'ops', provider: 'telegram', config: { botToken: 't', chatId: '42' } });
+    await request(app).patch(`/api/admin/channels/${channel.id}`).send({ provider: '' }).expect(400);
+    expect((await repository.getChannel(channel.id))?.provider).toBe('telegram');
+  });
+
   it('creates an Agent key once and accepts an MCP initialize handshake', async () => {
     const { app } = await setup();
     const keyResponse = await request(app).post('/api/admin/keys').send({ name: 'MCP test' }).expect(201);

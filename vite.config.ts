@@ -13,8 +13,8 @@ export default defineConfig({
     proxy: {
       // 注意：Vite 会把裸的 '/api' 前缀当成请求路径匹配，从而误拦截模块文件 /api.ts。
       // 用正则锚定到路径边界，仅代理 /api/* 与 /api，保留 /api.ts 等静态模块给 Vite 处理。
-      '^/api(/|$)': 'http://127.0.0.1:4310',
-      '/health': 'http://127.0.0.1:4310'
+      '^/api(/|$)': `http://127.0.0.1:${process.env.API_PORT ?? '4310'}`,
+      '/health': `http://127.0.0.1:${process.env.API_PORT ?? '4310'}`
     }
   }
 });

@@ -80,16 +80,22 @@ export class DeliveryWorker {
       if (!delivery || typeof callbackUrl !== 'string') return;
       if (!['delivered', 'partial', 'failed'].includes(delivery.status)) return;
       if (!(await this.repository.claimCallback(deliveryId))) return;
-      await this.dispatcher.postCallback(callbackUrl, {
-        deliveryId: delivery.id,
-        status: delivery.status,
-        title: delivery.title,
-        severity: delivery.severity,
-        attempts: (delivery.attempts ?? []).map((a) => ({
-          channel: a.channelName ?? a.channelId, provider: a.provider, status: a.status,
-          attemptCount: a.attemptCount, responseCode: a.responseCode, error: a.error
-        }))
-      });
+      try {
+        await this.dispatcher.postCallback(callbackUrl, {
+          deliveryId: delivery.id,
+          status: delivery.status,
+          title: delivery.title,
+          severity: delivery.severity,
+          attempts: (delivery.attempts ?? []).map((a) => ({
+            channel: a.channelName ?? a.channelId, provider: a.provider, status: a.status,
+            attemptCount: a.attemptCount, responseCode: a.responseCode, error: a.error
+          }))
+        });
+        await this.repository.completeCallback(deliveryId, true);
+      } catch (error) {
+        await this.repository.completeCallback(deliveryId, false);
+        throw error;
+      }
     } catch (error) {
       console.error(JSON.stringify({ event: 'callback.failed', deliveryId, message: error instanceof Error ? error.message : String(error) }));
     }

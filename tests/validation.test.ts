@@ -26,6 +26,8 @@ describe('validation helpers', () => {
     expect(broken.errors).toContain('Bot Token不能为空');
     const switchProvider = await validateChannelUpdate(repository, 'ops', { provider: 'slack', config: {} });
     expect(switchProvider.errors).toEqual(['Webhook 地址不能为空']);
+    const switchWithTelegramConfig = await validateChannelUpdate(repository, 'ops', { provider: 'slack', config: { botToken: 't', chatId: '42' } });
+    expect(switchWithTelegramConfig.errors).toEqual(['Webhook 地址不能为空']);
     repository.close();
   });
 

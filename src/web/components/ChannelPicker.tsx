@@ -18,13 +18,12 @@ const CATEGORIES = [
  * 搜索 + 分类 tab + 品牌图标网格，键盘可导航（↑↓/Enter/Esc）。
  */
 export function ChannelPicker({
-  providers, current, onPick, onClose, disabled
+  providers, current, onPick, onClose
 }: {
   providers: ProviderDefinition[];
   current?: ProviderId;
   onPick: (provider: ProviderId) => void;
   onClose: () => void;
-  disabled?: boolean;
 }) {
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<typeof CATEGORIES[number]['id']>('all');
@@ -111,7 +110,6 @@ export function ChannelPicker({
                 provider.id === current ? 'current' : ''
               ].join(' ')}
               onClick={() => onPick(provider.id)}
-              disabled={disabled}
               onMouseEnter={() => setActiveIndex(index)}
             >
               <ProviderIcon provider={provider.id} name={provider.name} size={30} />

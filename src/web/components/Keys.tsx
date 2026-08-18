@@ -122,10 +122,10 @@ export function KeyForm({
           </label>
           {restricted && (
             <div className="destination-checks">
-              {destinations.filter((item) => item.enabled).map((item) => (
+              {destinations.filter((item) => item.enabled || ids.includes(item.id)).map((item) => (
                 <label key={item.id}>
                   <input type="checkbox" checked={ids.includes(item.id)} onChange={(event) => setIds(event.target.checked ? [...ids, item.id] : ids.filter((id) => id !== item.id))} />
-                  {item.name}<small>{item.kind === 'route' ? '路由' : item.provider}</small>
+                  {item.name}<small>{item.kind === 'route' ? '路由' : item.provider}{item.enabled ? '' : ' · 已停用'}</small>
                 </label>
               ))}
             </div>

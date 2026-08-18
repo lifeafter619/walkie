@@ -23,6 +23,7 @@ export function RouteForm({
   const [strategy, setStrategy] = useState<RouteStrategy>(route?.strategy ?? 'fanout');
   const [selected, setSelected] = useState<string[]>(route?.channelIds ?? []);
   const [busy, setBusy] = useState(false);
+  const availableChannels = channels.filter((channel) => channel.enabled || selected.includes(channel.id));
 
   const toggle = (id: string) => setSelected((old) => old.includes(id) ? old.filter((item) => item !== id) : [...old, id]);
   const move = (index: number, direction: -1 | 1) => setSelected((old) => {
@@ -78,14 +79,14 @@ export function RouteForm({
           <div className="field-label">频道与顺序 <span>{selected.length} 个</span></div>
           <div className="route-builder">
             <div className="available-channels">
-              {channels.filter((channel) => channel.enabled).map((channel) => (
+              {availableChannels.map((channel) => (
                 <label className="channel-choice" key={channel.id}>
                   <input type="checkbox" checked={selected.includes(channel.id)} onChange={() => toggle(channel.id)} />
                   <ProviderIcon provider={channel.provider as ProviderId} name={channel.name} size={29} />
-                  <span><strong>{channel.name}</strong><small>{channel.provider}</small></span>
+                  <span><strong>{channel.name}</strong><small>{channel.provider}{channel.enabled ? '' : ' · 已停用'}</small></span>
                 </label>
               ))}
-              {!channels.filter((c) => c.enabled).length && (
+              {!availableChannels.length && (
                 <p className="builder-empty">没有可用的已启用频道</p>
               )}
             </div>
@@ -129,6 +130,7 @@ export function Routes({
   notify: Notify;
 }) {
   const [editing, setEditing] = useState<Route | null | 'new'>(null);
+  const canCreate = channels.some((channel) => channel.enabled);
 
   const remove = async (route: Route) => {
     if (!confirm(`删除路由“${route.name}”？`)) return;
@@ -148,7 +150,7 @@ export function Routes({
           <h1>路由</h1>
           <p className="page-sub">{routes.length} 条路由 · 一个稳定标识符可映射多个推送频道</p>
         </div>
-        <Button variant="primary" icon={Plus} onClick={() => setEditing('new')} disabled={!channels.length}>新建路由</Button>
+        <Button variant="primary" icon={Plus} onClick={() => setEditing('new')} disabled={!canCreate}>新建路由</Button>
       </header>
 
       {routes.length ? (
@@ -183,9 +185,9 @@ export function Routes({
         <section className="panel">
           <Empty
             icon={RouteIcon}
-            title={channels.length ? '还没有通知路由' : '请先添加推送频道'}
-            text={channels.length ? '把多个频道组合成并发广播或故障转移链。' : '路由至少需要一个已启用的频道。'}
-            action={channels.length > 0 && <Button variant="primary" icon={Plus} onClick={() => setEditing('new')}>新建路由</Button>}
+            title={canCreate ? '还没有通知路由' : '请先启用推送频道'}
+            text={canCreate ? '把多个频道组合成并发广播或故障转移链。' : '路由至少需要一个已启用的频道。'}
+            action={canCreate && <Button variant="primary" icon={Plus} onClick={() => setEditing('new')}>新建路由</Button>}
           />
         </section>
       )}

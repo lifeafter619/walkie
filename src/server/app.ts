@@ -105,16 +105,12 @@ export function createApp(deps: AppDependencies) {
     res.status(201).json(await repository.createChannel({ ...input, provider: input.provider as ProviderId }));
   }));
   admin.patch('/channels/:id', asyncRoute(async (req, res) => {
-    const input = channelSchema.partial().parse(req.body);
+    const { provider, ...input } = channelSchema.partial().parse(req.body);
     // PATCH 换 provider/改 config 后重新校验必填字段，避免存入必然发送失败的配置
-    if (input.config || input.provider) {
-      const { current, errors } = await validateChannelUpdate(repository, String(req.params.id), input);
-      if (errors[0] === '频道不存在') return res.status(404).json({ error: '频道不存在' });
-      if (errors.length) return res.status(400).json({ error: errors.join('；') });
-      res.json(await repository.updateChannel(current!.id, { ...input, provider: input.provider as ProviderId }));
-      return;
-    }
-    res.json(await repository.updateChannel(String(req.params.id), { ...input, provider: input.provider as ProviderId }));
+    const { current, errors } = await validateChannelUpdate(repository, String(req.params.id), { provider, config: input.config });
+    if (errors[0] === '频道不存在') return res.status(404).json({ error: '频道不存在' });
+    if (errors.length) return res.status(400).json({ error: errors.join('；') });
+    res.json(await repository.updateChannel(current!.id, { ...input, ...(provider !== undefined ? { provider: provider as ProviderId } : {}) }));
   }));
   admin.delete('/channels/:id', asyncRoute(async (req, res) => { await repository.deleteChannel(String(req.params.id)); res.status(204).end(); }));
   admin.post('/channels/:id/test', asyncRoute(async (req, res) => {

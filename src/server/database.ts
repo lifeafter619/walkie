@@ -255,17 +255,22 @@ export class RelayRepository {
       if (!current) throw new Error('Channel not found');
       await this.ensureFreshDek();
       // getChannel 按 id/slug 双解析，写回必须用解析出的真实 id（传 slug 时 WHERE id=slug 会静默 no-op）
-      const config = await this.getChannelConfig(current.id);
+      const config = input.provider && input.provider !== current.provider ? {} : await this.getChannelConfig(current.id);
+      const credentialsChanged = (input.provider !== undefined && input.provider !== current.provider)
+        || Object.keys(input.config ?? {}).length > 0;
       for (const [key, value] of Object.entries(input.config ?? {})) {
         if (value === null || value === '') delete config[key];
         else config[key] = value;
       }
-      await this.db.run(`UPDATE channels SET name=?,slug=?,provider=?,enabled=?,config_encrypted=?,rate_limit_per_min=?,quiet_hours=?,max_attempts=?,updated_at=? WHERE id=?`, [
+      await this.db.run(`UPDATE channels SET name=?,slug=?,provider=?,enabled=?,config_encrypted=?,rate_limit_per_min=?,quiet_hours=?,max_attempts=?,last_test_status=?,last_test_error=?,last_test_at=?,updated_at=? WHERE id=?`, [
         input.name ?? current.name, input.slug ?? current.slug, input.provider ?? current.provider,
         input.enabled ?? current.enabled ? 1 : 0, encryptJson(config, this.encryptionKey()),
         input.rateLimitPerMin !== undefined ? input.rateLimitPerMin || null : current.rateLimitPerMin ?? null,
         input.quietHours !== undefined ? input.quietHours || null : current.quietHours ?? null,
         input.maxAttempts !== undefined ? input.maxAttempts : current.maxAttempts,
+        credentialsChanged ? 'untested' : current.lastTestStatus,
+        credentialsChanged ? null : current.lastTestError ?? null,
+        credentialsChanged ? null : current.lastTestAt ?? null,
         now(), current.id
       ]);
       // 禁用频道后，其未完结的 attempt 再也不会被 claim，必须就地失败并推进投递终态，否则投递永久停在 processing
@@ -553,10 +558,19 @@ export class RelayRepository {
       clauses.push(like);
       params.push(needle, needle, needle);
     }
-    // 游标分页：返回比给定 created_at 更旧的行（ISO 字符串字典序与时间序一致）
-    if (options.before) { clauses.push('d.created_at<?'); params.push(options.before); }
+    // 游标分页：复合游标为 createdAt|id，兼容旧的纯 createdAt 游标。
+    if (options.before) {
+      const [beforeAt, beforeId] = options.before.split('|', 2);
+      if (beforeId) {
+        clauses.push('(d.created_at<? OR (d.created_at=? AND d.id<?))');
+        params.push(beforeAt, beforeAt, beforeId);
+      } else {
+        clauses.push('d.created_at<?');
+        params.push(options.before);
+      }
+    }
     const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
-    const rows = await this.db.all(`${base}${where} ORDER BY d.created_at DESC LIMIT ?`, [...params, limit]);
+    const rows = await this.db.all(`${base}${where} ORDER BY d.created_at DESC,d.id DESC LIMIT ?`, [...params, limit]);
     return rows.map((row) => this.deliveryFrom(row));
   }
 
@@ -567,11 +581,14 @@ export class RelayRepository {
    */
   private async reclaimStuckSending(maxAttempts = 4): Promise<void> {
     const cutoff = new Date(Date.now() - 5 * 60_000).toISOString();
-    const stuck = await this.db.all("SELECT id,delivery_id,attempt_count FROM attempts WHERE status='sending' AND updated_at<?", [cutoff]);
+    const stuck = await this.db.all(`SELECT a.id,a.delivery_id,a.attempt_count,c.max_attempts
+      FROM attempts a JOIN channels c ON c.id=a.channel_id
+      WHERE a.status='sending' AND a.updated_at<?`, [cutoff]);
     if (stuck.length === 0) return;
     const ts = now();
     for (const row of stuck) {
-      const retryable = Number(row.attempt_count) < maxAttempts;
+      const retryLimit = Number(row.max_attempts) || maxAttempts;
+      const retryable = Number(row.attempt_count) < retryLimit;
       await this.db.run("UPDATE attempts SET status=?,next_attempt_at=?,updated_at=? WHERE id=? AND status='sending'",
         [retryable ? 'pending' : 'failed', retryable ? ts : null, ts, String(row.id)]);
       await this.refreshDeliveryStatus(String(row.delivery_id));
@@ -617,11 +634,22 @@ export class RelayRepository {
     return Boolean(row?.stuck);
   }
 
-  /** 终态回调只发一次：原子置位，抢到的调用方返回 true */
+  /** 原子占用终态回调；崩溃遗留的占用 5 分钟后可重试。 */
   async claimCallback(deliveryId: string): Promise<boolean> {
-    const result = await this.db.run(`UPDATE deliveries SET metadata=json_set(metadata,'$.callbackSent',1)
-      WHERE id=? AND status IN ('delivered','partial','failed') AND json_extract(metadata,'$.callbackSent') IS NULL`, [deliveryId]);
+    const timestamp = now();
+    const stale = new Date(Date.now() - 5 * 60_000).toISOString();
+    const result = await this.db.run(`UPDATE deliveries SET metadata=json_set(metadata,'$.callbackClaimedAt',?)
+      WHERE id=? AND status IN ('delivered','partial','failed')
+        AND json_extract(metadata,'$.callbackSent') IS NULL
+        AND (json_extract(metadata,'$.callbackClaimedAt') IS NULL OR json_extract(metadata,'$.callbackClaimedAt')<?)`, [timestamp, deliveryId, stale]);
     return result.changes > 0;
+  }
+
+  async completeCallback(deliveryId: string, success: boolean): Promise<void> {
+    const metadata = success
+      ? "json_remove(json_set(metadata,'$.callbackSent',1),'$.callbackClaimedAt')"
+      : "json_remove(metadata,'$.callbackClaimedAt')";
+    await this.db.run(`UPDATE deliveries SET metadata=${metadata} WHERE id=?`, [deliveryId]);
   }
 
   /** 已到达终态但回调还没发出去的投递（callbackUrl 存在且未置 callbackSent）。

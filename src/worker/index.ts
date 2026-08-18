@@ -232,15 +232,12 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     }
     const channel = /^\/api\/admin\/channels\/([^/]+)$/.exec(path);
     if (channel && request.method === 'PATCH') {
-      const input = channelSchema.partial().parse(await readBody(request));
+      const { provider, ...input } = channelSchema.partial().parse(await readBody(request));
       // PATCH 换 provider/改 config 后重新校验必填字段（与 Node 版一致）
-      if (input.config || input.provider) {
-        const { current, errors } = await validateChannelUpdate(this.repository, channel[1], input);
-        if (errors[0] === '频道不存在') return json({ error: '频道不存在' }, 404);
-        if (errors.length) return json({ error: errors.join('；') }, 400);
-        return json(await this.repository.updateChannel(current!.id, { ...input, provider: input.provider as ProviderId }));
-      }
-      return json(await this.repository.updateChannel(channel[1], { ...input, provider: input.provider as ProviderId }));
+      const { current, errors } = await validateChannelUpdate(this.repository, channel[1], { provider, config: input.config });
+      if (errors[0] === '频道不存在') return json({ error: '频道不存在' }, 404);
+      if (errors.length) return json({ error: errors.join('；') }, 400);
+      return json(await this.repository.updateChannel(current!.id, { ...input, ...(provider !== undefined ? { provider: provider as ProviderId } : {}) }));
     }
     if (channel && request.method === 'DELETE') { await this.repository.deleteChannel(channel[1]); return new Response(null, { status: 204 }); }
     const testChannel = /^\/api\/admin\/channels\/([^/]+)\/test$/.exec(path);

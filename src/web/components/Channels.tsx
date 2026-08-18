@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import {
   Check, Edit3, ExternalLink, KeyRound, LoaderCircle, MessageSquareText,
   Plus, Search, TestTube2, Trash2
@@ -48,10 +48,18 @@ export function ChannelForm({
   saved: () => void;
   notify: Notify;
 }) {
+  const initialProvider = channel?.provider ?? providers[0]?.id ?? 'telegram';
+  const defaults = (id: ProviderId) => Object.fromEntries(
+    (providers.find((item) => item.id === id)?.fields ?? [])
+      .filter((item) => item.defaultValue !== undefined)
+      .map((item) => [item.key, item.defaultValue])
+  );
   const [name, setName] = useState(channel?.name ?? '');
   const [channelSlug, setSlug] = useState(channel?.slug ?? '');
-  const [provider, setProvider] = useState<ProviderId>(channel?.provider ?? providers[0]?.id ?? 'telegram');
-  const [config, setConfig] = useState<Record<string, unknown>>({});
+  const [provider, setProvider] = useState<ProviderId>(initialProvider);
+  const [configs, setConfigs] = useState<Record<string, Record<string, unknown>>>(() => ({
+    [initialProvider]: channel ? {} : defaults(initialProvider)
+  }));
   const [rateLimit, setRateLimit] = useState(channel?.rateLimitPerMin ?? 0);
   // 每频道重试上限：0 = 继承全局 MAX_DELIVERY_ATTEMPTS；付费渠道可设 1 只发一次
   const [maxAttempts, setMaxAttempts] = useState(channel?.maxAttempts ?? 0);
@@ -66,15 +74,9 @@ export function ChannelForm({
   const [picking, setPicking] = useState(false);
 
   const definition = providers.find((item) => item.id === provider);
-
-  // 切换渠道时重置该渠道的默认值（依赖修正：只在 provider 变化时执行）
-  useEffect(() => {
-    if (channel) return; // 编辑模式不覆盖已有配置
-    setConfig(Object.fromEntries(
-      (definition?.fields ?? []).filter((item) => item.defaultValue !== undefined).map((item) => [item.key, item.defaultValue])
-    ));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider]);
+  const config = configs[provider] ?? {};
+  const setConfig = (next: Record<string, unknown>) => setConfigs((current) => ({ ...current, [provider]: next }));
+  const preservesExisting = Boolean(channel && provider === channel.provider);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -119,7 +121,7 @@ export function ChannelForm({
               <p>{supportLabel(definition.support)} · {definition.description}</p>
             </div>
             <a href={definition.docsUrl} target="_blank" rel="noreferrer" title="打开官方文档"><ExternalLink size={15} /></a>
-            <Button type="button" onClick={() => setPicking(true)} disabled={Boolean(channel)} title={channel ? '编辑时不可更换渠道类型' : undefined}>更换</Button>
+            <Button type="button" onClick={() => setPicking(true)}>更换</Button>
           </div>
         ) : (
           <Button type="button" onClick={() => setPicking(true)}>选择渠道</Button>
@@ -129,12 +131,11 @@ export function ChannelForm({
             providers={providers}
             current={provider}
             onPick={(next) => {
-              // 重选当前渠道不清空已填配置（provider 未变时重置 effect 不会跑，清了就找不回默认值）
-              if (next !== provider) { setProvider(next); setConfig({}); }
+              setConfigs((current) => next in current ? current : { ...current, [next]: defaults(next) });
+              setProvider(next);
               setPicking(false);
             }}
             onClose={() => setPicking(false)}
-            disabled={Boolean(channel)}
           />
         )}
 
@@ -155,14 +156,14 @@ export function ChannelForm({
                   rows={item.key === 'bodyTemplate' ? 7 : 3}
                   value={String(config[item.key] ?? '')}
                   onChange={(event) => setConfig({ ...config, [item.key]: event.target.value })}
-                  required={item.required && !channel}
-                  placeholder={channel ? '留空保留现有值' : item.placeholder}
+                  required={item.required && !preservesExisting}
+                  placeholder={preservesExisting ? '留空保留现有值' : item.placeholder}
                 />
               ) : item.type === 'select' ? (
                 <select
-                  value={channel && config[item.key] === undefined ? '__walkie_preserve__' : String(config[item.key] ?? (item.defaultValue ?? ''))}
+                  value={preservesExisting && config[item.key] === undefined ? '__walkie_preserve__' : String(config[item.key] ?? (item.defaultValue ?? ''))}
                   onChange={(event) => {
-                    if (channel && event.target.value === '__walkie_preserve__') {
+                    if (preservesExisting && event.target.value === '__walkie_preserve__') {
                       const next = { ...config };
                       delete next[item.key];
                       setConfig(next);
@@ -170,11 +171,11 @@ export function ChannelForm({
                     else setConfig({ ...config, [item.key]: event.target.value });
                   }}
                 >
-                  {channel && <option value="__walkie_preserve__">（保留现有设置）</option>}
+                  {preservesExisting && <option value="__walkie_preserve__">（保留现有设置）</option>}
                   {item.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </select>
               ) : item.type === 'boolean' ? (
-                channel ? (
+                preservesExisting ? (
                   <select value={config[item.key] === undefined ? '__walkie_preserve__' : String(config[item.key])} onChange={(event) => {
                     if (event.target.value === '__walkie_preserve__') {
                       const next = { ...config };
@@ -198,8 +199,8 @@ export function ChannelForm({
                   type={item.type === 'number' ? 'number' : item.type === 'password' ? 'password' : item.type === 'url' ? 'url' : 'text'}
                   value={String(config[item.key] ?? '')}
                   onChange={(event) => setConfig({ ...config, [item.key]: item.type === 'number' ? (event.target.value === '' ? '' : Number(event.target.value)) : event.target.value })}
-                  required={item.required && !channel}
-                  placeholder={channel ? '留空保留现有值' : item.placeholder}
+                  required={item.required && !preservesExisting}
+                  placeholder={preservesExisting ? '留空保留现有值' : item.placeholder}
                   disabled={Boolean(lockedByPreset)}
                   readOnly={Boolean(lockedByPreset)}
                 />

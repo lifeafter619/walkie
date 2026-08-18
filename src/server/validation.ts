@@ -15,10 +15,12 @@ export function validateChannelCreate(provider: unknown, config: Record<string, 
 export async function validateChannelUpdate(repository: RelayRepository, id: string, input: { provider?: unknown; config?: Record<string, unknown> }): Promise<{ current?: Channel; errors: string[] }> {
   const current = await repository.getChannel(id);
   if (!current) return { errors: ['频道不存在'] };
-  if (!input.config && !input.provider) return { current, errors: [] };
+  if (input.config === undefined && input.provider === undefined) return { current, errors: [] };
   const providerToCheck = (input.provider ?? current.provider) as ProviderId;
   if (!PROVIDER_MAP.has(providerToCheck)) return { current, errors: ['不支持的渠道类型'] };
-  const merged = { ...await repository.getChannelConfig(current.id), ...(input.config ?? {}) };
+  const merged = input.provider && input.provider !== current.provider
+    ? input.config ?? {}
+    : { ...await repository.getChannelConfig(current.id), ...(input.config ?? {}) };
   return { current, errors: validateProviderConfig(providerToCheck, merged) };
 }
 

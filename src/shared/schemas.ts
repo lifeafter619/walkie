@@ -7,7 +7,7 @@ export const quietHoursSchema = z.string()
 export const channelSchema = z.object({
   name: z.string().min(1).max(100),
   slug: slugSchema,
-  provider: z.string(),
+  provider: z.string().min(1, '渠道类型不能为空'),
   enabled: z.boolean().optional(),
   config: z.record(z.string(), z.unknown()),
   rateLimitPerMin: z.number().int().min(0).max(600).nullish(),

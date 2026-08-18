@@ -113,9 +113,9 @@ export function Deliveries({
     if (loadingMore || deliveries.length < 50) return;
     setLoadingMore(true);
     try {
-      // 以当前最旧一条的 createdAt 为游标取更早的一页
+      // 以当前最旧一条的 createdAt + id 复合游标取更早的一页，避免同毫秒记录丢失
       const oldest = deliveries[deliveries.length - 1];
-      await refresh(status, query, oldest.createdAt, false, true);
+      await refresh(status, query, `${oldest.createdAt}|${oldest.id}`, false, true);
     } finally {
       setLoadingMore(false);
     }
@@ -125,7 +125,7 @@ export function Deliveries({
     <>
       <header className="page-head">
         <h1>投递</h1>
-        <IconButton label="刷新" icon={RefreshCw} onClick={() => refresh(status)} />
+        <IconButton label="刷新" icon={RefreshCw} onClick={() => refresh(status, query)} />
       </header>
 
       <div className="toolbar">

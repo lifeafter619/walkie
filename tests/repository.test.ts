@@ -30,6 +30,16 @@ describe('credential storage and repository', () => {
     repository.close();
   });
 
+  it('does not carry credentials across provider changes', async () => {
+    const repository = await createRepository();
+    const channel = await repository.createChannel({ name: 'Ops', slug: 'ops', provider: 'telegram', config: { botToken: 'telegram-secret', chatId: '42' } });
+    await repository.setChannelTest(channel.id, true);
+    await repository.updateChannel(channel.id, { provider: 'slack', config: { webhookUrl: 'https://hooks.slack.test/1' } });
+    expect(await repository.getChannelConfig(channel.id)).toEqual({ webhookUrl: 'https://hooks.slack.test/1' });
+    expect((await repository.getChannel(channel.id))?.lastTestStatus).toBe('untested');
+    repository.close();
+  });
+
   it('supports user-chosen key secrets and rejects duplicates', async () => {
     const repository = await createRepository();
     const custom = await repository.createKey({ name: 'Custom agent', secret: 'my-own-password-123' });

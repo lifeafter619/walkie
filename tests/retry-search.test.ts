@@ -78,6 +78,20 @@ describe('per-channel retry policy', () => {
     expect(def.attempts![0].attemptCount).toBe(4); // 全局 4 次
     void worker;
   });
+
+  it('uses the channel retry limit when reclaiming a stuck send', async () => {
+    const { repository } = await setup(1);
+    const channel = await repository.createChannel({
+      name: 'Extended', slug: 'extended-retry', provider: 'webhook',
+      config: { url: 'https://x.example.com', method: 'POST', bodyTemplate: '{}' }, maxAttempts: 2
+    });
+    const delivery = await new NotificationService(repository).send({ destination: channel.id, title: 'stuck', body: 'x' }, 'test');
+
+    expect((await repository.claimDueAttempts(1, 1))[0].attemptCount).toBe(1);
+    await repository.db.run("UPDATE attempts SET updated_at='2000-01-01T00:00:00.000Z' WHERE delivery_id=?", [delivery.id]);
+
+    expect((await repository.claimDueAttempts(1, 1))[0].attemptCount).toBe(2);
+  });
 });
 
 describe('delivery search and cursor pagination', () => {
@@ -116,5 +130,18 @@ describe('delivery search and cursor pagination', () => {
     const page = await request(app).get('/api/admin/deliveries?before=2026-08-17T10%3A00%3A01.000Z').expect(200);
     expect(page.body.deliveries).toHaveLength(1);
     expect(page.body.deliveries[0].title).toBe('one');
+  });
+
+  it('pages through deliveries created in the same millisecond', async () => {
+    const { app, repository, notifications } = await setup();
+    const channel = await repository.createChannel({ name: 'P', slug: 'same-ms-c', provider: 'webhook', config: { url: 'https://x.example.com', method: 'POST', bodyTemplate: '{}' } });
+    await notifications.send({ destination: channel.id, title: 'one', body: 'x' }, 'test');
+    await notifications.send({ destination: channel.id, title: 'two', body: 'x' }, 'test');
+    await repository.db.run("UPDATE deliveries SET created_at='2026-08-17T10:00:00.000Z'");
+
+    const all = await request(app).get('/api/admin/deliveries').expect(200);
+    const cursor = `${all.body.deliveries[0].createdAt}|${all.body.deliveries[0].id}`;
+    const page = await request(app).get(`/api/admin/deliveries?before=${encodeURIComponent(cursor)}`).expect(200);
+    expect(page.body.deliveries.map((item: { title: string }) => item.title)).toEqual([all.body.deliveries[1].title]);
   });
 });

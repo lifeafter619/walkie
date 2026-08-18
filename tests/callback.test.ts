@@ -48,6 +48,25 @@ describe('delivery callback and global rate limit', () => {
     await repository.close();
   });
 
+  it('retries a failed callback on the next drain', async () => {
+    const repository = await createNodeRepository(':memory:', randomBytes(32));
+    const channel = await repository.createChannel({ name: 'Hook', slug: 'hook-retry', provider: 'webhook', config: { url: 'https://hooks.example.com/retry', method: 'POST', bodyTemplate: '{}' } });
+    let callbackAttempts = 0;
+    const fetcher = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).includes('agent.example.com') && callbackAttempts++ === 0) return new Response('temporary', { status: 500 });
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch;
+    const worker = new DeliveryWorker(repository, new ProviderDispatcher(config, fetcher), { deliveryWorkers: 2, maxDeliveryAttempts: 1, retryBaseMs: 1 });
+    await new NotificationService(repository).send({ destination: channel.id, title: 'x', body: 'y', callbackUrl: 'https://agent.example.com/retry' }, 'test');
+
+    await worker.drainOnce();
+    await worker.drainOnce();
+
+    const calls = vi.mocked(fetcher).mock.calls.filter((call) => String(call[0]).includes('agent.example.com'));
+    expect(calls).toHaveLength(2);
+    await repository.close();
+  });
+
   it('deduplicates repeated channel ids in a route', async () => {
     const repository = await createNodeRepository(':memory:', randomBytes(32));
     const channel = await repository.createChannel({ name: 'C', slug: 'dup-c', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{}' } });
