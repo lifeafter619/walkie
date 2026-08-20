@@ -17,7 +17,7 @@ import { ProviderDispatcher } from '../server/providers/dispatcher.js';
 import { DeliveryWorker } from '../server/queue.js';
 import { assertKeyDestinations, validateChannelCreate, validateChannelUpdate, validateRouteChannelIds } from '../server/validation.js';
 import { barkFailure, barkSuccess, registerResponse, resolveBarkDestination, sendBark } from '../server/bark-compat.js';
-import { prioritySeverity, safeCompatUrl, sendWithAgentKey } from '../server/compat.js';
+import { appriseSeverity, discordText, parseAlertmanager, prioritySeverity, safeCompatUrl, sendWithAgentKey, slackText } from '../server/compat.js';
 import { BodyTooLargeError, readBody, readTextBody } from './body.js';
 import { DurableRelayDatabase } from './database.js';
 import { PlatformUsageMonitor } from '../server/platform-usage.js';
@@ -118,7 +118,13 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     const monitorAt = await this.platformUsage.nextCheckAt();
     const next = [due ? new Date(due).getTime() : undefined, stuck ? Date.now() + 6 * 60_000 : undefined, monitorAt]
       .filter((value): value is number => value !== undefined);
-    if (next.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + 250, Math.min(...next)));
+    if (next.length) {
+      // schedule 因平台暂停/用量限制滞留到期时，due 永远指向过去：按 250ms 空转
+      // 会以 ~34.5 万 alarm/天击穿 DO 免费配额——正是这些功能想保护的那份额度。
+      // 退避到 60s 重查；暂停恢复/限额重置后自然回到正常节奏
+      const floor = this.worker.scheduleBlocked ? 60 * 1000 : 250;
+      await this.ctx.storage.setAlarm(Math.max(Date.now() + floor, Math.min(...next)));
+    }
   }
 
   private async requireAdmin(request: Request): Promise<Response | undefined> {
@@ -200,6 +206,110 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
           }, 'ntfy-compat');
           return json({ id: delivery.id, time: Math.floor(Date.now() / 1000), event: 'message', topic: decodeURIComponent(ntfy[1]!), message });
         } catch (error) { return json({ code: 400, error: error instanceof Error ? error.message : '推送失败' }, 400); }
+      }
+
+      // ---- 以下五个兼容端点必须在 legacyBark 正则之前匹配：那个模式吃掉任何 1–4 段路径 ----
+
+      // Slack Incoming Webhook：POST /services/<T>/<B>/<xxx>，末段为 Agent Key，成功返回纯文本 ok
+      const slack = /^\/services\/([A-Za-z0-9_\-]+)\/([A-Za-z0-9_\-]+)\/([A-Za-z0-9_\-]+)$/.exec(path);
+      if (slack && request.method === 'POST') {
+        const fields = await readBody(request);
+        // 老式提交是 payload=<urlencoded json>，新式直接 POST JSON 对象
+        let params = fields;
+        if (typeof fields.payload === 'string' && fields.payload.trim().startsWith('{')) {
+          try { params = JSON.parse(fields.payload) as Record<string, unknown>; } catch { /* 保留原字段 */ }
+        }
+        try {
+          const delivery = await sendWithAgentKey(this.repository, this.notifications, slack[3]!, {
+            title: (String(params.text ?? '').trim() || 'Slack').slice(0, 200),
+            body: (slackText(params) || 'Empty Message').slice(0, 20_000),
+            severity: 'info', metadata: { via: 'slack-webhook-compat' }
+          }, 'slack-webhook-compat');
+          void this.worker.drainOnce().catch(() => undefined);
+          return new Response('ok', { status: 200, headers: { 'content-type': 'text/plain' } });
+        } catch (error) {
+          return new Response(error instanceof Error ? error.message : '推送失败', { status: 400, headers: { 'content-type': 'text/plain' } });
+        }
+      }
+
+      // Discord Webhook：POST /api/webhooks/<id>/<token>，token 段为 Agent Key
+      const discord = /^\/api\/webhooks\/([0-9]+)\/([A-Za-z0-9_\-]+)$/.exec(path);
+      if (discord && request.method === 'POST') {
+        const params = await readBody(request);
+        const content = String(params.content ?? '').trim();
+        const embeds = discordText(params);
+        try {
+          const delivery = await sendWithAgentKey(this.repository, this.notifications, discord[2]!, {
+            title: (content.split('\n')[0] || 'Discord').slice(0, 200),
+            body: ([content, embeds].filter(Boolean).join('\n') || 'Empty Message').slice(0, 20_000),
+            severity: 'info', metadata: { via: 'discord-webhook-compat' }
+          }, 'discord-webhook-compat');
+          void this.worker.drainOnce().catch(() => undefined);
+          if (url.searchParams.get('wait') === 'true' || url.searchParams.get('wait') === '1') {
+            return json({ id: delivery.id, content, timestamp: new Date().toISOString(), webhook_id: discord[1]! });
+          }
+          return new Response(null, { status: 204 });
+        } catch (error) { return json({ message: error instanceof Error ? error.message : '推送失败' }, 400); }
+      }
+
+      // Alertmanager / Grafana 告警 webhook：POST /alertmanager?key=<AgentKey>（或 Bearer）
+      if (path === '/alertmanager' && request.method === 'POST') {
+        const params = await readBody(request);
+        const token = url.searchParams.get('key') || bearer(request) || '';
+        const alerts = parseAlertmanager(params);
+        if (!alerts.length) return json({ error: 'alerts 数组为空或缺失' }, 400);
+        try {
+          const deliveries = await Promise.all(alerts.map((alert) => sendWithAgentKey(this.repository, this.notifications, token, {
+            title: alert.title.slice(0, 200), body: alert.body.slice(0, 20_000) || 'Empty Message',
+            severity: alert.severity, url: alert.url,
+            idempotencyKey: alert.fingerprint ? `alertmanager:${alert.fingerprint}:${alert.status}` : undefined,
+            metadata: { via: 'alertmanager-compat', fingerprint: alert.fingerprint, status: alert.status }
+          }, 'alertmanager-compat')));
+          void this.worker.drainOnce().catch(() => undefined);
+          return json({ delivered: deliveries.length, ids: deliveries.map((delivery) => delivery.id) });
+        } catch (error) { return json({ error: error instanceof Error ? error.message : '推送失败' }, 400); }
+      }
+
+      // Pushover：POST /1/messages.json，token/user 任一作为 Agent Key
+      if ((path === '/1/messages.json' || path === '/1/messages') && request.method === 'POST') {
+        const params = { ...Object.fromEntries(url.searchParams), ...(await readBody(request)) };
+        const token = String(params.token ?? '') || String(params.user ?? '');
+        const message = String(params.message ?? '').trim();
+        if (!message) return json({ status: 0, request: '', errors: ['message is required'] }, 400);
+        try {
+          const delivery = await sendWithAgentKey(this.repository, this.notifications, token, {
+            title: (String(params.title ?? '') || 'Pushover').slice(0, 200),
+            body: message.slice(0, 20_000), severity: prioritySeverity(params.priority, 'pushover'),
+            url: safeCompatUrl(params.url), tags: String(params.device ?? '').slice(0, 200) || undefined,
+            metadata: { via: 'pushover-compat', urlTitle: params.url_title, sound: params.sound, device: params.device }
+          }, 'pushover-compat');
+          void this.worker.drainOnce().catch(() => undefined);
+          return json({ status: 1, request: delivery.id });
+        } catch (error) {
+          return json({ status: 0, request: '', errors: [error instanceof Error ? error.message : '推送失败'] }, 400);
+        }
+      }
+
+      // Apprise API：POST /notify 或 /notify/<KEY>，body 必填，type 映射 severity
+      const apprise = /^\/notify(\/([A-Za-z0-9_\-]+))?$/.exec(path);
+      if (apprise && request.method === 'POST') {
+        const params = await readBody(request);
+        const token = apprise[2] || bearer(request) || '';
+        const body = String(params.body ?? '').trim();
+        if (!body) return json({ error: 'body is required' }, 400);
+        try {
+          const delivery = await sendWithAgentKey(this.repository, this.notifications, token, {
+            title: (String(params.title ?? '') || 'Apprise').slice(0, 200),
+            body: body.slice(0, 20_000), severity: appriseSeverity(params.type),
+            tags: String(params.tag ?? '').slice(0, 200) || undefined,
+            metadata: { via: 'apprise-compat', format: params.format, type: params.type, tag: params.tag }
+          }, 'apprise-compat');
+          void this.worker.drainOnce().catch(() => undefined);
+          return json({ error: null, kind: 'success' });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : '推送失败';
+          return json({ error: { kind: 'warning', message } }, 400);
+        }
       }
       const legacyBark = /^\/(?!api(?:\/|$)|mcp(?:\/|$)|reply(?:\/|$)|assets(?:\/|$)|send(?:\/|$)|health$|healthz$|info$|ping$|push$|register(?:\/|$)|[^/]*\.[^/]+$)([^/]+)(?:\/([^/]+))?(?:\/([^/]+))?(?:\/([^/]+))?$/.exec(path);
       if (legacyBark && ['GET', 'POST'].includes(request.method)) {
@@ -533,8 +643,32 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
   }
 }
 
+/** MASTER_KEY 缺失/格式错误时 DO 构造函数会抛错，每个请求都变成没有线索的 500。
+ *  一键部署按钮无法代填 secret，所以这里前置拦截，直接给出可照抄的命令。 */
+function setupRequired(reason: string): Response {
+  const body = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Walkie · 需要完成设置</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0a0a0a;color:#fafafa;font:15px/1.7 ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+main{max-width:640px;padding:32px}h1{font-size:20px;margin:0 0 8px}p{color:#a1a1aa;margin:0 0 16px}
+pre{background:#18181b;border:1px solid #27272a;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:13px}
+code{color:#5eead4}a{color:#5eead4}</style></head><body><main>
+<h1>📻 Walkie 部署成功，还差最后一步</h1>
+<p>${reason}</p>
+<p>在本地仓库里执行下面两条命令设置 secret，然后刷新本页：</p>
+<pre><code># 32 字节根密钥，加密所有渠道凭据；丢失后数据无法解密，请一并备份
+openssl rand -base64 32 | npx wrangler secret put MASTER_KEY
+
+# 管理密码（≥8 位），用于登录控制台
+npx wrangler secret put ADMIN_TOKEN</code></pre>
+<p>没有 openssl 时用：<code>node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"</code></p>
+</main></body></html>`;
+  return new Response(body, { status: 503, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
+}
+
 export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
+    if (!env.MASTER_KEY) return setupRequired('还没有配置 MASTER_KEY，实例暂时无法启动。');
+    if (Buffer.from(env.MASTER_KEY, 'base64').length !== 32) return setupRequired('MASTER_KEY 不是 base64 编码的 32 字节密钥。');
     const path = new URL(request.url).pathname;
     if (path === '/health' || path === '/push' || path === '/ping' || path === '/healthz' || path === '/info' || path === '/register' || path.startsWith('/register/') || path === '/mcp' || path.startsWith('/api/') || path.startsWith('/reply/') || /^\/(?:send\/)?[^/]+\.send$/.test(path) || /^\/(?!assets(?:\/|$))[^/]+(?:\/[^/]+){0,3}$/.test(path)) {
       return env.WALKIE.getByName('default').fetch(request);

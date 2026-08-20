@@ -2,104 +2,113 @@
 
 # 📻 Walkie
 
-**AI Agent 与你之间的双向对讲机**
+**A two-way walkie-talkie between AI agents and you**
 
-Agent 干完活呼叫你、拿不准主意时问你，你在任何设备上按下回复——一条 MCP 连接搞定。
+Your agent calls you when work is done, asks when it is unsure, and you reply from any device — all over one MCP connection.
 
 [![License](https://img.shields.io/badge/license-MIT-22c55e)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.3.0-black)](package.json)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6366f1)](https://modelcontextprotocol.io)
 
-[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare%20Workers-F38020?logo=cloudflareworkers&logoColor=white)](#一cloudflare-workers推荐)
-[![Vercel](https://img.shields.io/badge/Vercel-000000?logo=vercel&logoColor=white)](#二vercel--turso)
-[![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](#三docker--docker-compose)
-[![Self-hosted](https://img.shields.io/badge/私有部署-Node.js-475569)](#四企业--私有网络部署)
+[English](README.md) · [简体中文](README.zh-CN.md)
+
+**One-click deploy**
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/lifeafter619/walkie)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Flifeafter619%2Fwalkie&env=TURSO_DATABASE_URL,TURSO_AUTH_TOKEN,ADMIN_TOKEN,MASTER_KEY,CRON_SECRET&envDescription=Turso%20database%2C%20admin%20password%20and%2032-byte%20root%20key&envLink=https%3A%2F%2Fgithub.com%2Flifeafter619%2Fwalkie%23readme&project-name=walkie&repository-name=walkie)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/lifeafter619/walkie)
 
 </div>
 
 ---
 
-AI Agent 跑长任务时，你不想盯着终端。Walkie 是一个自托管的通知控制平面：
+When an AI agent runs long tasks, you should not have to babysit the terminal. Walkie is a self-hosted notification control plane:
 
-- **Agent → 你**：构建完成、部署失败、审批请求，推送到 Telegram、WhatsApp、企业微信、飞书、Expo、OneSignal、邮件、短信……75+ 渠道任选；
-- **你 → Agent**：Agent 调用 `ask_user` 把问题推到你手机，你点开一次性链接（或直接在控制台）回复，Agent 拿到答案继续干活；
-- **一个实例，多种入口**：MCP、REST、Server酱、Bark、Gotify、PushPlus、ntfy 兼容端点共用同一套频道与 Agent Key。
+- **Agent → you**: build finished, deploy failed, approval needed — delivered to Telegram, WhatsApp, WeCom, Feishu, email, SMS, and 75+ more channels;
+- **You → agent**: the agent calls `ask_user`, the question lands on your phone, you tap a one-time link (or reply in the console), and the agent picks up the answer and keeps working;
+- **One instance, many entrances**: MCP, REST, and drop-in compatible endpoints for ServerChan, Bark, Gotify, PushPlus, ntfy, Slack, Discord, Alertmanager, Pushover, and Apprise — all sharing the same channels and Agent Keys.
 
-## 核心特性
+## Highlights
 
-- 📡 **75+ 通知渠道**——聊天（Telegram / WhatsApp / 企业微信应用 / 飞书 / 钉钉 / Slack / Discord / Teams / Google Chat / KOOK / QQ 官方机器人 / Matrix / LINE…）、推送（FCM / Expo / OneSignal / Huawei / HONOR / Xiaomi / OPPO / vivo / 魅族 / JPush / 个推 / Join / Pushy / Pushsafer / Simplepush / Pusher Beams / Pushpad / Bark / ntfy / Gotify / Pushover / Server酱 / PushPlus / WxPusher…）、编排（Novu / Knock / Courier）、自动化（IFTTT Webhooks）、邮件（SMTP / SendGrid / Resend / Postmark / Mailgun / Brevo）、短信（Twilio / 阿里云 / 腾讯云 / AWS SNS / Vonage / Plivo / Telnyx / Bird / Infobip）、PagerDuty、Jira Service Management、Alertmanager、Apprise、通用 Webhook。新增渠道的官方契约和验证边界见 [`docs/providers.md`](docs/providers.md)。
-- 🔁 **双向会话**——`ask_user` 提问 + 一次性回复链接 + 控制台会话页直接回复，`check_reply` 长轮询取答案
-- 🧭 **路由**——多个频道组成「并发广播」或「故障转移链」，一个稳定标识符对外
-- 🔑 **密钥即密码**——Agent Key 和管理密码都可自定义；多条管理密码可并存、统计和单独撤销
-- 🪝 **投递回调**——`callbackUrl` 在投递到达终态时回推结果
-- ⏱️ **限流与静默时段**——按频道每分钟限流；`22:00-08:00@Asia/Shanghai` 静默期延后发送，critical 穿透
-- 🔒 **安全默认**——凭据 AES-256-GCM 加密（KEK/DEK 两级密钥，可在线轮换）、密钥哈希存储、SSRF 防护（默认禁私网/HTTP）、scope 与目的地白名单
-- 📱 **控制台**——响应式管理面板，暗色模式，移动端可用
+- 📡 **75+ notification channels** — chat (Telegram / WhatsApp / WeCom app / Feishu / DingTalk / Slack / Discord / Teams / Google Chat / KOOK / official QQ bot / Matrix / LINE…), push (FCM / Expo / OneSignal / Huawei / HONOR / Xiaomi / OPPO / vivo / Meizu / JPush / Getui / Join / Pushy / Pushsafer / Simplepush / Pusher Beams / Pushpad / Bark / ntfy / Gotify / Pushover / ServerChan / PushPlus / WxPusher…), orchestration (Novu / Knock / Courier), automation (IFTTT webhooks), email (SMTP / SendGrid / Resend / Postmark / Mailgun / Brevo), SMS (Twilio / Aliyun / Tencent Cloud / AWS SNS / Vonage / Plivo / Telnyx / Bird / Infobip), PagerDuty, Jira Service Management, Alertmanager, Apprise, and generic webhooks. See [`docs/providers.md`](docs/providers.md) for each provider's contract.
+- 🔁 **Two-way conversations** — `ask_user` + one-time reply link + reply from the console's session page; `check_reply` long-polls for the answer
+- 🧭 **Routing** — fanout or fallback chains of channels behind one stable identifier
+- 🪄 **Drop-in compatibility endpoints** — point existing ServerChan / Bark / Gotify / ntfy / PushPlus / Slack webhook / Discord webhook / Alertmanager / Pushover / Apprise tooling at Walkie with zero code changes
+- 🔑 **Keys are passwords** — Agent Keys and admin passwords can both be custom strings; multiple admin passwords can coexist, with per-key stats and revocation
+- 🪝 **Delivery callbacks** — `callbackUrl` receives a webhook when a delivery reaches a final state
+- ⏱️ **Rate limiting & quiet hours** — per-channel rate limits; `22:00-08:00@Asia/Shanghai` defers sends while critical breaks through
+- 🔒 **Secure defaults** — AES-256-GCM credential encryption (KEK/DEK two-level keys, online rotation), hashed key storage, SSRF protection (private networks and plain HTTP blocked by default), scopes and destination allowlists
+- 📱 **Console** — responsive admin panel with dark mode, usable on mobile
 
-## 快速开始
+## Getting started
 
-四种部署方式，选一种即可。部署完成后打开站点，用管理密码登录，添加频道 → 创建 Agent Key → 在「接入」页复制 MCP 配置。
+Five deployment options — pick one. After it is up, open the site, sign in with the admin password, add a channel → create an Agent Key → copy the MCP config from the Integrations page.
 
-### 一、Cloudflare Workers（推荐）
+| Platform | One-click deploy | State storage | Notes |
+| --- | --- | --- | --- |
+| Cloudflare Workers | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/lifeafter619/walkie) | Durable Objects SQLite | Generous free tier, no external database. Two secrets to add after deploy |
+| Vercel | [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Flifeafter619%2Fwalkie&env=TURSO_DATABASE_URL,TURSO_AUTH_TOKEN,ADMIN_TOKEN,MASTER_KEY,CRON_SECRET&envDescription=Turso%20database%2C%20admin%20password%20and%2032-byte%20root%20key&envLink=https%3A%2F%2Fgithub.com%2Flifeafter619%2Fwalkie%23readme&project-name=walkie&repository-name=walkie) | Turso / libSQL | Environment variables filled in the deploy form; create the Turso database first |
+| Render | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/lifeafter619/walkie) | Persistent disk SQLite | Uses `render.yaml` + Dockerfile; persistent disks need the starter plan or above |
+| Docker / NAS / bare metal | See commands below | Local SQLite | Fully self-controlled, can reach intranet services |
 
-数据存 Durable Objects SQLite，无需外部数据库。免费额度见下方「免费额度与用量监控」。
+> Instances created by one-click deploy show a setup instructions page (not a 500 error) until the required secrets are in place.
+
+### 1. Cloudflare Workers (recommended)
+
+State lives in Durable Objects SQLite — no external database. See [Free tiers & usage monitoring](#free-tiers--usage-monitoring) below.
+
+Click the deploy button above; Cloudflare forks the repo into your account and creates the Durable Object automatically. **One-click deploy cannot pre-fill secrets** — the site shows a setup page first. Complete it locally:
 
 ```bash
-git clone https://github.com/<你的用户名>/walkie.git && cd walkie
-npm ci
-npx wrangler login
+git clone https://github.com/<your-account>/walkie.git && cd walkie
+npm ci && npx wrangler login
 
-# 生成 32 字节根密钥（Windows 无 openssl 时：
-#   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"）
+# Generate the 32-byte root key (on Windows without openssl:
+#   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))")
 openssl rand -base64 32 | npx wrangler secret put MASTER_KEY
 
-# 设置管理密码（≥8 位，登录控制台用；之后可在面板里随时改）
+# Admin password (≥8 chars, used to sign in to the console; changeable later)
 npx wrangler secret put ADMIN_TOKEN
-
-npm run deploy:cf
 ```
 
-部署完成后访问 `https://walkie.<你的子域>.workers.dev`。
+To deploy fully manually instead: clone this repo, run the two secret commands above, then `npm run deploy:cf`. The site is `https://walkie.<your-subdomain>.workers.dev`.
 
-> 推送到 GitHub 后，可以给仓库加一键部署按钮：
-> `https://deploy.workers.cloudflare.com/?url=https://github.com/<你的用户名>/walkie`
+### 2. Vercel + Turso
 
-### 二、Vercel + Turso
+Serverless deployment with state in [Turso](https://turso.tech) (libSQL). Deliveries run in-request, with Vercel Cron as the retry backstop.
 
-Serverless 部署，状态存 [Turso](https://turso.tech)（libSQL），队列由请求内投递 + Vercel Cron 兜底重试。
+Create a Turso database to get `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`, then click the Vercel button — the form asks for these variables:
 
-1. 创建 Turso 数据库，拿到 `TURSO_DATABASE_URL` 与 `TURSO_AUTH_TOKEN`；
-2. 导入本仓库到 Vercel（`vercel.json` 已带构建与 Cron 配置）；
-3. 配置环境变量：
-
-| 变量 | 说明 |
+| Variable | Description |
 | --- | --- |
-| `TURSO_DATABASE_URL` | `libsql://…` 数据库地址 |
-| `TURSO_AUTH_TOKEN` | Turso 访问令牌 |
-| `ADMIN_TOKEN` | 管理密码（≥8 位） |
-| `MASTER_KEY` | base64 的 32 字节根密钥 |
-| `CRON_SECRET` | 保护 `/api/cron/drain` 的随机串（Vercel 自动注入到 Cron 请求头） |
-| `PUBLIC_URL` | 站点最终地址，如 `https://walkie.example.com`（用于回复链接） |
+| `TURSO_DATABASE_URL` | `libsql://…` database URL |
+| `TURSO_AUTH_TOKEN` | Turso access token |
+| `ADMIN_TOKEN` | Admin password (≥8 chars) |
+| `MASTER_KEY` | base64-encoded 32-byte root key |
+| `CRON_SECRET` | Random string protecting `/api/cron/drain` (injected by Vercel Cron) |
+| `PUBLIC_URL` | Optional. Final site URL, e.g. `https://walkie.example.com` (used in reply links) |
 
-4. 部署。Hobby 计划的 Cron 每天最多运行一次，因此默认每天 03:00 UTC 兜底排空重试队列；正常请求仍会立即触发投递。
+Hobby plans can run cron at most once a day, so it drains the retry queue daily at 03:00 UTC; normal requests still trigger deliveries immediately.
 
-> 一键部署链接：`https://vercel.com/new/clone?repository-url=https://github.com/<你的用户名>/walkie`
+### 3. Render
 
-### 三、Docker / Docker Compose
+`render.yaml` carries the Docker build, health check, and a 1 GB persistent disk. After clicking the button, fill in `ADMIN_TOKEN` and `MASTER_KEY`. Note that Render free instances have no persistent disk — the blueprint defaults to the starter plan; switching back to free loses channels and keys on every redeploy.
 
-单容器 + 本地 SQLite 卷，适合 NAS 与家庭服务器。
+### 4. Docker / Docker Compose
+
+Single container with a local SQLite volume — good for NAS and home servers.
 
 ```bash
-ADMIN_TOKEN='你的管理密码' \
+ADMIN_TOKEN='your-admin-password' \
 MASTER_KEY="$(openssl rand -base64 32)" \
 docker compose up -d --build
 ```
 
-- 默认只绑定 `127.0.0.1:4310`，用 Nginx/Caddy 反代并终结 TLS 后再对外；
-- 数据在 `relaydock-data` 卷（新安装使用 `/app/data/walkie.db`，旧安装自动继续使用 `relaydock.db`），**备份时连同 `MASTER_KEY` 一起保存**，两者缺一不可恢复。
+- Binds `127.0.0.1:4310` by default; put Nginx/Caddy in front for TLS before exposing it;
+- Data lives in the `relaydock-data` volume (new installs use `/app/data/walkie.db`; older installs keep using `relaydock.db`). **Back it up together with `MASTER_KEY`** — neither can be recovered without the other.
 
-Caddy 反代两行即可：
+A Caddy reverse proxy is two lines:
 
 ```
 walkie.example.com {
@@ -107,41 +116,24 @@ walkie.example.com {
 }
 ```
 
-### 免费额度与用量监控
+### 5. Enterprise / private network
 
-截至 2026-08，平台公开免费额度如下；平台可能调整，部署前以官方页面为准：
-
-| 平台 | 免费计划主要限制 | 官方来源 |
-| --- | --- | --- |
-| Cloudflare Workers | 100,000 请求/天、10 ms CPU/请求、128 MB 内存；Durable Objects 100,000 请求/天；DO SQLite 读取 500 万行/天、写入 10 万行/天、5 GB | [Workers Limits](https://developers.cloudflare.com/workers/platform/limits/) / [Durable Objects Pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/) |
-| Vercel Hobby（Fluid Compute） | 1,000,000 函数调用/月、4 CPU 小时/月、360 GB-hours 内存/月；Cron 每天最多一次且精度为 ±59 分钟 | [Hobby Plan](https://vercel.com/docs/plans/hobby) / [Limits](https://vercel.com/docs/limits) / [Cron](https://vercel.com/docs/cron-jobs/usage-and-pricing) |
-
-「系统 → 额度与用量」同时显示 Walkie 自己的投递统计和平台 API 快照。平台 Token 使用现有 DEK 做 AES-GCM 加密，接口和浏览器只会看到“已配置”状态，不会返回明文。
-
-- Cloudflare：填写 API Token、Account ID 和 Worker 脚本名。用量读取需要 `Account → Account Analytics → Read`；自动识别 Workers Free/Paid 还需要 `Account → Billing → Read`，不授予账单权限时可手动选择套餐。系统每 15 分钟通过 [GraphQL Analytics API](https://developers.cloudflare.com/analytics/graphql-api/tutorials/querying-workers-metrics/) 读取当天的请求、错误和子请求。
-- Vercel：填写 Access Token；Team ID 和 Project ID 可选。系统读取 [Billing Charges API](https://vercel.com/docs/rest-api/billing/list-focus-billing-charges) 的当月 FOCUS JSONL 数据，按实际返回的服务与单位展示指标。管理页打开时最多每 15 分钟同步一次；Hobby 空闲部署受 Cron 限制，只能保证每日检查一次。
-- 每个指标可设置绝对阈值，并选择“仅告警”“仅暂停新推送”或“告警并暂停新推送”。阈值告警按平台计费周期幂等去重；API 请求失败或快照过期不会触发暂停，暂停后可在同一页面手动恢复。
-
-平台账单数据可能延迟，CPU、Durable Objects 行读写及 Turso 用量仍应以各平台控制台为最终依据。
-
-### 四、企业 / 私有网络部署
-
-裸机 Node.js，适合需要触达内网服务（自建 Gotify、OneBot QQ 机器人、内网 Webhook）的场景。
+Bare-metal Node.js, for reaching intranet services (self-hosted Gotify, OneBot QQ bots, internal webhooks).
 
 ```bash
 # Node.js ≥ 22
-git clone https://github.com/<你的用户名>/walkie.git && cd walkie
+git clone https://github.com/lifeafter619/walkie.git && cd walkie
 npm ci && npm run build
 
 NODE_ENV=production \
 HOST=0.0.0.0 PORT=4310 \
-ADMIN_TOKEN='你的管理密码' \
+ADMIN_TOKEN='your-admin-password' \
 MASTER_KEY="$(openssl rand -base64 32)" \
 ALLOW_PRIVATE_WEBHOOKS=true \
 node dist/server/index.js
 ```
 
-systemd 单元示例：
+Example systemd unit:
 
 ```ini
 [Unit]
@@ -159,19 +151,36 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
-内网注意事项：
+Intranet notes:
 
-- `ALLOW_PRIVATE_WEBHOOKS=true` 允许通知发往私网地址（OneBot、内网 Apprise 等必需）；
-- 目标服务只有 HTTP 时再加 `ALLOW_INSECURE_HTTP=true`；
-- 对外暴露前务必经反向代理加 TLS，并保持 `ADMIN_TOKEN` 已设置——绑定非回环地址且未设管理密码时进程会拒绝启动。
+- `ALLOW_PRIVATE_WEBHOOKS=true` allows notifications to private addresses (required for OneBot, internal Apprise, etc.);
+- Add `ALLOW_INSECURE_HTTP=true` when the target service is HTTP-only;
+- Always put TLS in front before exposing the port, and keep `ADMIN_TOKEN` set — the process refuses to start when bound to a non-loopback address without an admin password.
 
-## 接入你的 Agent
+### Free tiers & usage monitoring
 
-在控制台「密钥」页创建 Agent Key（可自定义成好记的密码，或用随机生成的 `rdk_` 密钥），然后任选一种方式：
+As of 2026-08 (verify against official pages before deploying):
 
-### MCP（推荐）
+| Platform | Main free-plan limits | Official source |
+| --- | --- | --- |
+| Cloudflare Workers | 100,000 requests/day, 10 ms CPU/request, 128 MB memory; Durable Objects 100,000 requests/day; DO SQLite 5M row reads/day, 100K row writes/day, 5 GB | [Workers Limits](https://developers.cloudflare.com/workers/platform/limits/) / [Durable Objects Pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/) |
+| Vercel Hobby (Fluid Compute) | 1,000,000 function invocations/month, 4 CPU hours/month, 360 GB-hours memory/month; cron at most once a day, ±59 min precision | [Hobby Plan](https://vercel.com/docs/plans/hobby) / [Limits](https://vercel.com/docs/limits) / [Cron](https://vercel.com/docs/cron-jobs/usage-and-pricing) |
 
-`https://你的域名/mcp`，Streamable HTTP + Bearer 鉴权。控制台「接入」页可直接复制以下配置：
+System → Quotas & usage shows both Walkie's own delivery stats and live platform API snapshots. Platform tokens are AES-GCM encrypted with the existing DEK — the API and browser only ever see "configured", never the plaintext.
+
+- Cloudflare: provide an API Token, Account ID, and Worker script name. Usage reads need `Account → Account Analytics → Read`; auto-detecting Workers Free/Paid additionally needs `Account → Billing → Read` (or pick the plan manually). Walkie polls the [GraphQL Analytics API](https://developers.cloudflare.com/analytics/graphql-api/tutorials/querying-workers-metrics/) every 15 minutes for the day's requests, errors, and subrequests.
+- Vercel: provide an Access Token; Team ID and Project ID optional. Walkie reads the current month's FOCUS JSONL from the [Billing Charges API](https://vercel.com/docs/rest-api/billing/list-focus-billing-charges) and shows the returned services and units. Sync at most every 15 minutes while the admin page is open; idle Hobby deployments are limited by cron to roughly daily checks.
+- Every metric supports an absolute threshold with actions: alert only, pause new pushes only, or both. Threshold alerts are deduplicated per billing cycle; failed API requests or stale snapshots never trigger a pause, and a pause can be lifted on the same page.
+
+Platform billing data may lag; CPU, Durable Object row I/O, and Turso usage should still be verified in each platform's dashboard.
+
+## Connecting your agent
+
+Create an Agent Key on the console's Keys page (use a memorable custom string or a random `rdk_` key), then pick any entry point:
+
+### MCP (recommended)
+
+`https://your-domain/mcp`, Streamable HTTP + Bearer auth. The Integrations page can copy these configs:
 
 ```jsonc
 // Claude Code — .mcp.json
@@ -179,7 +188,7 @@ WantedBy=multi-user.target
   "mcpServers": {
     "walkie": {
       "type": "http",
-      "url": "https://你的域名/mcp",
+      "url": "https://your-domain/mcp",
       "headers": { "Authorization": "Bearer ${WALKIE_API_KEY}" }
     }
   }
@@ -189,138 +198,129 @@ WantedBy=multi-user.target
 ```toml
 # Codex — ~/.codex/config.toml
 [mcp_servers.walkie]
-url = "https://你的域名/mcp"
+url = "https://your-domain/mcp"
 bearer_token_env_var = "WALKIE_API_KEY"
 ```
 
-| MCP 工具 | 作用 |
+| MCP tool | Purpose |
 | --- | --- |
-| `list_destinations` | 列出该 Key 可用的频道与路由 |
-| `send_notification` | 发送通知，返回 deliveryId |
-| `get_delivery` | 查询投递的总体与分频道状态 |
-| `ask_user` | 向人类提问，推送一次性回复链接 |
-| `check_reply` | 长轮询等待人类回复 |
-| `list_routes` | 列出可用路由 |
-| `list_channel_types` / `list_channels` | 渠道类型字段定义 / 渠道列表（`config:write`） |
-| `create_channel` / `update_channel` / `delete_channel` | 渠道管理（`config:write`） |
-| `test_channel` | 发送测试消息验证渠道连通性（`config:write`） |
-| `create_route` / `update_route` / `delete_route` | 路由管理（`config:write`） |
+| `list_destinations` | List channels and routes this key may use |
+| `send_notification` | Send a notification, returns a deliveryId |
+| `get_delivery` | Query a delivery's overall and per-channel status |
+| `ask_user` | Ask the human a question, pushes a one-time reply link |
+| `check_reply` | Long-poll for the human's reply |
+| `list_routes` | List usable routes |
+| `list_channel_types` / `list_channels` | Channel type field definitions / channel list (`config:write`) |
+| `create_channel` / `update_channel` / `delete_channel` | Channel management (`config:write`) |
+| `test_channel` | Send a test message to verify connectivity (`config:write`) |
+| `create_route` / `update_route` / `delete_route` | Route management (`config:write`) |
 
-给 Key 开启「配置管理」（`config:write`）权限后，可以直接对 Agent 说人话完成配置：
+With the `config:write` scope enabled, you can just tell the agent what you want:
 
-> 「帮我配一个 Telegram，Bot Token 是 123:abc，Chat ID 是 42，配好测一下」
+> "Set up a Telegram channel, Bot Token 123:abc, Chat ID 42 — and test it."
 
-Agent 会调用 `list_channel_types` 查字段 → `create_channel` 建渠道 → `test_channel` 验证连通 → 回报结果。所有变更写审计表（区分管理员与 Agent 操作）；配置工具不含任何 Key 管理能力，Agent 无法给自己提权。
+The agent calls `list_channel_types` for the fields → `create_channel` → `test_channel` → reports back. Every change is written to the audit log (admin and agent actions distinguished); config tools have no key-management powers, so an agent cannot escalate its own privileges.
 
 ### REST API
 
 ```bash
-curl -X POST https://你的域名/api/v1/notify \
+curl -X POST https://your-domain/api/v1/notify \
   -H "Authorization: Bearer <AgentKey>" \
   -H "content-type: application/json" \
-  -d '{"destination":"prod-alerts","title":"部署完成","body":"v2.4.0 已上线","severity":"success"}'
+  -d '{"destination":"prod-alerts","title":"Deploy done","body":"v2.4.0 is live","severity":"success"}'
 ```
 
-### 连接其他 Walkie 实例
+`POST /api/v1/ask` asks a question, `GET /api/v1/conversations/:id` fetches the reply, `GET /api/v1/deliveries/:id` checks a delivery.
 
-不同平台部署的 Walkie 可以直接互相调用：远端管理员先创建一个仅允许访问指定频道或路由、具备 `notifications:send` 权限的 Agent Key；本地在「频道」中新增「Walkie 实例」，填写远端站点地址、该 Agent Key 和远端目的地 ID / slug。之后该频道可以像普通频道一样加入本地路由。
+### Connect other Walkie instances
 
-跨实例投递会自动携带本地投递 ID 作为远端幂等键，并在 `X-Walkie-Trace` 中记录已访问实例。再次进入相同实例或超过 8 跳时会终止转发，避免路由配置错误形成通知回环。多个域名指向同一实例时仍以 8 跳上限兜底。
+Walkie instances on different platforms can call each other directly: on the remote instance, create an Agent Key restricted to specific channels/routes with `notifications:send`; locally, add a "Walkie instance" channel with the remote site URL, that key, and the remote destination ID/slug. The channel then behaves like any other channel in local routes.
 
-`POST /api/v1/ask` 提问、`GET /api/v1/conversations/:id` 取回复、`GET /api/v1/deliveries/:id` 查投递。
+Cross-instance deliveries carry the local delivery ID as the remote idempotency key and record visited instances in `X-Walkie-Trace`. Re-entering the same instance or exceeding 8 hops terminates forwarding, preventing notification loops from misconfigured routes.
 
-### Server酱兼容
+### Drop-in compatibility endpoints
 
-任何支持 Server酱的现有工具可以零改造切过来，把推送地址换成：
+Point existing tooling at Walkie with zero code changes — the last path segment (or the token parameter) is your Agent Key:
 
-```
-https://你的域名/send/<AgentKey>.send
-```
-
-支持 `title` / `desp` / `tags` / `short` 参数；Key 配置了多个目的地时用 `destination` 参数指定。
-
-### Bark 兼容
-
-Walkie 提供 Bark V2 `/push`、旧式路径推送，以及 `/ping`、`/healthz`、`/info` 端点。`device_key` 使用已配置 Bark 频道的 Device Key，或使用只绑定一个目的地的 Agent Key：
-
-```bash
-curl -X POST https://你的域名/push \
-  -H "content-type: application/json" \
-  -d '{"device_key":"<Bark Device Key 或 Agent Key>","title":"部署完成","body":"v2.4.0 已上线","level":"active"}'
-```
-
-这是兼容 relay，不是独立 APNs Bark 后端；`/register` 只校验已有 key，不保存 Bark 设备令牌。需要完整设备注册/APNs 服务时，使用 `Finb/bark-server`、`cwxiaos/bark-worker` 或其他专用 Bark server。
-
-### Gotify / PushPlus / ntfy 兼容
-
-| 协议 | 兼容入口 | 鉴权 |
+| Protocol | Endpoint | Auth |
 | --- | --- | --- |
-| Gotify | `POST /message?token=<AgentKey>` | 查询参数中的 Agent Key |
-| PushPlus | `GET/POST /send` | `token` 参数使用 Agent Key |
+| ServerChan | `GET/POST /send/<AgentKey>.send` | Agent Key in the URL |
+| Bark | `GET/POST /push` | Bark Device Key or Agent Key in `device_key` |
+| Gotify | `POST /message` | `X-Gotify-Key` header, `?token=`, or `Authorization: Bearer` — the value is the Agent Key |
+| PushPlus | `GET/POST /send` | `token` parameter is the Agent Key |
 | ntfy | `POST /ntfy/<destination>` | `Authorization: Bearer <AgentKey>` |
+| Slack Incoming Webhook | `POST /services/<T>/<B>/<AgentKey>` | last URL segment is the Agent Key; replies plain-text `ok` |
+| Discord Webhook | `POST /api/webhooks/<id>/<AgentKey>` | last URL segment is the Agent Key; supports `?wait=true` |
+| Alertmanager / Grafana | `POST /alertmanager?key=<AgentKey>` | `?key=` or Bearer; `alerts[]` become notifications, deduplicated by fingerprint |
+| Pushover | `POST /1/messages.json` | `token` or `user` field is the Agent Key; priority on the -2..2 scale |
+| Apprise API | `POST /notify/<AgentKey>` | Agent Key in the URL or Bearer; `type` maps to severity |
 
-Gotify 和 PushPlus 在 Agent Key 只绑定一个目的地时可直接发送；ntfy 用路径中的 `destination` 指定频道或路由。完整参数和各协议官方文档可在「系统 → 实例状态 → 全屏查看兼容端点」中直接查看。
+The Slack endpoint means any tool with a "Slack webhook URL" field — GitHub, GitLab, Grafana, Sentry, Prometheus, Jenkins, Uptime Kuma, Datadog — can be pointed at Walkie as-is. Full parameter lists per protocol are on the console (System → Instance status → compatibility endpoints).
 
-## 双向确认是怎么工作的
+Gotify and PushPlus deliver directly when the Agent Key has exactly one destination; ntfy addresses a channel or route by the `destination` path segment.
+
+## How two-way confirmation works
 
 ```
-Agent ── ask_user("要不要回滚？", 选项) ──► Walkie
-Walkie ── 推送问题 + 一次性链接 ──► 你的手机（任意已配置渠道）
-你     ── 点选项或输入回复（或直接在控制台「会话」页回） ──► Walkie
-Agent  ── check_reply 长轮询 ──► 拿到答案，继续执行
+Agent  ── ask_user("roll back?", options) ──► Walkie
+Walkie ── pushes question + one-time link ──► your phone (any configured channel)
+You    ── tap an option or type a reply ──► Walkie
+Agent  ── check_reply long-poll ──► gets the answer, keeps going
 ```
 
-链接一次有效、到期作废（30 秒 ~ 24 小时可调），无需给回复者任何账号。
+Links are one-time and expire (30 seconds to 24 hours, configurable). The recipient needs no account.
 
-## 环境变量参考
+## Environment variables
 
-| 变量 | 默认 | 说明 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `ADMIN_TOKEN` | — | 管理密码（≥8 位）。生产必填；之后可在面板改，env 值与面板密码并存 |
-| `MASTER_KEY` | — | base64 的 32 字节根密钥(KEK)，加密所有渠道凭据。生产必填，**丢失即无法解密数据** |
-| `PORT` / `HOST` | `4310` / `127.0.0.1` | 监听地址（Node 部署） |
-| `DATA_DIR` | `./data` | SQLite 数据目录（Node 部署） |
-| `ALLOW_PRIVATE_WEBHOOKS` | `false` | 允许通知发往私网/回环地址 |
-| `ALLOW_INSECURE_HTTP` | `false` | 允许 HTTP 通知地址 |
-| `DELIVERY_WORKERS` | `2` | 每轮并发投递数 |
-| `MAX_SENDS_PER_MIN` | `0` | 全局每分钟发送上限，0 不限 |
-| `MAX_DELIVERY_ATTEMPTS` | `4` | 单渠道最大尝试次数（指数退避）；频道可单独设「重试上限」覆盖 |
-| `RETRY_BASE_MS` | `2000` | 重试退避基数 |
-| `PUBLIC_URL` | — | 站点对外地址（回复链接、MCP 配置展示用） |
-| `UPDATE_REPO` | `lifeafter619/walkie` | 应用内版本检查指向的 GitHub 仓库（owner/name，自建 fork 时改这里） |
-| `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | — | 使用 Turso/libSQL 远程数据库（Vercel 部署） |
-| `CRON_SECRET` | — | Vercel Cron 鉴权 |
+| `ADMIN_TOKEN` | — | Admin password (≥8 chars). Required in production; can coexist with console-managed passwords |
+| `MASTER_KEY` | — | base64 32-byte root key (KEK) encrypting all channel credentials. Required in production; **data is unrecoverable if lost** |
+| `PORT` / `HOST` | `4310` / `127.0.0.1` | Listen address (Node deploy) |
+| `DATA_DIR` | `./data` | SQLite data directory (Node deploy) |
+| `ALLOW_PRIVATE_WEBHOOKS` | `false` | Allow notifications to private/loopback addresses |
+| `ALLOW_INSECURE_HTTP` | `false` | Allow plain-HTTP notification targets |
+| `DELIVERY_WORKERS` | `2` | Concurrent deliveries per drain cycle |
+| `MAX_SENDS_PER_MIN` | `0` | Global per-minute send cap, 0 = unlimited |
+| `MAX_DELIVERY_ATTEMPTS` | `4` | Max attempts per channel (exponential backoff); per-channel overrides available |
+| `RETRY_BASE_MS` | `2000` | Retry backoff base |
+| `PUBLIC_URL` | — | Public site URL (reply links, MCP config display) |
+| `UPDATE_REPO` | `lifeafter619/walkie` | GitHub repo for in-app update checks (owner/name; change for forks) |
+| `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | — | Turso/libSQL remote database (Vercel deploy) |
+| `CRON_SECRET` | — | Vercel cron authentication |
 
-## 安全模型
+## Security model
 
-- 渠道凭据 AES-256-GCM 加密落盘；两级密钥（env `MASTER_KEY` 为 KEK，数据密钥 DEK 可在控制台在线轮换并原子重加密）；
-- Agent Key 与管理密码只存 sha256 哈希做鉴权；Agent Key 另存一份加密副本供面板查看复制；
-- 出站通知默认拒绝私网/回环/保留地址与明文 HTTP（SSRF 防护），重定向一律拒绝；
-- 每个 Agent Key 可限定 scope（发送/读取/配置管理）与目的地白名单（如 5 个渠道开 5 个 Key 各管一个），可随时编辑范围，一键吊销；
-- 回复链接带一次性 token，回复后立即失效；所有敏感操作写审计表，「审计」页可按操作者与动作类型检索；
-- 「系统」页可配置数据保留策略和通知量软限制；用量每 30 秒刷新，过期数据可自动或手动清理。
+- Channel credentials are AES-256-GCM encrypted at rest; two-level keys (env `MASTER_KEY` as KEK, data key DEK rotatable online from the console with atomic re-encryption);
+- Agent Keys and admin passwords are stored as sha256 hashes for auth; Agent Keys keep an encrypted copy for console viewing;
+- Outbound notifications reject private/loopback/reserved addresses and plain HTTP by default (SSRF protection); redirects are always rejected;
+- Every Agent Key can be scoped (send / read / config) with a destination allowlist (e.g. five keys for five channels), editable anytime, revocable in one click;
+- Reply links carry a one-time token invalidated on first reply; all sensitive operations land in the audit log, searchable by actor and action in the console;
+- The System page configures data retention and delivery soft limits; usage refreshes every 30 seconds and expired data is purged automatically or manually.
 
-## 常见问题
+## FAQ
 
-**忘记管理密码？** 设置一个新的 env 密码即可：Cloudflare 用 `wrangler secret put ADMIN_TOKEN`；Docker/Node 改环境变量后重启。登录后可在「密钥」页创建多条管理密码并逐条撤销；环境变量密码只能在部署平台修改或移除。系统会阻止撤销最后一条有效凭据。
+**Forgot the admin password?** Set a new env password: `wrangler secret put ADMIN_TOKEN` on Cloudflare, or change the environment variable and restart on Docker/Node. After signing in, you can create additional admin passwords on the Keys page and revoke them one by one; the env password can only be changed on the deploy platform. The system blocks revoking the last valid credential.
 
-**换设备后 Agent Key 丢了？** 「密钥」页可直接查看并复制（明文加密存储）；也可以吊销后重建。
+**Lost an Agent Key after switching devices?** The Keys page shows and copies it (stored encrypted in plaintext-readable form); or revoke and recreate.
 
-**Cloudflare 上 SMTP 能用吗？** Workers 的 `nodejs_compat` 提供 TCP socket 支持，多数 465/587 SMTP 服务可用；不可用时建议改用 HTTP 类渠道或在 Node/Docker 部署里发信。
+**Startup says "MASTER_KEY does not match this database"?** The current `MASTER_KEY` is not the one this data was created with (rotated key, restored backup without the key, or multiple environments sharing one data directory). Restore the original key — Walkie refuses to write with a wrong key. If the key is truly lost, channel credentials cannot be recovered; the only option is wiping the data directory/database and starting over.
 
-**通知没到？** 「投递」页看每个渠道的尝试记录与错误信息；「频道」页有一键测试。
+**Does SMTP work on Cloudflare?** Workers' `nodejs_compat` provides TCP sockets, so most 465/587 SMTP services work; otherwise prefer HTTP-based channels or send mail from the Node/Docker deploy.
 
-## 开发
+**Notification missing?** The Deliveries page shows every channel's attempts and errors; the Channels page has a one-click test.
+
+## Development
 
 ```bash
 npm ci
-npm run dev        # API（Node, 端口 4310）
-npm run dev:web    # 控制台（Vite）
+npm run dev        # API (Node, port 4310)
+npm run dev:web    # Console (Vite)
 npm test           # vitest
 npm run typecheck
 ```
 
-架构：`src/server`（Express + 队列 + 渠道调度，Node/Vercel/Workers 共用核心）、`src/worker`（Cloudflare Durable Object 入口）、`src/web`（React 控制台）、`api/`（Vercel 入口）。添加新渠道见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+Architecture: `src/server` (Express + queue + channel dispatch, shared by Node/Vercel/Workers), `src/worker` (Cloudflare Durable Object entry), `src/web` (React console), `api/` (Vercel entry). See [CONTRIBUTING.md](CONTRIBUTING.md) to add channels, and [docs/roadmap.md](docs/roadmap.md) for planned extensions.
 
 ## License
 

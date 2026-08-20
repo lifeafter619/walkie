@@ -210,3 +210,14 @@ describe('DEK wrap/unwrap roundtrip and bootstrap migration', () => {
     repository.close();
   });
 });
+
+// 换了 MASTER_KEY 或恢复备份时忘了带密钥，node crypto 只会抛 "Authentication failed"，
+// 每个请求都变成没有线索的 500。启动期必须给出说得清的错误。
+describe('MASTER_KEY mismatch', () => {
+  it('explains that the key does not match instead of leaking a raw crypto error', async () => {
+    const db = new Database(':memory:');
+    const first = await createNodeRepository(':memory:', randomBytes(32), db);
+    await expect(createNodeRepository(':memory:', randomBytes(32), db)).rejects.toThrow(/MASTER_KEY 与该数据库不匹配/);
+    first.close();
+  });
+});

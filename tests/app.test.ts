@@ -156,6 +156,141 @@ describe('HTTP API and MCP', () => {
     expect(deliveries.map((item) => item.source)).toEqual(expect.arrayContaining(['gotify-compat', 'pushplus-compat', 'ntfy-compat']));
   });
 
+  // Gotify 官方文档、curl 示例与 shoutrrr 默认都用 X-Gotify-Key 头传 token，只认 ?token= 会让它们全部 401
+  it('accepts the Gotify token from the X-Gotify-Key header and from Bearer auth', async () => {
+    const { app, repository } = await setup();
+    const channel = await repository.createChannel({ name: 'Hook', slug: 'hook', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{}' } });
+    const { secret } = await repository.createKey({ name: 'compat', destinationIds: [channel.id] });
+
+    expect((await request(app).post('/message').set('X-Gotify-Key', secret).send({ title: 'header', message: 'body' }).expect(200)).body.id).toBeTruthy();
+    expect((await request(app).post('/message').set('Authorization', `Bearer ${secret}`).send({ title: 'bearer', message: 'body' }).expect(200)).body.id).toBeTruthy();
+    await request(app).post('/message').set('X-Gotify-Key', 'nope').send({ message: 'body' }).expect(400);
+  });
+
+  // Gotify 官方示例用 curl -F（multipart）；此前 Express 端 multipart 请求体完全不可见
+  it('accepts multipart/form-data on the Gotify endpoint (curl -F)', async () => {
+    const { app, repository } = await setup();
+    const channel = await repository.createChannel({ name: 'Hook', slug: 'hook', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{}' } });
+    const { secret } = await repository.createKey({ name: 'compat', destinationIds: [channel.id] });
+
+    const response = await request(app).post(`/message?token=${encodeURIComponent(secret)}`)
+      .field('title', 'multipart title').field('message', 'multipart body').field('priority', '8').expect(200);
+    expect(response.body.id).toBeTruthy();
+    const delivery = (await repository.getDelivery(String(response.body.id)))!;
+    expect(delivery.title).toBe('multipart title');
+    expect(delivery.body).toBe('multipart body');
+    expect(delivery.severity).toBe('critical');
+  });
+
+  it('accepts Slack Incoming Webhook pushes and replies plain-text ok', async () => {
+    const { app, repository } = await setup();
+    const channel = await repository.createChannel({ name: 'Hook', slug: 'hook', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{}' } });
+    const { secret } = await repository.createKey({ name: 'slack', destinationIds: [channel.id] });
+
+    // 末段作 Agent Key；成功必须是纯文本 ok（Slack 把 JSON 当失败）
+    const response = await request(app).post(`/services/T00000000/B00000000/${encodeURIComponent(secret)}`)
+      .send({ text: 'deploy finished', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: '*bold* note' } }] }).expect(200);
+    expect(response.text).toBe('ok');
+    expect(response.headers['content-type']).toContain('text/plain');
+    const delivery = (await repository.listDeliveries({ limit: 5 })).find((item) => item.source === 'slack-webhook-compat')!;
+    expect(delivery.body).toContain('deploy finished');
+    expect(delivery.body).toContain('*bold* note');
+
+    // 老式 payload=<urlencoded json> 表单提交也要能解出来
+    const legacy = await request(app).post(`/services/T00000000/B00000000/${encodeURIComponent(secret)}`)
+      .type('form').send({ payload: JSON.stringify({ text: 'legacy payload form' }) }).expect(200);
+    expect(legacy.text).toBe('ok');
+
+    await request(app).post(`/services/T00000000/B00000000/invalidkey`).send({ text: 'x' }).expect(400);
+  });
+
+  it('accepts Discord Webhook pushes with 204 and wait=true message object', async () => {
+    const { app, repository } = await setup();
+    const channel = await repository.createChannel({ name: 'Hook', slug: 'hook', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{}' } });
+    const { secret } = await repository.createKey({ name: 'discord', destinationIds: [channel.id] });
+
+    const plain = await request(app).post(`/api/webhooks/123456789/${encodeURIComponent(secret)}`)
+      .send({ content: 'build passed', embeds: [{ title: 'Embed title', description: 'embed text' }] }).expect(204);
+    expect(plain.text).toBe('');
+    const delivery = (await repository.listDeliveries({ limit: 5 })).find((item) => item.source === 'discord-webhook-compat')!;
+    expect(delivery.title).toBe('build passed');
+    expect(delivery.body).toContain('Embed title');
+    expect(delivery.body).toContain('embed text');
+
+    const waited = await request(app).post(`/api/webhooks/123456789/${encodeURIComponent(secret)}?wait=true`)
+      .send({ content: 'with wait' }).expect(200);
+    expect(waited.body.id).toBeTruthy();
+    expect(waited.body.content).toBe('with wait');
+
+    await request(app).post('/api/webhooks/123456789/badkey').send({ content: 'x' }).expect(400);
+  });
+
+  it('accepts Alertmanager webhook payloads and dedupes by fingerprint', async () => {
+    const { app, repository } = await setup();
+    const channel = await repository.createChannel({ name: 'Hook', slug: 'hook', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{}' } });
+    const { secret } = await repository.createKey({ name: 'am', destinationIds: [channel.id] });
+
+    const payload = {
+      alerts: [
+        { status: 'firing', labels: { alertname: 'HighCPU', severity: 'critical' }, annotations: { summary: 'CPU 95%' }, generatorURL: 'https://grafana.example.com/alert/1', fingerprint: 'abc123' },
+        { status: 'resolved', labels: { alertname: 'HighCPU', severity: 'critical' }, annotations: { summary: 'CPU 95%' }, fingerprint: 'abc123' },
+        { status: 'firing', labels: { alertname: 'DiskFull', severity: 'warning' }, annotations: { description: 'disk 96%' }, fingerprint: 'def456' }
+      ]
+    };
+    const first = (await request(app).post(`/alertmanager?key=${encodeURIComponent(secret)}`).send(payload).expect(200)).body;
+    expect(first.delivered).toBe(3);
+    const deliveries = await repository.listDeliveries({ limit: 10 });
+    const firing = deliveries.find((item) => item.title.includes('HighCPU') && item.severity === 'critical')!;
+    expect(firing.title).toContain('HighCPU');
+    expect(firing.url).toBe('https://grafana.example.com/alert/1');
+    const resolved = deliveries.find((item) => item.title.startsWith('✅'))!;
+    expect(resolved.severity).toBe('success');
+    expect(deliveries.find((item) => item.title.includes('DiskFull'))!.severity).toBe('warning');
+
+    // 同 fingerprint 重复推送幂等去重：firing 那条不会重复投递
+    const second = (await request(app).post(`/alertmanager?key=${encodeURIComponent(secret)}`).send(payload).expect(200)).body;
+    expect(second.delivered).toBe(3);
+    const after = await repository.listDeliveries({ limit: 20 });
+    expect(after.filter((item) => item.metadata && (item.metadata as Record<string, unknown>).fingerprint === 'abc123' && item.severity === 'critical').length).toBe(1);
+
+    await request(app).post(`/alertmanager?key=${encodeURIComponent(secret)}`).send({}).expect(400);
+  });
+
+  it('accepts Pushover pushes on the -2..2 priority scale', async () => {
+    const { app, repository } = await setup();
+    const channel = await repository.createChannel({ name: 'Hook', slug: 'hook', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{}' } });
+    const { secret } = await repository.createKey({ name: 'pushover', destinationIds: [channel.id] });
+
+    const emergency = (await request(app).post('/1/messages.json').send({ token: secret, user: 'ignored', message: 'emergency', priority: 2, title: 'p2' }).expect(200)).body;
+    expect(emergency.status).toBe(1);
+    await request(app).post('/1/messages.json').send({ token: secret, message: 'normal', priority: 0, title: 'p0' }).expect(200);
+    await request(app).post('/1/messages.json').send({ token: secret, message: 'x', priority: 1, title: 'p1' }).expect(200);
+    await request(app).post('/1/messages.json').send({ token: secret }).expect(400);
+
+    const byTitle = Object.fromEntries((await repository.listDeliveries({ limit: 10 })).map((item) => [item.title, item.severity]));
+    expect(byTitle['p2']).toBe('critical');
+    expect(byTitle['p1']).toBe('warning');
+    expect(byTitle['p0']).toBe('info');
+  });
+
+  it('accepts Apprise API pushes with type-based severity', async () => {
+    const { app, repository } = await setup();
+    const channel = await repository.createChannel({ name: 'Hook', slug: 'hook', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{}' } });
+    const { secret } = await repository.createKey({ name: 'apprise', destinationIds: [channel.id] });
+
+    const success = (await request(app).post(`/notify/${encodeURIComponent(secret)}`).send({ body: 'all good', title: 'apprise-ok', type: 'success' }).expect(200)).body;
+    expect(success.error).toBeNull();
+    await request(app).post(`/notify/${encodeURIComponent(secret)}`).type('form').send({ body: 'form body', title: 'apprise-form', type: 'failure' }).expect(200);
+    await request(app).post('/notify').set('Authorization', `Bearer ${secret}`).send({ body: 'bearer', title: 'apprise-bearer' }).expect(200);
+    await request(app).post(`/notify/${encodeURIComponent(secret)}`).send({ title: 'no body' }).expect(400);
+    await request(app).post('/notify/badkey').send({ body: 'x' }).expect(400);
+
+    const byTitle = Object.fromEntries((await repository.listDeliveries({ limit: 10 })).map((item) => [item.title, item.severity]));
+    expect(byTitle['apprise-ok']).toBe('success');
+    expect(byTitle['apprise-form']).toBe('critical');
+    expect(byTitle['apprise-bearer']).toBe('info');
+  });
+
   // ntfy 的刻度是 1–5 且允许 urgent/high 之类的名字，不能按 Gotify 的 0–10 去折算：
   // 否则最高优先级只到 warning（数字 5）甚至掉到 info（名字 urgent），静默时段里会被延后
   it('maps ntfy priorities on the ntfy scale, not the Gotify one', async () => {
@@ -201,6 +336,17 @@ describe('HTTP API and MCP', () => {
     await request(app).post('/ntfy/hook').set('Authorization', `Bearer ${secret}`)
       .set('Title', 'click-xss').set('Click', 'javascript:alert(1)').type('text').send('b').expect(200);
 
+    // MCP send_notification 的 url/callbackUrl 同样只允许 http(s)（此前 z.url() 纯语法校验会放行）；
+    // JSON-RPC 错误在响应体里返回，HTTP 状态仍是 200
+    const call = (args: unknown) => request(app).post('/mcp')
+      .set('Authorization', `Bearer ${secret}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', id: 99, method: 'tools/call', params: { name: 'send_notification', arguments: args } });
+    const badUrl = await call({ destination: channel.id, title: 'mcp-xss', body: 'x', url: 'javascript:alert(1)' });
+    expect(badUrl.text).toContain('链接只允许 HTTP 或 HTTPS');
+    const badCallback = await call({ destination: channel.id, title: 'mcp-xss', body: 'x', callbackUrl: 'javascript:alert(1)' });
+    expect(badCallback.text).toContain('链接只允许 HTTP 或 HTTPS');
+
     const deliveries = await repository.listDeliveries({ limit: 20 });
     expect(deliveries.find((item) => item.title === 'ok')?.url).toBe('https://example.com/a?b=1');
     expect(deliveries.find((item) => item.source === 'bark-compat')?.url).toBeUndefined();
@@ -212,7 +358,7 @@ describe('HTTP API and MCP', () => {
     const meta = (await request(app).get('/api/meta').expect(200)).body;
     expect(meta.platform).toBe('vercel');
     expect(meta.platformProfile.label).toBe('Vercel Functions');
-    expect(meta.compatibilityEndpoints.map((item: { id: string }) => item.id)).toEqual(expect.arrayContaining(['bark', 'gotify', 'pushplus', 'ntfy']));
+    expect(meta.compatibilityEndpoints.map((item: { id: string }) => item.id)).toEqual(expect.arrayContaining(['bark', 'gotify', 'pushplus', 'ntfy', 'slack-webhook', 'discord-webhook', 'alertmanager', 'pushover', 'apprise']));
 
     const channel = await repository.createChannel({ name: 'Hook', slug: 'hook', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{}' } });
     const { secret } = await repository.createKey({ name: 'limited', destinationIds: [channel.id] });

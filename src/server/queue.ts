@@ -34,6 +34,8 @@ export function quietUntil(quietHours: string | undefined, severity: Severity, a
 export class DeliveryWorker {
   private timer?: ReturnType<typeof setInterval>;
   private running: Promise<number> | undefined;
+  /** 上轮 drain 发现 schedule 因平台暂停/用量限制滞留到期；Workers alarm 用它决定退避间隔 */
+  scheduleBlocked = false;
   /** drain 在途期间又有触发进来（新投递入队）：结束后补一轮，避免 Vercel 上等 cron */
   private rerun = false;
   // ponytail: 内存滑动窗口限流，进程重启后窗口清零；需要跨进程精确限流时改为按 attempts 表统计
@@ -148,7 +150,9 @@ export class DeliveryWorker {
   }
 
   private async drain(): Promise<number> {
-    await this.repository.materializeDueSchedules();
+    const { blocked } = await this.repository.materializeDueSchedules();
+    // 有 schedule 因平台暂停/用量限制滞留到期：记录状态，Workers alarm 用它退避而不是 250ms 空转
+    this.scheduleBlocked = blocked;
     const attempts = await this.repository.claimDueAttempts(this.config.deliveryWorkers, this.config.maxDeliveryAttempts);
     await Promise.all(attempts.map((attempt) => this.processAttempt(attempt)));
     // 旁路终态（禁用频道、滞留回收等）不经过 processAttempt，这里补扫漏发的终态回调；

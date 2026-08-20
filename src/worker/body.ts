@@ -1,3 +1,5 @@
+import { parseMultipart } from '../shared/multipart.js';
+
 const MAX_BODY_BYTES = 262_144;
 
 export class BodyTooLargeError extends Error {
@@ -41,5 +43,7 @@ export async function readBody(request: Request): Promise<Record<string, unknown
   if (!text) return {};
   const contentType = request.headers.get('content-type') ?? '';
   if (contentType.includes('application/json')) return JSON.parse(text) as Record<string, unknown>;
+  // Gotify 官方示例用 curl -F 发 multipart。body 已整体读成 text，交给共享解析器
+  if (contentType.includes('multipart/form-data')) return parseMultipart(text, contentType);
   return Object.fromEntries(new URLSearchParams(text));
 }

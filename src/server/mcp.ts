@@ -2,6 +2,7 @@ import { createMcpHandler, McpServer, SUPPORTED_PROTOCOL_VERSIONS, type McpReque
 import { z } from 'zod';
 import type { ApiKey } from '../shared/types.js';
 import { VERSION } from '../shared/version.js';
+import { safeLinkSchema } from '../shared/schemas.js';
 import type { RelayRepository } from './database.js';
 import { registerConfigTools } from './mcp-config.js';
 import type { NotificationService } from './notifications.js';
@@ -50,12 +51,12 @@ export function createRelayMcpServer(repository: RelayRepository, notifications:
       title: z.string().min(1).max(200),
       body: z.string().min(1).max(20_000),
       severity: z.enum(['info', 'success', 'warning', 'critical']).default('info'),
-      url: z.url().optional(),
+      url: safeLinkSchema.optional(),
       tags: z.string().max(200).optional().describe('Pipe-separated tags, forwarded to channels that support them'),
       short: z.string().max(200).optional().describe('Short card summary for push channels'),
       metadata: z.record(z.string(), z.unknown()).optional(),
       idempotencyKey: z.string().min(1).max(200).optional(),
-      callbackUrl: z.url().optional().describe('Optional webhook that receives the final delivery result'),
+      callbackUrl: safeLinkSchema.optional().describe('Optional webhook that receives the final delivery result'),
       delaySeconds: z.number().int().min(1).max(157_680_000).optional(),
       sendAt: z.string().datetime({ offset: true }).optional(),
       repeatEverySeconds: z.number().int().min(60).max(31_536_000).optional(),

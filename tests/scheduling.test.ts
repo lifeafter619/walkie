@@ -27,7 +27,8 @@ describe('notification scheduling', () => {
 
     await repository.db.run('UPDATE schedules SET next_run_at=?', [new Date(Date.now() - 1000).toISOString()]);
     const materialized = await repository.materializeDueSchedules();
-    expect(materialized).toHaveLength(1);
+    expect(materialized.created).toHaveLength(1);
+    expect(materialized.blocked).toBe(false);
     expect((await repository.listSchedules())[0]?.enabled).toBe(false);
   });
 
@@ -60,7 +61,10 @@ describe('notification scheduling', () => {
       });
     }
 
-    expect(await repository.materializeDueSchedules()).toHaveLength(1);
+    // 限额触发时第一条成功、第二条被阻塞：blocked=true 让 DO alarm 退避，next_run_at 原地不动
+    const limited = await repository.materializeDueSchedules();
+    expect(limited.created).toHaveLength(1);
+    expect(limited.blocked).toBe(true);
     expect((await repository.listSchedules()).filter((schedule) => schedule.nextRunAt === nextRunAt)).toHaveLength(1);
   });
 });

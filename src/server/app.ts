@@ -21,7 +21,8 @@ import type { DeliveryWorker } from './queue.js';
 import { applyUpdate, checkUpdate } from './update.js';
 import { assertKeyDestinations, validateChannelCreate, validateChannelUpdate, validateRouteChannelIds } from './validation.js';
 import { barkFailure, barkSuccess, registerResponse, resolveBarkDestination, sendBark } from './bark-compat.js';
-import { prioritySeverity, safeCompatUrl, sendWithAgentKey } from './compat.js';
+import { appriseSeverity, discordText, parseAlertmanager, prioritySeverity, safeCompatUrl, sendWithAgentKey, slackText } from './compat.js';
+import { parseMultipart } from '../shared/multipart.js';
 import type { PlatformUsageMonitor } from './platform-usage.js';
 import { parseWalkieTrace } from '../shared/instance-link.js';
 
@@ -56,6 +57,21 @@ export function createApp(deps: AppDependencies) {
   // 不能再重复注册第二个 json 解析器，否则实际生效的仍是最先注册的 100kb 限制。
   app.use(express.urlencoded({ extended: false, limit: '256kb' }));
   app.use(express.text({ type: 'text/plain', limit: '256kb' }));
+  // multipart 只服务兼容端点（Gotify curl -F 等）；文件部分丢弃，字段并入 req.body
+  app.use(express.text({ type: 'multipart/form-data', limit: '256kb' }) as unknown as express.RequestHandler);
+  const multipartFields = (req: Request): Record<string, unknown> => {
+    if (typeof req.body !== 'string' || !(req.header('content-type') ?? '').includes('multipart/form-data')) return {};
+    return parseMultipart(req.body, req.header('content-type')!);
+  };
+  // Slack 老式提交：Content-Type 为 form，payload=<urlencoded json>；新式直接 POST JSON
+  const slackPayload = (req: Request): Record<string, unknown> => {
+    const fields = { ...multipartFields(req), ...(req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {}) };
+    const payload = fields.payload;
+    if (typeof payload === 'string' && payload.trim().startsWith('{')) {
+      try { return JSON.parse(payload) as Record<string, unknown>; } catch { return fields; }
+    }
+    return fields;
+  };
   // publicUrl：优先显式配置；未配置时用调用方给出的请求 origin（反向代理场景生成可用链接），
   // 无请求上下文时退回监听地址
   const publicUrl = (origin?: string) => (config.publicUrl ?? origin ?? `http://${config.host}:${config.port}`).replace(/\/$/, '');
@@ -342,9 +358,11 @@ export function createApp(deps: AppDependencies) {
   app.post('/push', barkPush);
 
   app.post('/message', asyncRoute(async (req, res) => {
-    const params = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+    const params = { ...multipartFields(req), ...(req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {}) };
     try {
-      const delivery = await sendWithAgentKey(repository, notifications, String(req.query.token ?? params.token ?? ''), {
+      // Gotify 的 token 三种传法都要认：X-Gotify-Key 头、?token= 查询参数、Authorization: Bearer
+      const token = req.header('x-gotify-key') || String(req.query.token ?? params.token ?? '') || bearer(req) || '';
+      const delivery = await sendWithAgentKey(repository, notifications, token, {
         title: String(params.title ?? 'Gotify').slice(0, 200),
         body: String(params.message ?? '').trim().slice(0, 20_000) || 'Empty Message',
         severity: prioritySeverity(params.priority),
@@ -388,6 +406,113 @@ export function createApp(deps: AppDependencies) {
       void worker.drainOnce().catch(() => undefined);
       res.json({ id: delivery.id, time: Math.floor(Date.now() / 1000), event: 'message', topic: String(req.params[0]), message });
     } catch (error) { res.status(400).json({ code: 400, error: error instanceof Error ? error.message : '推送失败' }); }
+  }));
+
+  // ---- 以下五个兼容端点都必须注册在 barkLegacy 正则之前：那个模式吃掉任何 1–4 段路径 ----
+
+  // Slack Incoming Webhook 兼容：POST /services/<T>/<B>/<xxx>，末段作为 Agent Key。
+  // 成功必须返回纯文本 "ok"（Slack 的行为，JSON 会被当失败）。
+  app.post(/^\/services\/([A-Za-z0-9_\-]+)\/([A-Za-z0-9_\-]+)\/([A-Za-z0-9_\-]+)$/, asyncRoute(async (req, res) => {
+    const params = slackPayload(req);
+    try {
+      const delivery = await sendWithAgentKey(repository, notifications, String(req.params[2]), {
+        title: (String(params.text ?? '').trim() || 'Slack').slice(0, 200),
+        body: (slackText(params) || 'Empty Message').slice(0, 20_000),
+        severity: 'info',
+        metadata: { via: 'slack-webhook-compat' }
+      }, 'slack-webhook-compat');
+      void worker.drainOnce().catch(() => undefined);
+      res.type('text/plain').send('ok');
+    } catch (error) { res.status(400).type('text/plain').send(error instanceof Error ? error.message : '推送失败'); }
+  }));
+
+  // Discord Webhook 兼容：POST /api/webhooks/<id>/<token>，token 段作为 Agent Key。
+  // 默认 204；?wait=true 时 Discord 客户端期待一个 message JSON 对象。
+  app.post(/^\/api\/webhooks\/([0-9]+)\/([A-Za-z0-9_\-]+)$/, asyncRoute(async (req, res) => {
+    const params = { ...multipartFields(req), ...(req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {}) };
+    const content = String(params.content ?? '').trim();
+    const embeds = discordText(params);
+    try {
+      const delivery = await sendWithAgentKey(repository, notifications, String(req.params[1]), {
+        title: (content.split('\n')[0] || 'Discord').slice(0, 200),
+        body: ([content, embeds].filter(Boolean).join('\n') || 'Empty Message').slice(0, 20_000),
+        severity: 'info',
+        metadata: { via: 'discord-webhook-compat' }
+      }, 'discord-webhook-compat');
+      void worker.drainOnce().catch(() => undefined);
+      if (req.query.wait === 'true' || req.query.wait === '1') {
+        res.status(200).json({ id: delivery.id, content, timestamp: new Date().toISOString(), webhook_id: String(req.params[0]) });
+      } else res.status(204).end();
+    } catch (error) { res.status(400).json({ message: error instanceof Error ? error.message : '推送失败' }); }
+  }));
+
+  // Alertmanager / Grafana 告警 webhook 兼容：POST /alertmanager?key=<AgentKey>（或 Bearer）。
+  // fingerprint 作幂等键：同一告警的重复推送天然去重，不会刷屏。
+  app.post('/alertmanager', asyncRoute(async (req, res) => {
+    const params = { ...multipartFields(req), ...(req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {}) };
+    const token = String(req.query.key ?? '') || bearer(req) || '';
+    const alerts = parseAlertmanager(params);
+    if (!alerts.length) return res.status(400).json({ error: 'alerts 数组为空或缺失' });
+    try {
+      const deliveries = await Promise.all(alerts.map((alert) => sendWithAgentKey(repository, notifications, token, {
+        title: alert.title.slice(0, 200),
+        body: alert.body.slice(0, 20_000) || 'Empty Message',
+        severity: alert.severity,
+        url: alert.url,
+        idempotencyKey: alert.fingerprint ? `alertmanager:${alert.fingerprint}:${alert.status}` : undefined,
+        metadata: { via: 'alertmanager-compat', fingerprint: alert.fingerprint, status: alert.status }
+      }, 'alertmanager-compat')));
+      void worker.drainOnce().catch(() => undefined);
+      res.status(200).json({ delivered: deliveries.length, ids: deliveries.map((delivery) => delivery.id) });
+    } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : '推送失败' }); }
+  }));
+
+  // Pushover 兼容：POST /1/messages.json。token/user 任一作为 Agent Key（另一个忽略），
+  // 返回 {"status":1,"request":"<uuid>"}。
+  const pushoverCompat = asyncRoute(async (req, res) => {
+    const params = { ...req.query, ...multipartFields(req), ...(req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {}) };
+    const token = String(params.token ?? '') || String(params.user ?? '');
+    const message = String(params.message ?? '').trim();
+    if (!message) return res.status(400).json({ status: 0, request: '', errors: ['message is required'] });
+    try {
+      const delivery = await sendWithAgentKey(repository, notifications, token, {
+        title: (String(params.title ?? '') || 'Pushover').slice(0, 200),
+        body: message.slice(0, 20_000),
+        severity: prioritySeverity(params.priority, 'pushover'),
+        url: safeCompatUrl(params.url),
+        tags: String(params.device ?? '').slice(0, 200) || undefined,
+        metadata: { via: 'pushover-compat', urlTitle: params.url_title, sound: params.sound, device: params.device }
+      }, 'pushover-compat');
+      void worker.drainOnce().catch(() => undefined);
+      res.json({ status: 1, request: delivery.id });
+    } catch (error) {
+      res.status(400).json({ status: 0, request: '', errors: [error instanceof Error ? error.message : '推送失败'] });
+    }
+  });
+  app.post('/1/messages.json', pushoverCompat);
+  app.post('/1/messages', pushoverCompat);
+
+  // Apprise API 兼容：POST /notify 或 /notify/<KEY>。body 必填，type 映射 severity，
+  // 同时认 JSON 与表单（含 multipart）。
+  app.post(/^\/notify(\/([A-Za-z0-9_\-]+))?$/, asyncRoute(async (req, res) => {
+    const params = { ...multipartFields(req), ...(req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {}) };
+    const token = (req.params && typeof req.params[1] === 'string' ? String(req.params[1]) : '') || bearer(req) || '';
+    const body = String(params.body ?? '').trim();
+    if (!body) return res.status(400).json({ error: 'body is required' });
+    try {
+      const delivery = await sendWithAgentKey(repository, notifications, token, {
+        title: (String(params.title ?? '') || 'Apprise').slice(0, 200),
+        body: body.slice(0, 20_000),
+        severity: appriseSeverity(params.type),
+        tags: String(params.tag ?? '').slice(0, 200) || undefined,
+        metadata: { via: 'apprise-compat', format: params.format, type: params.type, tag: params.tag }
+      }, 'apprise-compat');
+      void worker.drainOnce().catch(() => undefined);
+      res.json({ error: null, kind: 'success' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '推送失败';
+      res.status(400).json({ error: { kind: 'warning', message } });
+    }
   }));
 
   const barkLegacy = asyncRoute(async (req, res) => {
@@ -453,6 +578,8 @@ export function createApp(deps: AppDependencies) {
   const webDir = path.resolve('dist/web');
   if (existsSync(webDir)) {
     app.use(express.static(webDir, { index: false, maxAge: config.isProduction ? '1h' : 0 }));
+    // 未知的 /api/* 路径返回 404 JSON 而不是 SPA 页面（与 Workers 行为一致；API 客户端拿到 HTML 会误导排错）
+    app.get('/api/{*splat}', (_req, res) => res.status(404).json({ error: 'Not found' }));
     app.get('/{*splat}', (_req, res) => res.sendFile(path.join(webDir, 'index.html')));
   }
 

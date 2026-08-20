@@ -4,7 +4,7 @@ export const slugSchema = z.string().min(2).max(80).regex(/^[a-z0-9][a-z0-9-]*$/
 
 /** 安全链接：z.url() 只做语法校验，javascript:/data: 等危险 scheme 会原样放行；
  *  通知 URL 会被渲染成管理面板里可点击的 <a href>，恶意 Agent 借此投毒即成存储型 XSS。 */
-const safeLinkSchema = z.url().refine((value) => {
+export const safeLinkSchema = z.url().refine((value) => {
   try {
     const protocol = new URL(value).protocol;
     return protocol === 'https:' || protocol === 'http:';
