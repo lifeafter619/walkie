@@ -197,7 +197,13 @@ export class RelayRepository {
     // DEK 自举：无包裹记录则生成新 DEK 并把现存频道凭据从 KEK 迁到 DEK（原子事务）
     const dekRow = await this.db.get("SELECT value FROM settings WHERE key='dek_wrapped'");
     if (dekRow) {
-      this.dek = unwrapDek(String(dekRow.value), this.masterKey);
+      // 解不开只有一个原因：MASTER_KEY 与建库时用的不是同一个。裸抛 node crypto 的
+      // "Authentication failed" 会让每个请求变成无从下手的 500，这里换成可操作的说明。
+      try {
+        this.dek = unwrapDek(String(dekRow.value), this.masterKey);
+      } catch {
+        throw new Error(`MASTER_KEY 与该数据库不匹配，无法解密已存储的凭据（当前 KEK 指纹 ${keyFingerprint(this.masterKey)}）。请恢复创建这份数据时使用的 MASTER_KEY；密钥确已丢失时只能清空数据重建。`);
+      }
       const versionRow = await this.db.get("SELECT value FROM settings WHERE key='dek_version'");
       this.dekVersion = versionRow ? Number(versionRow.value) : 1;
     } else {
@@ -665,14 +671,19 @@ export class RelayRepository {
     return (await this.getSchedule(id))!;
   }
 
-  async materializeDueSchedules(limit = 100): Promise<Delivery[]> {
+  async materializeDueSchedules(limit = 100): Promise<{ created: Delivery[]; blocked: boolean }> {
     const rows = await this.db.all('SELECT * FROM schedules WHERE enabled=1 AND next_run_at<=? ORDER BY next_run_at LIMIT ?', [now(), limit]);
     const created: Delivery[] = [];
+    let blocked = false;
     for (const row of rows) {
       try {
         await this.assertPlatformDeliveryEnabled();
         await this.assertWithinUsageLimits();
       } catch {
+        // 平台暂停/用量限制：schedule 保持原 next_run_at（不推进也不禁用），等待恢复。
+        // blocked 标记让调用方（DO alarm）知道有 schedule 因阻塞滞留到期，用退避间隔
+        // 轮询而不是 250ms 空转——那会以 ~34.5 万请求/天击穿 DO 免费配额
+        blocked = true;
         break;
       }
       const schedule = this.scheduleFrom(row);
@@ -707,7 +718,7 @@ export class RelayRepository {
       ]);
       if (result.changes) created.push(delivery);
     }
-    return created;
+    return { created, blocked };
   }
 
   /**

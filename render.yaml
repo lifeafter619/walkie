@@ -1,0 +1,34 @@
+# Render Blueprint —— 配合 README 里的 "Deploy to Render" 按钮使用。
+# 状态存容器内的 SQLite，因此必须挂持久盘；Render 的免费实例不提供磁盘，
+# 需要 starter 及以上套餐，否则每次重新部署都会丢失频道与密钥。
+services:
+  - type: web
+    name: walkie
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: singapore
+    # 一键部署出来的实例不应该被上游仓库的每次提交带着重新部署
+    autoDeploy: false
+    healthCheckPath: /health
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: 4310
+      - key: DATA_DIR
+        value: /app/data
+      - key: WALKIE_RUNTIME
+        value: docker
+      # 两项都由部署者在 Render 表单里填写：
+      # ADMIN_TOKEN 为控制台管理密码（≥8 位）
+      # MASTER_KEY 为 base64 编码的 32 字节根密钥，可用
+      #   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))" 生成
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: MASTER_KEY
+        sync: false
+    disk:
+      name: walkie-data
+      mountPath: /app/data
+      sizeGB: 1

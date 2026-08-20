@@ -165,7 +165,9 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       if (path === '/message' && request.method === 'POST') {
         const params = await readBody(request);
         try {
-          const delivery = await sendWithAgentKey(this.repository, this.notifications, url.searchParams.get('token') ?? String(params.token ?? ''), {
+          // Gotify 的 token 三种传法都要认：X-Gotify-Key 头、?token= 查询参数、Authorization: Bearer
+          const token = request.headers.get('x-gotify-key') || url.searchParams.get('token') || String(params.token ?? '') || bearer(request) || '';
+          const delivery = await sendWithAgentKey(this.repository, this.notifications, token, {
             title: String(params.title ?? 'Gotify').slice(0, 200), body: String(params.message ?? '').trim().slice(0, 20_000) || 'Empty Message',
             severity: prioritySeverity(params.priority), metadata: { via: 'gotify-compat', extras: params.extras ?? {} }
           }, 'gotify-compat');

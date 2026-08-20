@@ -475,7 +475,9 @@ export class ProviderDispatcher {
         return { url: `${string(config, 'server').replace(/\/$/, '')}/v2/send`, init: this.json({ message: bodyText, number: string(config, 'number'), recipients: lines(config.recipients) }) };
       case 'wecom-app': {
         const token = await this.wecomToken(config);
-        return { url: `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(token)}`, init: this.json({ touser: string(config, 'toUser') || undefined, toparty: string(config, 'toParty') || undefined, totag: string(config, 'toTag') || undefined, msgtype: 'text', agentid: Number(config.agentId), text: { content: bodyText }, enable_duplicate_check: 1, duplicate_check_interval: 1800 }) };
+        // 不开 enable_duplicate_check：企业微信会静默丢弃 30 分钟内的重复消息且仍返回
+        // errcode 0，告警平台会把「同一条失败重复发生」误报成已送达
+        return { url: `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(token)}`, init: this.json({ touser: string(config, 'toUser') || undefined, toparty: string(config, 'toParty') || undefined, totag: string(config, 'toTag') || undefined, msgtype: 'text', agentid: Number(config.agentId), text: { content: bodyText } }) };
       }
       case 'qq-bot': {
         const token = await this.qqToken(config);
