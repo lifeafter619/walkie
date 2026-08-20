@@ -3,6 +3,8 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { VERSION } from '../shared/version.js';
+import { PLATFORM_PROFILES } from '../shared/platform.js';
+import type { DeploymentPlatform } from '../shared/types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -33,7 +35,7 @@ const CURRENT_VERSION = VERSION;
  * 检查更新：从 GitHub releases API 获取最新版本。
  * @param repo GitHub 仓库（owner/name），通过环境变量 UPDATE_REPO 配置，默认 lifeafter619/walkie
  */
-export async function checkUpdate(repo?: string): Promise<UpdateCheckResult> {
+export async function checkUpdate(repo?: string, platform: DeploymentPlatform = 'node'): Promise<UpdateCheckResult> {
   const repoName = repo ?? process.env.UPDATE_REPO ?? 'lifeafter619/walkie';
   const apiUrl = `https://api.github.com/repos/${repoName}/releases/latest`;
   try {
@@ -48,7 +50,7 @@ export async function checkUpdate(repo?: string): Promise<UpdateCheckResult> {
     const latestVersion = release.tag_name.replace(/^v/, '');
     // 仅在 tag 是合法语义化版本时才比较；非法格式（如 "latest"、日期）不视为更新
     const hasUpdate = isSemver(latestVersion) && isSemver(CURRENT_VERSION) && compareVersions(latestVersion, CURRENT_VERSION) > 0;
-    const canApply = canApplyUpdate();
+    const canApply = canApplyUpdate(platform);
     return {
       currentVersion: CURRENT_VERSION,
       latestVersion,
@@ -56,7 +58,7 @@ export async function checkUpdate(repo?: string): Promise<UpdateCheckResult> {
       releaseNotes: release.body?.slice(0, 500),
       releaseUrl: release.html_url,
       canApply,
-      applyHint: canApply ? undefined : '当前部署方式不支持应用内更新。Docker 请拉取新镜像后重建容器；源码部署请 git pull 后重新构建部署。'
+      applyHint: canApply ? undefined : PLATFORM_PROFILES[platform].updateHint
     };
   } catch (error) {
     return { currentVersion: CURRENT_VERSION, latestVersion: CURRENT_VERSION, hasUpdate: false, canApply: false, applyHint: `检查更新失败：${error instanceof Error ? error.message : '网络错误'}` };
@@ -67,9 +69,9 @@ export async function checkUpdate(repo?: string): Promise<UpdateCheckResult> {
  * 应用更新：在 Node 独立部署（git clone）下执行 git pull + 重新构建 + 重启。
  * Docker 与 Workers 不支持应用内更新。
  */
-export async function applyUpdate(): Promise<UpdateApplyResult> {
-  if (!canApplyUpdate()) {
-    return { success: false, message: '当前部署方式不支持应用内更新。Docker 请拉取新镜像后重建容器；Cloudflare Workers 请运行 npm run deploy:cf。', needsRestart: false };
+export async function applyUpdate(platform: DeploymentPlatform = 'node'): Promise<UpdateApplyResult> {
+  if (!canApplyUpdate(platform)) {
+    return { success: false, message: PLATFORM_PROFILES[platform].updateHint, needsRestart: false };
   }
 
   const cwd = process.cwd();
@@ -100,8 +102,8 @@ export async function applyUpdate(): Promise<UpdateApplyResult> {
 }
 
 /** 当前运行时是否支持应用内更新 */
-function canApplyUpdate(): boolean {
-  return process.env.WALKIE_RUNTIME === 'node' || (!process.env.CF_PAGES && !process.env.CF_WORKER && existsSync(path.join(process.cwd(), '.git')));
+function canApplyUpdate(platform: DeploymentPlatform): boolean {
+  return platform === 'node' && existsSync(path.join(process.cwd(), '.git'));
 }
 
 /** 语义化版本比较：>0 表示 a 更新，<0 表示 b 更新，=0 相同 */

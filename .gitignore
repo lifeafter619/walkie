@@ -16,3 +16,5 @@ output/
 
 # ZCode 工具会话与计划文件
 .zcode/
+.vercel
+.env*

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
   AdminTokenStatus,
+  AdminToken,
   ApiKey,
   Channel,
   Conversation,
@@ -10,10 +11,16 @@ import type {
   DeliveryAttempt,
   Destination,
   MasterKeyStatus,
+  PlatformUsageMetric,
+  PlatformUsageRuntime,
+  PlatformUsageSettings,
   ProviderId,
   RetentionSettings,
+  UsageSettings,
+  UsageSnapshot,
   Route,
   RouteStrategy,
+  Schedule,
   Severity
 } from '../shared/types.js';
 import {
@@ -123,7 +130,7 @@ export class RelayRepository {
         id TEXT PRIMARY KEY, target_type TEXT NOT NULL, target_id TEXT NOT NULL,
         title TEXT NOT NULL, body TEXT NOT NULL, severity TEXT NOT NULL, url TEXT,
         metadata TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL,
-        idempotency_key TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        idempotency_key TEXT, scheduled_at TEXT, schedule_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE UNIQUE INDEX IF NOT EXISTS deliveries_idempotency_source
         ON deliveries(source, idempotency_key) WHERE idempotency_key IS NOT NULL;
@@ -150,6 +157,19 @@ export class RelayRepository {
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS admin_tokens (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, prefix TEXT NOT NULL,
+        secret_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL,
+        last_used_at TEXT, revoked_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS schedules (
+        id TEXT PRIMARY KEY, target_type TEXT NOT NULL, target_id TEXT NOT NULL,
+        title TEXT NOT NULL, body TEXT NOT NULL, severity TEXT NOT NULL, url TEXT,
+        metadata TEXT NOT NULL, source TEXT NOT NULL, interval_seconds INTEGER NOT NULL,
+        next_run_at TEXT NOT NULL, remaining_runs INTEGER, last_delivery_id TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS schedules_due ON schedules(enabled, next_run_at);
     `);
     const channelColumns = new Set((await this.db.all('PRAGMA table_info(channels)')).map((row) => String(row.name)));
     if (!channelColumns.has('rate_limit_per_min')) await this.db.exec('ALTER TABLE channels ADD COLUMN rate_limit_per_min INTEGER');
@@ -161,8 +181,19 @@ export class RelayRepository {
     if (!conversationColumns.has('options')) await this.db.exec('ALTER TABLE conversations ADD COLUMN options TEXT');
     const keyColumns = new Set((await this.db.all('PRAGMA table_info(api_keys)')).map((row) => String(row.name)));
     if (!keyColumns.has('secret_encrypted')) await this.db.exec('ALTER TABLE api_keys ADD COLUMN secret_encrypted TEXT');
+    const deliveryColumns = new Set((await this.db.all('PRAGMA table_info(deliveries)')).map((row) => String(row.name)));
+    if (!deliveryColumns.has('scheduled_at')) await this.db.exec('ALTER TABLE deliveries ADD COLUMN scheduled_at TEXT');
+    if (!deliveryColumns.has('schedule_id')) await this.db.exec('ALTER TABLE deliveries ADD COLUMN schedule_id TEXT');
     // 密钥按哈希直查（支持自定义密钥），哈希必须唯一；历史数据全是随机值，无碰撞
     await this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS api_keys_secret_hash ON api_keys(secret_hash)');
+    const legacyAdminHash = await this.db.get("SELECT value FROM settings WHERE key='admin_token_hash'");
+    if (legacyAdminHash) {
+      const legacyPrefix = await this.db.get("SELECT value FROM settings WHERE key='admin_token_prefix'");
+      await this.db.run(
+        'INSERT INTO admin_tokens (id,name,prefix,secret_hash,created_at) VALUES (?,?,?,?,?) ON CONFLICT(secret_hash) DO NOTHING',
+        ['legacy-admin-token', '已迁移管理密码', String(legacyPrefix?.value ?? 'legacy'), String(legacyAdminHash.value), now()]
+      );
+    }
     // DEK 自举：无包裹记录则生成新 DEK 并把现存频道凭据从 KEK 迁到 DEK（原子事务）
     const dekRow = await this.db.get("SELECT value FROM settings WHERE key='dek_wrapped'");
     if (dekRow) {
@@ -275,7 +306,7 @@ export class RelayRepository {
       ]);
       // 禁用频道后，其未完结的 attempt 再也不会被 claim，必须就地失败并推进投递终态，否则投递永久停在 processing
       if (input.enabled === false) await this.failAttemptsForDisabledChannel(current.id);
-      await this.audit(actor, 'channel.update', 'channel', current.id, {});
+      await this.audit(actor, 'channel.update', 'channel', current.id, { provider: input.provider ?? current.provider });
       return (await this.getChannel(current.id))!;
     });
   }
@@ -296,11 +327,11 @@ export class RelayRepository {
       await this.db.run('UPDATE channels SET enabled=0,updated_at=? WHERE id=?', [now(), current.id]);
       // 软删除同样要终结未完结 attempt，否则投递永久停在 processing
       await this.failAttemptsForDisabledChannel(current.id);
-      await this.audit(actor, 'channel.disable', 'channel', current.id, { reason: 'delete-deferred-history-or-route' });
+      await this.audit(actor, 'channel.disable', 'channel', current.id, { provider: current.provider, reason: 'delete-deferred-history-or-route' });
       return;
     }
     await this.db.run('DELETE FROM channels WHERE id=?', [current.id]);
-    await this.audit(actor, 'channel.delete', 'channel', current.id, {});
+    await this.audit(actor, 'channel.delete', 'channel', current.id, { provider: current.provider });
   }
 
   /** 频道被禁用/软删除后，其 pending/retrying/sending attempt 就地失败，并刷新受影响投递的终态 */
@@ -472,6 +503,7 @@ export class RelayRepository {
   async createDelivery(input: {
     targetType: 'channel' | 'route'; targetId: string; title: string; body: string; severity: Severity;
     url?: string; metadata?: Record<string, unknown>; source: string; idempotencyKey?: string; channelIds: string[];
+    scheduledAt?: string; scheduleId?: string;
   }): Promise<Delivery> {
     if (input.idempotencyKey) {
       const existing = await this.db.get('SELECT id FROM deliveries WHERE source=? AND idempotency_key=?', [input.source, input.idempotencyKey]);
@@ -479,19 +511,20 @@ export class RelayRepository {
     }
     const id = randomUUID();
     const timestamp = now();
+    const scheduledAt = input.scheduledAt ?? timestamp;
     try {
       await this.db.batch([
         {
           sql: `INSERT INTO deliveries
-            (id,target_type,target_id,title,body,severity,url,metadata,source,status,idempotency_key,created_at,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?)`,
+            (id,target_type,target_id,title,body,severity,url,metadata,source,status,idempotency_key,scheduled_at,schedule_id,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)`,
           params: [id, input.targetType, input.targetId, input.title, input.body, input.severity, input.url ?? null,
-            JSON.stringify(input.metadata ?? {}), input.source, input.idempotencyKey || null, timestamp, timestamp]
+            JSON.stringify(input.metadata ?? {}), input.source, input.idempotencyKey || null, scheduledAt, input.scheduleId ?? null, timestamp, timestamp]
         },
         ...input.channelIds.map((channelId, position) => ({
           sql: `INSERT INTO attempts
             (id,delivery_id,channel_id,position,status,next_attempt_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
-          params: [randomUUID(), id, channelId, position, 'pending', timestamp, timestamp, timestamp]
+          params: [randomUUID(), id, channelId, position, 'pending', scheduledAt, timestamp, timestamp]
         }))
       ]);
     } catch (error) {
@@ -528,6 +561,8 @@ export class RelayRepository {
       severity: row.severity as Severity, url: row.url ? String(row.url) : undefined,
       metadata: json<Record<string, unknown>>(row.metadata, {}), source: String(row.source), status: row.status as Delivery['status'],
       idempotencyKey: row.idempotency_key ? String(row.idempotency_key) : undefined,
+      scheduledAt: row.scheduled_at ? String(row.scheduled_at) : undefined,
+      scheduleId: row.schedule_id ? String(row.schedule_id) : undefined,
       createdAt: String(row.created_at), updatedAt: String(row.updated_at)
     };
   }
@@ -572,6 +607,107 @@ export class RelayRepository {
     const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
     const rows = await this.db.all(`${base}${where} ORDER BY d.created_at DESC,d.id DESC LIMIT ?`, [...params, limit]);
     return rows.map((row) => this.deliveryFrom(row));
+  }
+
+  private scheduleFrom(row: Row): Schedule {
+    return {
+      id: String(row.id), targetType: row.target_type as Schedule['targetType'], targetId: String(row.target_id),
+      targetName: row.target_name ? String(row.target_name) : undefined,
+      title: String(row.title), body: String(row.body), severity: row.severity as Severity,
+      url: row.url ? String(row.url) : undefined, metadata: json<Record<string, unknown>>(row.metadata, {}),
+      source: String(row.source), intervalSeconds: Number(row.interval_seconds), nextRunAt: String(row.next_run_at),
+      remainingRuns: row.remaining_runs == null ? undefined : Number(row.remaining_runs),
+      lastDeliveryId: row.last_delivery_id ? String(row.last_delivery_id) : undefined,
+      enabled: Boolean(row.enabled), createdAt: String(row.created_at), updatedAt: String(row.updated_at)
+    };
+  }
+
+  async createSchedule(input: {
+    id?: string;
+    targetType: Schedule['targetType']; targetId: string; title: string; body: string; severity: Severity;
+    url?: string; metadata?: Record<string, unknown>; source: string; intervalSeconds: number;
+    nextRunAt: string; remainingRuns?: number;
+  }): Promise<Schedule> {
+    const id = input.id ?? randomUUID();
+    const timestamp = now();
+    await this.db.run(`INSERT INTO schedules
+      (id,target_type,target_id,title,body,severity,url,metadata,source,interval_seconds,next_run_at,remaining_runs,enabled,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`, [
+      id, input.targetType, input.targetId, input.title, input.body, input.severity, input.url ?? null,
+      JSON.stringify(input.metadata ?? {}), input.source, input.intervalSeconds, input.nextRunAt,
+      input.remainingRuns ?? null, timestamp, timestamp
+    ]);
+    await this.audit(input.source, 'schedule.create', 'schedule', id, { intervalSeconds: input.intervalSeconds, nextRunAt: input.nextRunAt, remainingRuns: input.remainingRuns ?? null });
+    return (await this.getSchedule(id))!;
+  }
+
+  async getSchedule(id: string): Promise<Schedule | undefined> {
+    const row = await this.db.get(`SELECT s.*,COALESCE(c.name,r.name) target_name FROM schedules s
+      LEFT JOIN channels c ON s.target_type='channel' AND c.id=s.target_id
+      LEFT JOIN routes r ON s.target_type='route' AND r.id=s.target_id WHERE s.id=?`, [id]);
+    return row ? this.scheduleFrom(row) : undefined;
+  }
+
+  async listSchedules(options: { source?: string } = {}): Promise<Schedule[]> {
+    const where = options.source ? ' WHERE s.source=?' : '';
+    const rows = await this.db.all(`SELECT s.*,COALESCE(c.name,r.name) target_name FROM schedules s
+      LEFT JOIN channels c ON s.target_type='channel' AND c.id=s.target_id
+      LEFT JOIN routes r ON s.target_type='route' AND r.id=s.target_id${where}
+      ORDER BY s.enabled DESC,s.next_run_at,s.created_at DESC`, options.source ? [options.source] : []);
+    return rows.map((row) => this.scheduleFrom(row));
+  }
+
+  async cancelSchedule(id: string, actor = 'admin', source?: string): Promise<Schedule> {
+    const schedule = await this.getSchedule(id);
+    if (!schedule || (source && schedule.source !== source)) throw new Error('周期任务不存在');
+    await this.db.run('UPDATE schedules SET enabled=0,updated_at=? WHERE id=?', [now(), id]);
+    await this.audit(actor, 'schedule.cancel', 'schedule', id, {});
+    return (await this.getSchedule(id))!;
+  }
+
+  async materializeDueSchedules(limit = 100): Promise<Delivery[]> {
+    const rows = await this.db.all('SELECT * FROM schedules WHERE enabled=1 AND next_run_at<=? ORDER BY next_run_at LIMIT ?', [now(), limit]);
+    const created: Delivery[] = [];
+    for (const row of rows) {
+      try {
+        await this.assertPlatformDeliveryEnabled();
+        await this.assertWithinUsageLimits();
+      } catch {
+        break;
+      }
+      const schedule = this.scheduleFrom(row);
+      let channelIds: string[] = [];
+      if (schedule.targetType === 'channel') {
+        const channel = await this.getChannel(schedule.targetId);
+        if (channel?.enabled) channelIds = [channel.id];
+      } else {
+        const route = await this.getRoute(schedule.targetId);
+        if (route?.enabled) {
+          const enabled = new Set((await this.listChannels()).filter((channel) => channel.enabled).map((channel) => channel.id));
+          channelIds = [...new Set(route.channelIds.filter((id) => enabled.has(id)))];
+        }
+      }
+      if (!channelIds.length) {
+        await this.db.run('UPDATE schedules SET enabled=0,updated_at=? WHERE id=? AND next_run_at=?', [now(), schedule.id, schedule.nextRunAt]);
+        await this.audit('system:scheduler', 'schedule.disable', 'schedule', schedule.id, { reason: 'destination-unavailable' });
+        continue;
+      }
+      const delivery = await this.createDelivery({
+        targetType: schedule.targetType, targetId: schedule.targetId, title: schedule.title, body: schedule.body,
+        severity: schedule.severity, url: schedule.url, metadata: schedule.metadata, source: schedule.source,
+        idempotencyKey: `schedule:${schedule.id}:${schedule.nextRunAt}`, channelIds,
+        scheduledAt: schedule.nextRunAt, scheduleId: schedule.id
+      });
+      const remains = schedule.remainingRuns;
+      const enabled = remains === undefined || remains > 1;
+      const nextRunAt = new Date(new Date(schedule.nextRunAt).getTime() + schedule.intervalSeconds * 1000).toISOString();
+      const result = await this.db.run(`UPDATE schedules SET next_run_at=?,remaining_runs=?,last_delivery_id=?,enabled=?,updated_at=?
+        WHERE id=? AND enabled=1 AND next_run_at=?`, [
+        nextRunAt, remains === undefined ? null : Math.max(0, remains - 1), delivery.id, enabled ? 1 : 0, now(), schedule.id, schedule.nextRunAt
+      ]);
+      if (result.changes) created.push(delivery);
+    }
+    return created;
   }
 
   /**
@@ -622,7 +758,10 @@ export class RelayRepository {
   }
 
   async nextDueAttempt(): Promise<string | undefined> {
-    const row = await this.db.get("SELECT MIN(a.next_attempt_at) next_at FROM attempts a JOIN channels c ON c.id=a.channel_id WHERE a.status IN ('pending','retrying') AND c.enabled=1");
+    const row = await this.db.get(`SELECT MIN(next_at) next_at FROM (
+      SELECT MIN(a.next_attempt_at) next_at FROM attempts a JOIN channels c ON c.id=a.channel_id WHERE a.status IN ('pending','retrying') AND c.enabled=1
+      UNION ALL SELECT MIN(next_run_at) next_at FROM schedules WHERE enabled=1
+    )`);
     return row?.next_at ? String(row.next_at) : undefined;
   }
 
@@ -775,40 +914,197 @@ export class RelayRepository {
    * 凭据管理：管理令牌轮换、主密钥(DEK)轮换、凭据状态
    * ──────────────────────────────────────────────────────────── */
 
-  /** 读取轮换过的管理令牌哈希（比较用）；无则 undefined */
+  /** 兼容旧调用：返回第一条有效数据库管理令牌。 */
   async getAdminTokenHash(): Promise<{ hash?: string; prefix?: string }> {
-    const row = await this.db.get("SELECT value FROM settings WHERE key='admin_token_hash'");
-    const prefixRow = await this.db.get("SELECT value FROM settings WHERE key='admin_token_prefix'");
-    return row ? { hash: String(row.value), prefix: prefixRow ? String(prefixRow.value) : undefined } : {};
+    const row = await this.db.get('SELECT secret_hash,prefix FROM admin_tokens WHERE revoked_at IS NULL ORDER BY created_at LIMIT 1');
+    return row ? { hash: String(row.secret_hash), prefix: String(row.prefix) } : {};
   }
 
-  /** 存储新管理令牌（哈希 + 前缀），返回前缀预览。明文由调用方返回一次后丢弃。 */
-  async setAdminToken(token: string): Promise<{ prefix: string }> {
+  private adminTokenFrom(row: Row): AdminToken {
+    return {
+      id: String(row.id), name: String(row.name), prefix: String(row.prefix), createdAt: String(row.created_at),
+      lastUsedAt: row.last_used_at ? String(row.last_used_at) : undefined,
+      revokedAt: row.revoked_at ? String(row.revoked_at) : undefined
+    };
+  }
+
+  async listAdminTokens(): Promise<AdminToken[]> {
+    return (await this.db.all('SELECT id,name,prefix,created_at,last_used_at,revoked_at FROM admin_tokens ORDER BY created_at DESC')).map((row) => this.adminTokenFrom(row));
+  }
+
+  async authenticateAdminToken(token: string): Promise<AdminToken | undefined> {
+    if (!token) return undefined;
+    const row = await this.db.get('SELECT * FROM admin_tokens WHERE secret_hash=? AND revoked_at IS NULL', [hashSecret(token)]);
+    if (!row) return undefined;
+    const usedAt = now();
+    await this.db.run('UPDATE admin_tokens SET last_used_at=? WHERE id=?', [usedAt, row.id]);
+    return this.adminTokenFrom({ ...row, last_used_at: usedAt });
+  }
+
+  /** 新增管理令牌。明文只由 API 返回一次，不写入数据库。 */
+  async setAdminToken(token: string, name = '管理密码'): Promise<AdminToken> {
     const prefix = adminTokenPrefix(token);
     const timestamp = now();
-    await this.db.batch([
-      { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('admin_token_hash',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [hashSecret(token), timestamp] },
-      { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('admin_token_prefix',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [prefix, timestamp] }
-    ]);
-    await this.audit('admin', 'credential.admin_token.rotate', 'credential', 'admin_token', {});
-    return { prefix };
+    const id = randomUUID();
+    try {
+      await this.db.run('INSERT INTO admin_tokens (id,name,prefix,secret_hash,created_at) VALUES (?,?,?,?,?)', [id, name, prefix, hashSecret(token), timestamp]);
+    } catch (error) {
+      if (/UNIQUE constraint failed/.test(error instanceof Error ? error.message : '')) throw new Error('该管理密码已存在');
+      throw error;
+    }
+    await this.audit('admin', 'credential.admin_token.create', 'credential', id, { name, prefix });
+    return (await this.listAdminTokens()).find((item) => item.id === id)!;
+  }
+
+  async revokeAdminToken(id: string, envAdminConfigured = false): Promise<void> {
+    const token = (await this.listAdminTokens()).find((item) => item.id === id);
+    if (!token) throw new Error('管理密码不存在');
+    if (token.revokedAt) return;
+    const result = await this.db.run(
+      'UPDATE admin_tokens SET revoked_at=? WHERE id=? AND revoked_at IS NULL AND (?=1 OR (SELECT COUNT(*) FROM admin_tokens WHERE revoked_at IS NULL)>1)',
+      [now(), id, Number(envAdminConfigured)]
+    );
+    if (!result.changes) throw new Error('至少保留一个有效管理密码');
+    await this.audit('admin', 'credential.admin_token.revoke', 'credential', id, { name: token.name, prefix: token.prefix });
+  }
+
+  async restoreAdminToken(id: string): Promise<void> {
+    const token = (await this.listAdminTokens()).find((item) => item.id === id);
+    if (!token) throw new Error('管理密码不存在');
+    if (!token.revokedAt) return;
+    await this.db.run('UPDATE admin_tokens SET revoked_at=NULL WHERE id=?', [id]);
+    await this.audit('admin', 'credential.admin_token.restore', 'credential', id, { name: token.name, prefix: token.prefix });
   }
 
   /** 凭据综合状态：管理令牌来源 + 主密钥(KEK/DEK)状态 */
   async getCredentialStatus(envAdminConfigured: boolean): Promise<CredentialStatus> {
-    const adminHash = await this.getAdminTokenHash();
+    const tokens = await this.listAdminTokens();
+    const activeTokens = tokens.filter((token) => !token.revokedAt);
     const dekVersionRow = await this.db.get("SELECT value FROM settings WHERE key='dek_version'");
     const rotatedAtRow = await this.db.get("SELECT value FROM settings WHERE key='dek_rotated_at'");
     const dekVersion = dekVersionRow ? Number(dekVersionRow.value) : 1;
-    const admin: AdminTokenStatus = adminHash.hash
-      ? { source: 'rotated', rotated: true, prefix: adminHash.prefix, envConfigured: envAdminConfigured }
-      : { source: 'env', rotated: false, envConfigured: envAdminConfigured };
+    const admin: AdminTokenStatus = activeTokens.length
+      ? { source: 'rotated', rotated: true, prefix: activeTokens[0]?.prefix, envConfigured: envAdminConfigured, activeCount: activeTokens.length + Number(envAdminConfigured), tokens }
+      : { source: 'env', rotated: false, envConfigured: envAdminConfigured, activeCount: Number(envAdminConfigured), tokens };
     const masterKey: MasterKeyStatus = {
       kekFingerprint: keyFingerprint(this.masterKey),
       dekVersion,
       rotatedAt: rotatedAtRow ? String(rotatedAtRow.value) : undefined
     };
     return { admin, masterKey };
+  }
+
+  async getUsageSettings(): Promise<UsageSettings> {
+    const row = await this.db.get("SELECT value FROM settings WHERE key='usage_limits'");
+    return { dailyDeliveryLimit: 0, monthlyDeliveryLimit: 0, warningPercent: 80, ...(row ? json<Partial<UsageSettings>>(row.value, {}) : {}) };
+  }
+
+  async setUsageSettings(settings: UsageSettings): Promise<UsageSettings> {
+    await this.db.run("INSERT INTO settings (key,value,updated_at) VALUES ('usage_limits',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", [JSON.stringify(settings), now()]);
+    await this.audit('admin', 'usage_limits.update', 'setting', 'usage_limits', settings as unknown as Record<string, unknown>);
+    return settings;
+  }
+
+  async getUsageSnapshot(): Promise<UsageSnapshot> {
+    const date = new Date();
+    const dayStart = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())).toISOString();
+    const monthStart = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)).toISOString();
+    const count = async (table: 'deliveries' | 'attempts', since: string) => Number(((await this.db.get(`SELECT COUNT(*) count FROM ${table} WHERE created_at>=?`, [since])) as { count: number }).count);
+    const [dayDeliveries, dayAttempts, monthDeliveries, monthAttempts] = await Promise.all([
+      count('deliveries', dayStart), count('attempts', dayStart), count('deliveries', monthStart), count('attempts', monthStart)
+    ]);
+    return { settings: await this.getUsageSettings(), today: { deliveries: dayDeliveries, attempts: dayAttempts }, month: { deliveries: monthDeliveries, attempts: monthAttempts } };
+  }
+
+  async getPlatformUsageSettings(): Promise<Partial<PlatformUsageSettings>> {
+    const row = await this.db.get("SELECT value FROM settings WHERE key='platform_usage_settings'");
+    return row ? json<Partial<PlatformUsageSettings>>(row.value, {}) : {};
+  }
+
+  async setPlatformUsageSettings(settings: PlatformUsageSettings): Promise<void> {
+    await this.db.run("INSERT INTO settings (key,value,updated_at) VALUES ('platform_usage_settings',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", [JSON.stringify(settings), now()]);
+    await this.audit('admin', 'platform_usage.update', 'setting', 'platform_usage', { enabled: settings.enabled, warningPercent: settings.warningPercent, action: settings.action });
+  }
+
+  async hasPlatformUsageToken(): Promise<boolean> {
+    return Boolean(await this.db.get("SELECT 1 configured FROM settings WHERE key='platform_usage_token'"));
+  }
+
+  async setPlatformUsageToken(token: string): Promise<void> {
+    await this.withWriteLock(async () => {
+      await this.ensureFreshDek();
+      await this.db.run("INSERT INTO settings (key,value,updated_at) VALUES ('platform_usage_token',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", [encryptJson({ token }, this.encryptionKey()), now()]);
+    });
+    await this.audit('admin', 'platform_usage.token.update', 'credential', 'platform_usage', { configured: true });
+  }
+
+  async getPlatformUsageToken(): Promise<string | undefined> {
+    const row = await this.db.get("SELECT value FROM settings WHERE key='platform_usage_token'");
+    if (!row) return;
+    try {
+      return String(decryptJson(String(row.value), this.encryptionKey()).token ?? '') || undefined;
+    } catch {
+      await this.reloadDek();
+      return String(decryptJson(String(row.value), this.encryptionKey()).token ?? '') || undefined;
+    }
+  }
+
+  async getPlatformUsageRuntime(): Promise<PlatformUsageRuntime> {
+    const row = await this.db.get("SELECT value FROM settings WHERE key='platform_usage_runtime'");
+    return { metrics: [], deliveryDisabled: false, ...(row ? json<Partial<PlatformUsageRuntime>>(row.value, {}) : {}) };
+  }
+
+  private async setPlatformUsageRuntime(runtime: PlatformUsageRuntime): Promise<void> {
+    await this.db.run("INSERT INTO settings (key,value,updated_at) VALUES ('platform_usage_runtime',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", [JSON.stringify(runtime), now()]);
+  }
+
+  async recordPlatformUsageSuccess(result: { metrics: PlatformUsageMetric[]; periodStart: string; periodEnd: string; warnings?: string[] }): Promise<void> {
+    const timestamp = now();
+    await this.setPlatformUsageRuntime({
+      ...(await this.getPlatformUsageRuntime()), metrics: result.metrics, periodStart: result.periodStart, periodEnd: result.periodEnd, warnings: result.warnings,
+      lastAttemptAt: timestamp, lastCheckedAt: timestamp, lastError: undefined
+    });
+  }
+
+  async recordPlatformUsageError(message: string): Promise<void> {
+    await this.setPlatformUsageRuntime({ ...(await this.getPlatformUsageRuntime()), lastAttemptAt: now(), lastError: message.slice(0, 1000) });
+  }
+
+  async recordPlatformUsageDetection(plan: PlatformUsageRuntime['detectedPlan'], error?: string): Promise<void> {
+    const current = await this.getPlatformUsageRuntime();
+    await this.setPlatformUsageRuntime({ ...current, detectedPlan: plan, planDetectionError: error?.slice(0, 1000) });
+  }
+
+  async setPlatformDeliveryDisabled(disabled: boolean, reason?: string): Promise<void> {
+    const current = await this.getPlatformUsageRuntime();
+    if (current.deliveryDisabled === disabled) return;
+    const timestamp = now();
+    await this.setPlatformUsageRuntime({
+      ...current, deliveryDisabled: disabled,
+      disabledAt: disabled ? timestamp : undefined,
+      disabledReason: disabled ? reason : undefined
+    });
+    await this.audit('system:platform-usage', disabled ? 'delivery.disable' : 'delivery.enable', 'setting', 'platform_usage', { reason: reason ?? '' });
+  }
+
+  async assertPlatformDeliveryEnabled(): Promise<void> {
+    const runtime = await this.getPlatformUsageRuntime();
+    if (runtime.deliveryDisabled) throw new Error(`平台用量保护已暂停所有新推送${runtime.disabledReason ? `：${runtime.disabledReason}` : ''}`);
+  }
+
+  async assertWithinUsageLimits(): Promise<void> {
+    const settings = await this.getUsageSettings();
+    if (!settings.dailyDeliveryLimit && !settings.monthlyDeliveryLimit) return;
+    const date = new Date();
+    const countSince = async (since: string) => Number(((await this.db.get('SELECT COUNT(*) count FROM deliveries WHERE created_at>=?', [since])) as { count: number }).count);
+    if (settings.dailyDeliveryLimit) {
+      const dayStart = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())).toISOString();
+      if (await countSince(dayStart) >= settings.dailyDeliveryLimit) throw new Error('已达到每日投递软限制');
+    }
+    if (settings.monthlyDeliveryLimit) {
+      const monthStart = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)).toISOString();
+      if (await countSince(monthStart) >= settings.monthlyDeliveryLimit) throw new Error('已达到每月投递软限制');
+    }
   }
 
   /**
@@ -824,6 +1120,7 @@ export class RelayRepository {
       const timestamp = now();
       const channels = await this.db.all('SELECT id, config_encrypted FROM channels');
       const keys = await this.db.all('SELECT id, secret_encrypted FROM api_keys WHERE secret_encrypted IS NOT NULL');
+      const platformToken = await this.db.get("SELECT value FROM settings WHERE key='platform_usage_token'");
       const reencryptChannels = channels.map((row) => {
         const config = decryptJson(String(row.config_encrypted), oldDek);
         return { sql: 'UPDATE channels SET config_encrypted=? WHERE id=?', params: [encryptJson(config, newDek), String(row.id)] };
@@ -832,11 +1129,15 @@ export class RelayRepository {
         const payload = decryptJson(String(row.secret_encrypted), oldDek);
         return { sql: 'UPDATE api_keys SET secret_encrypted=? WHERE id=?', params: [encryptJson(payload, newDek), String(row.id)] };
       });
+      const reencryptPlatformToken = platformToken
+        ? [{ sql: "UPDATE settings SET value=?,updated_at=? WHERE key='platform_usage_token'", params: [encryptJson(decryptJson(String(platformToken.value), oldDek), newDek), timestamp] }]
+        : [];
       const currentVersionRow = await this.db.get("SELECT value FROM settings WHERE key='dek_version'");
       const nextVersion = (currentVersionRow ? Number(currentVersionRow.value) : 1) + 1;
       await this.db.batch([
         ...reencryptChannels,
         ...reencryptKeys,
+        ...reencryptPlatformToken,
         { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_wrapped',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [wrapDek(newDek, this.masterKey), timestamp] },
         { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_version',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [String(nextVersion), timestamp] },
         { sql: "INSERT INTO settings (key,value,updated_at) VALUES ('dek_rotated_at',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params: [timestamp, timestamp] }
@@ -867,6 +1168,12 @@ export class RelayRepository {
   async audit(actor: string, action: string, resourceType: string, resourceId: string | undefined, details: Record<string, unknown>): Promise<void> {
     await this.db.run('INSERT INTO audit_events (id,actor,action,resource_type,resource_id,details,created_at) VALUES (?,?,?,?,?,?,?)',
       [randomUUID(), actor, action, resourceType, resourceId ?? null, JSON.stringify(details), now()]);
+  }
+
+  async clearAuditEvents(): Promise<number> {
+    const deleted = (await this.db.run('DELETE FROM audit_events')).changes;
+    await this.audit('admin', 'audit.clear', 'audit', undefined, { deleted });
+    return deleted;
   }
 
   /* ────────────────────────────────────────────────────────────

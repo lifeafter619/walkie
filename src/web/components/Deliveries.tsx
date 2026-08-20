@@ -9,6 +9,16 @@ import { ProviderIcon } from './ProviderIcon';
  * 投递记录：列表 + 详情。每次渠道尝试展示真实渠道图标。
  * ──────────────────────────────────────────────────────────── */
 
+/** scheme 白名单（http/https），防历史脏数据里的 javascript: 链接进 href */
+function isHttpUrl(value: string): boolean {
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === 'https:' || protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
 export function DeliveryDetail({ id, close, notify }: { id: string; close: () => void; notify: Notify }) {
   const [delivery, setDelivery] = useState<Delivery>();
   const [failed, setFailed] = useState(false);
@@ -40,7 +50,10 @@ export function DeliveryDetail({ id, close, notify }: { id: string; close: () =>
               <h3>{delivery.title}</h3>
               <p>{delivery.body}</p>
               {delivery.url && (
-                <a href={delivery.url} target="_blank" rel="noreferrer">{delivery.url}<ExternalLink size={14} /></a>
+                // 渲染层兜底：历史数据里可能存有非 http(s) scheme 的链接，不可直接进 href
+                isHttpUrl(delivery.url)
+                  ? <a href={delivery.url} target="_blank" rel="noreferrer">{delivery.url}<ExternalLink size={14} /></a>
+                  : <span className="muted delivery-url-unsafe">{delivery.url}</span>
               )}
             </div>
             <dl>
@@ -73,7 +86,7 @@ export function DeliveryDetail({ id, close, notify }: { id: string; close: () =>
 }
 
 export function Deliveries({
-  deliveries, refresh, notify, filterStatus: status, onFilterChange, onSearchChange
+  deliveries, refresh, notify, filterStatus: status, onFilterChange, onSearchChange, atEnd
 }: {
   deliveries: Delivery[];
   refresh: (status?: string, q?: string, before?: string, quiet?: boolean, append?: boolean) => Promise<void>;
@@ -83,6 +96,8 @@ export function Deliveries({
   onFilterChange: (status: string) => void;
   /** 服务端搜索词提交回调（App 存 ref 供轮询沿用） */
   onSearchChange: (q: string) => void;
+  /** 最近一次取回的页未满 = 没有更早的记录了。列表长度判断不出来：翻页后长度恒 ≥ 一页 */
+  atEnd: boolean;
 }) {
   const [selected, setSelected] = useState('');
   const [query, setQuery] = useState('');
@@ -110,7 +125,7 @@ export function Deliveries({
   }, [hasActive, status, query]);
 
   const loadMore = async () => {
-    if (loadingMore || deliveries.length < 50) return;
+    if (loadingMore || atEnd || !deliveries.length) return;
     setLoadingMore(true);
     try {
       // 以当前最旧一条的 createdAt + id 复合游标取更早的一页，避免同毫秒记录丢失
@@ -159,11 +174,16 @@ export function Deliveries({
                     <code>{item.id.slice(0, 12)}</code>
                   </td>
                   <td data-label="目的地">{item.targetName ?? item.targetId.slice(0, 8)}</td>
-                  <td data-label="级别"><span className={`severity severity-${item.severity}`}>{SEVERITY_LABEL[item.severity]}</span></td>
+                  <td data-label="级别"><span className={`severity severity-${item.severity}`}><i className="dot" />{SEVERITY_LABEL[item.severity]}</span></td>
                   <td data-label="来源">{item.source === 'admin' ? '控制台' : 'Agent'}</td>
                   <td data-label="状态"><Badge status={item.status} /></td>
                   <td data-label="创建时间">{formatDate(item.createdAt)}</td>
-                  <td className="card-chevron"><ChevronRight size={16} /></td>
+                  {/* 整行可点是鼠标的便利；键盘/读屏走这个真按钮（<tr> 加 role="button" 会破坏表格语义） */}
+                  <td className="card-chevron">
+                    <button type="button" className="row-open" aria-label={`查看投递详情：${item.title}`} onClick={() => setSelected(item.id)}>
+                      <ChevronRight size={16} />
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -172,11 +192,9 @@ export function Deliveries({
             <Empty icon={Activity} title="暂无投递记录" text="符合当前筛选条件的投递会显示在这里。" />
           ) : (
             <div className="list-footer">
-              {/* 服务端按时间倒序取页；页满说明可能还有更早的记录 */}
-              {deliveries.length >= 50 && (
-                <Button onClick={loadMore} loading={loadingMore} disabled={loadingMore}>加载更早的投递</Button>
-              )}
-              {deliveries.length < 50 && <span className="muted" style={{ fontSize: 12 }}>已到最早记录</span>}
+              {atEnd
+                ? <span className="muted list-footer-note">已到最早记录 · 共 {deliveries.length} 条</span>
+                : <Button onClick={loadMore} loading={loadingMore} disabled={loadingMore}>加载更早的投递</Button>}
             </div>
           )}
         </div>

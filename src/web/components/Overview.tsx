@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { ArrowRight, KeyRound, MessageSquareText, Radio, RefreshCw, Send } from 'lucide-react';
-import type { DashboardStats, Delivery, Destination, Severity } from '../../shared/types';
+import { ArrowRight, KeyRound, MessageSquareText, Radio, RefreshCw, Send, X } from 'lucide-react';
+import type { DashboardStats, Delivery, Destination, Schedule, Severity } from '../../shared/types';
 import { api } from '../api';
 import { Badge, Button, Empty, IconButton, Notify, SEVERITY_LABEL, formatDate } from './ui';
 
@@ -13,8 +13,14 @@ export function Overview({
   refresh: () => void;
   notify: Notify;
 }) {
-  const [form, setForm] = useState({ destination: '', title: '', body: '', severity: 'info' as Severity });
+  const [form, setForm] = useState({ destination: '', title: '', body: '', severity: 'info' as Severity, mode: 'direct' as 'direct' | 'delay' | 'repeat', delay: 0, delayUnit: 'minutes' as 'minutes' | 'hours', interval: 60, intervalUnit: 'minutes' as 'minutes' | 'hours', repeatCount: 0 });
   const [busy, setBusy] = useState(false);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+
+  const loadSchedules = async () => {
+    try { setSchedules((await api.schedules()).schedules); } catch { /* 非关键面板，保持已有数据 */ }
+  };
+  useEffect(() => { void loadSchedules(); }, []);
 
   // 只在「已启用」的目的地里挑默认值；当前选中的目的地被删/禁用后重置，避免 select 显示空白
   const enabledDestinations = useMemo(() => destinations.filter((d) => d.enabled), [destinations]);
@@ -34,9 +40,19 @@ export function Overview({
     event.preventDefault();
     setBusy(true);
     try {
-      const delivery = await api.send(form);
-      notify('success', `通知已进入队列 · ${delivery.id.slice(0, 8)}`);
+      const payload = {
+        destination: form.destination, title: form.title, body: form.body, severity: form.severity,
+        // 延迟模式下 0 秒没有意义（min=1 但手输可绕过），低于 1 分钟按 1 分钟提交，与提示一致
+        ...(form.mode !== 'direct' ? { delaySeconds: Math.max(60, form.delay * (form.delayUnit === 'hours' ? 3600 : 60)) } : {}),
+        ...(form.mode === 'repeat' ? {
+          repeatEverySeconds: Math.max(60, form.interval * (form.intervalUnit === 'hours' ? 3600 : 60)),
+          ...(form.repeatCount > 1 ? { repeatCount: form.repeatCount } : {})
+        } : {})
+      };
+      const delivery = await api.send(payload);
+      notify('success', form.mode === 'repeat' ? `通知已排入周期任务 · ${delivery.id.slice(0, 8)}` : form.mode === 'delay' ? '延迟通知已排入队列' : `通知已进入队列 · ${delivery.id.slice(0, 8)}`);
       setForm((old) => ({ ...old, title: '', body: '' }));
+      await loadSchedules();
       refresh();
     } catch (error) {
       notify('error', error instanceof Error ? error.message : '发送失败');
@@ -162,6 +178,18 @@ export function Overview({
                 ))}
               </div>
             </label>
+            <label>发送方式
+              <div className="segments schedule-mode">
+                {([['direct', '立即'], ['delay', '延迟'], ['repeat', '周期']] as const).map(([mode, label]) => (
+                  <button type="button" key={mode} className={form.mode === mode ? 'active' : ''} onClick={() => setForm({ ...form, mode })}>{label}</button>
+                ))}
+              </div>
+            </label>
+            {form.mode !== 'direct' && <div className="timing-fields">
+              <label>{form.mode === 'repeat' ? '首次延迟' : '延迟发送'}<div className="inline-fields"><input type="number" min={form.mode === 'repeat' ? 0 : 1} value={form.delay} onChange={(event) => setForm({ ...form, delay: Number(event.target.value) })} /><select value={form.delayUnit} onChange={(event) => setForm({ ...form, delayUnit: event.target.value as 'minutes' | 'hours' })}><option value="minutes">分钟</option><option value="hours">小时</option></select></div><small>选了延迟/周期至少等 1 分钟发送</small></label>
+              {form.mode === 'repeat' && <label>发送周期<div className="inline-fields"><input type="number" min={1} value={form.interval} onChange={(event) => setForm({ ...form, interval: Number(event.target.value) })} /><select value={form.intervalUnit} onChange={(event) => setForm({ ...form, intervalUnit: event.target.value as 'minutes' | 'hours' })}><option value="minutes">分钟</option><option value="hours">小时</option></select></div><small>最短 1 分钟；留空次数表示持续发送</small></label>}
+              {form.mode === 'repeat' && <label>发送次数<span className="optional">可选</span><input type="number" min={2} placeholder="持续执行" value={form.repeatCount || ''} onChange={(event) => setForm({ ...form, repeatCount: Number(event.target.value) || 0 })} /></label>}
+            </div>}
             <label>标题
               <input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} required maxLength={200} placeholder="部署已完成" />
             </label>
@@ -174,6 +202,14 @@ export function Overview({
           </form>
         </section>
       </div>
+      {schedules.length > 0 && <section className="panel schedules-panel">
+        <div className="section-head"><h2>周期任务</h2><IconButton label="刷新周期任务" icon={RefreshCw} onClick={loadSchedules} /></div>
+        <div className="schedule-list">{schedules.map((schedule) => <div className={`schedule-row ${schedule.enabled ? '' : 'disabled-row'}`} key={schedule.id}>
+          <div><strong>{schedule.title}</strong><small>{schedule.targetName ?? schedule.targetId} · 每 {schedule.intervalSeconds >= 3600 ? `${schedule.intervalSeconds / 3600} 小时` : `${Math.round(schedule.intervalSeconds / 60)} 分钟`}</small></div>
+          <span className="muted">下次 {new Date(schedule.nextRunAt).toLocaleString()}</span>
+          {schedule.enabled ? <IconButton label="取消周期任务" icon={X} onClick={async () => { try { await api.cancelSchedule(schedule.id); await loadSchedules(); notify('success', '周期任务已取消'); } catch (error) { notify('error', error instanceof Error ? error.message : '取消失败'); } }} /> : <span className="muted">已取消</span>}
+        </div>)}</div>
+      </section>}
     </>
   );
 }

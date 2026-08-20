@@ -24,11 +24,41 @@ export class NotificationService {
     return { destination, channelIds };
   }
 
-  async send(input: NotificationInput, source: string, apiKey?: ApiKey): Promise<Delivery> {
+  async send(input: NotificationInput, source: string, apiKey?: ApiKey, options: { bypassLimits?: boolean } = {}): Promise<Delivery> {
     if (apiKey && !apiKey.scopes.includes('notifications:send')) throw new Error('API Key 缺少 notifications:send 权限');
+    if (!options.bypassLimits) {
+      await this.repository.assertPlatformDeliveryEnabled();
+      await this.repository.assertWithinUsageLimits();
+    }
     const { destination, channelIds } = await this.resolveTarget(input.destination, apiKey);
 
-    const delivery = await this.repository.createDelivery({
+    const firstAt = input.sendAt
+      ? new Date(input.sendAt).toISOString()
+      : input.delaySeconds
+        ? new Date(Date.now() + input.delaySeconds * 1000).toISOString()
+        : new Date().toISOString();
+    const repeat = input.repeatEverySeconds;
+    const scheduleId = repeat ? crypto.randomUUID() : undefined;
+    if (repeat) {
+      const remainingRuns = input.repeatCount === undefined ? undefined : Math.max(0, input.repeatCount - 1);
+      await this.repository.createSchedule({
+        id: scheduleId,
+        targetType: destination.kind,
+        targetId: destination.id,
+        title: input.title.trim(),
+        body: input.body.trim(),
+        severity: (input.severity ?? 'info') as Severity,
+        url: input.url,
+        metadata: { ...input.metadata, ...(input.tags ? { tags: input.tags } : {}), ...(input.short ? { short: input.short } : {}), ...(input.callbackUrl ? { callbackUrl: input.callbackUrl } : {}) },
+        source,
+        intervalSeconds: repeat,
+        nextRunAt: new Date(new Date(firstAt).getTime() + repeat * 1000).toISOString(),
+        remainingRuns
+      });
+    }
+    let delivery: Delivery;
+    try {
+      delivery = await this.repository.createDelivery({
       targetType: destination.kind,
       targetId: destination.id,
       title: input.title.trim(),
@@ -38,8 +68,14 @@ export class NotificationService {
       metadata: { ...input.metadata, ...(input.tags ? { tags: input.tags } : {}), ...(input.short ? { short: input.short } : {}), ...(input.callbackUrl ? { callbackUrl: input.callbackUrl } : {}) },
       source,
       idempotencyKey: input.idempotencyKey,
-      channelIds
-    });
+      channelIds,
+      scheduledAt: firstAt,
+      scheduleId
+      });
+    } catch (error) {
+      if (scheduleId) await this.repository.cancelSchedule(scheduleId, 'scheduler');
+      throw error;
+    }
     this.onQueued?.(delivery);
     return delivery;
   }

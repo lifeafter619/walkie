@@ -7,7 +7,7 @@ export class BodyTooLargeError extends Error {
   }
 }
 
-export async function readBody(request: Request): Promise<Record<string, unknown>> {
+export async function readTextBody(request: Request): Promise<string> {
   const contentLength = Number(request.headers.get('content-length') ?? '');
   if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) throw new BodyTooLargeError();
 
@@ -33,6 +33,11 @@ export async function readBody(request: Request): Promise<Record<string, unknown
     }
   }
 
+  return text;
+}
+
+export async function readBody(request: Request): Promise<Record<string, unknown>> {
+  const text = await readTextBody(request);
   if (!text) return {};
   const contentType = request.headers.get('content-type') ?? '';
   if (contentType.includes('application/json')) return JSON.parse(text) as Record<string, unknown>;

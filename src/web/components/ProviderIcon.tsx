@@ -36,6 +36,7 @@ const ADAPTIVE_ICONS = new Set<ProviderId>([
 
 /** 各渠道的品牌主色，用于触发器边框 / 装饰等 CSS 变量 --brand */
 const BRAND_HEX: Record<ProviderId, string> = {
+  walkie: '267365',
   join: '00AEEF',
   ifttt: '000000',
   novu: '4700FF',

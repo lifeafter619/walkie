@@ -20,7 +20,7 @@ async function setup(adminToken = ENV_ADMIN_TOKEN) {
   const config = {
     port: 4310, host: '127.0.0.1', dataDir: '.', databasePath: ':memory:', adminToken,
     masterKey: randomBytes(32), allowPrivateWebhooks: true, allowInsecureHttp: false,
-    deliveryWorkers: 1, maxSendsPerMin: 0, maxDeliveryAttempts: 1, retryBaseMs: 1, isProduction: false
+    deliveryWorkers: 1, maxSendsPerMin: 0, maxDeliveryAttempts: 1, retryBaseMs: 1, isProduction: false, platform: 'node'
   } satisfies AppConfig;
   const repository = await createNodeRepository(':memory:', config.masterKey); repositories.push(repository);
   const notifications = new NotificationService(repository);
@@ -55,6 +55,8 @@ describe('credential management', () => {
     expect(after.admin.source).toBe('rotated');
     expect(after.admin.rotated).toBe(true);
     expect(after.admin.prefix).toBeTruthy();
+    expect(after.admin.activeCount).toBe(2);
+    expect(after.admin.tokens).toHaveLength(1);
   });
 
   it('generates a random admin token when no custom value is provided', async () => {
@@ -65,6 +67,50 @@ describe('credential management', () => {
     expect(result.token.length).toBeGreaterThanOrEqual(24);
     // 新生成的随机令牌可鉴权
     await request(app).get('/api/admin/stats').set('Authorization', `Bearer ${result.token}`).expect(200);
+  });
+
+  it('keeps multiple admin passwords and refuses to revoke the last active credential', async () => {
+    const { app } = await setup('');
+    const firstSecret = 'first-admin-password';
+    const secondSecret = 'second-admin-password';
+    const first = (await request(app).post('/api/admin/credentials/admin-token').send({ name: 'First', token: firstSecret }).expect(201)).body.adminToken;
+    const second = (await request(app).post('/api/admin/credentials/admin-token').set('Authorization', `Bearer ${firstSecret}`).send({ name: 'Second', token: secondSecret }).expect(201)).body.adminToken;
+
+    const status = (await request(app).get('/api/admin/credentials').set('Authorization', `Bearer ${secondSecret}`).expect(200)).body;
+    expect(status.admin.activeCount).toBe(2);
+    expect(status.admin.tokens.map((item: { name: string }) => item.name)).toEqual(['Second', 'First']);
+
+    await request(app).delete(`/api/admin/credentials/admin-tokens/${first.id}`).set('Authorization', `Bearer ${secondSecret}`).expect(204);
+    await request(app).get('/api/admin/stats').set('Authorization', `Bearer ${firstSecret}`).expect(401);
+    await request(app).delete(`/api/admin/credentials/admin-tokens/${second.id}`).set('Authorization', `Bearer ${secondSecret}`).expect(400, { error: '至少保留一个有效管理密码' });
+    await request(app).get('/api/admin/stats').set('Authorization', `Bearer ${secondSecret}`).expect(200);
+  });
+
+  it('restores a revoked admin password', async () => {
+    const { app } = await setup('');
+    const auth = (token: string) => ({ Authorization: `Bearer ${token}` });
+    const firstSecret = 'first-restorable-admin-password';
+    const secondSecret = 'second-admin-password';
+    const first = (await request(app).post('/api/admin/credentials/admin-token').send({ name: 'First', token: firstSecret }).expect(201)).body.adminToken;
+    await request(app).post('/api/admin/credentials/admin-token').set(auth(firstSecret)).send({ name: 'Second', token: secondSecret }).expect(201);
+    await request(app).delete(`/api/admin/credentials/admin-tokens/${first.id}`).set(auth(secondSecret)).expect(204);
+    await request(app).get('/api/admin/stats').set(auth(firstSecret)).expect(401);
+
+    await request(app).post(`/api/admin/credentials/admin-tokens/${first.id}/restore`).set(auth(secondSecret)).expect(200, { success: true });
+    await request(app).get('/api/admin/stats').set(auth(firstSecret)).expect(200);
+  });
+
+  it('clears audit history and records the clear operation', async () => {
+    const { app } = await setup();
+    const auth = (token: string) => ({ Authorization: `Bearer ${token}` });
+    const authHeader = auth(ENV_ADMIN_TOKEN);
+    await request(app).post('/api/admin/credentials/admin-token').set(authHeader).send({ name: 'Audit source', token: 'audit-source-admin-password' }).expect(201);
+    const cleared = (await request(app).delete('/api/admin/audit').set(authHeader).expect(200)).body;
+    expect(cleared.deleted).toBeGreaterThan(0);
+    const events = (await request(app).get('/api/admin/audit').set(authHeader).expect(200)).body.events;
+    expect(events).toHaveLength(1);
+    expect(events[0].action).toBe('audit.clear');
+    expect(events[0].details.deleted).toBe(cleared.deleted);
   });
 
   it('rotates the master key (DEK) and preserves channel credentials + agent key reversibility', async () => {

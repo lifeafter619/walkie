@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import path from 'node:path';
+import type { DeploymentPlatform } from '../shared/types.js';
 
 export interface AppConfig {
   port: number;
@@ -18,6 +19,13 @@ export interface AppConfig {
   retryBaseMs: number;
   publicUrl?: string;
   isProduction: boolean;
+  platform: DeploymentPlatform;
+}
+
+function deploymentPlatform(): DeploymentPlatform {
+  if (process.env.VERCEL) return 'vercel';
+  if (process.env.WALKIE_RUNTIME === 'docker') return 'docker';
+  return 'node';
 }
 
 function bool(name: string, fallback = false): boolean {
@@ -78,6 +86,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     retryBaseMs: integer('RETRY_BASE_MS', 2000, 100, 60000),
     publicUrl: process.env.PUBLIC_URL || undefined,
     isProduction,
+    platform: deploymentPlatform(),
     ...overrides
   };
 }

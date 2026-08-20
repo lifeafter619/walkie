@@ -2,7 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "npm run build:web",
   "rewrites": [{ "source": "/(.*)", "destination": "/api" }],
-  "crons": [{ "path": "/api/cron/drain", "schedule": "*/10 * * * *" }],
+  "crons": [{ "path": "/api/cron/drain", "schedule": "0 3 * * *" }],
   "functions": {
     "api/index.ts": { "includeFiles": "dist/web/**", "maxDuration": 60 }
   }

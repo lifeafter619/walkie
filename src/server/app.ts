@@ -7,9 +7,10 @@ import path from 'node:path';
 import { ZodError } from 'zod';
 import type { ApiKey, ProviderId } from '../shared/types.js';
 import { VERSION } from '../shared/version.js';
-import { askSchema, channelSchema, credentialTokenSchema, keySchema, keyUpdateSchema, notificationSchema, retentionSchema, routeSchema } from '../shared/schemas.js';
+import { askSchema, channelSchema, credentialTokenSchema, keySchema, keyUpdateSchema, notificationSchema, platformUsageSchema, retentionSchema, routeSchema, usageSettingsSchema } from '../shared/schemas.js';
 import type { AppConfig } from './config.js';
-import { generateAdminToken, safeSecretEqual, safeTokenEqual } from './crypto.js';
+import { COMPATIBILITY_ENDPOINTS, PLATFORM_PROFILES } from '../shared/platform.js';
+import { generateAdminToken, safeTokenEqual } from './crypto.js';
 import type { RelayRepository } from './database.js';
 import { createRelayMcpHandler } from './mcp.js';
 import { renderReplyForm, renderReplyResult } from './reply-page.js';
@@ -19,6 +20,10 @@ import { PROVIDERS } from './providers/catalog.js';
 import type { DeliveryWorker } from './queue.js';
 import { applyUpdate, checkUpdate } from './update.js';
 import { assertKeyDestinations, validateChannelCreate, validateChannelUpdate, validateRouteChannelIds } from './validation.js';
+import { barkFailure, barkSuccess, registerResponse, resolveBarkDestination, sendBark } from './bark-compat.js';
+import { prioritySeverity, safeCompatUrl, sendWithAgentKey } from './compat.js';
+import type { PlatformUsageMonitor } from './platform-usage.js';
+import { parseWalkieTrace } from '../shared/instance-link.js';
 
 declare global {
   namespace Express { interface Request { agentKey?: ApiKey; auth?: AuthInfo } }
@@ -33,6 +38,7 @@ export interface AppDependencies {
   notifications: NotificationService;
   dispatcher: ProviderDispatcher;
   worker: DeliveryWorker;
+  platformUsage?: PlatformUsageMonitor;
 }
 
 function bearer(req: Request): string | undefined {
@@ -41,7 +47,7 @@ function bearer(req: Request): string | undefined {
 }
 
 export function createApp(deps: AppDependencies) {
-  const { config, repository, notifications, dispatcher, worker } = deps;
+  const { config, repository, notifications, dispatcher, worker, platformUsage } = deps;
   const app = createMcpExpressApp({ host: config.host, jsonLimit: '256kb' });
   // 信任第一跳代理的 X-Forwarded-Proto/Host：反代 TLS 终止后 req.protocol 才能还原为 https，
   // 未设 PUBLIC_URL 时回复链接/元数据才不会生成 http://内网地址（req.ip 判定也只信任这一跳）
@@ -49,6 +55,7 @@ export function createApp(deps: AppDependencies) {
   // createMcpExpressApp 内部已注册 express.json（默认 100kb），此处传入 jsonLimit 统一为 256kb；
   // 不能再重复注册第二个 json 解析器，否则实际生效的仍是最先注册的 100kb 限制。
   app.use(express.urlencoded({ extended: false, limit: '256kb' }));
+  app.use(express.text({ type: 'text/plain', limit: '256kb' }));
   // publicUrl：优先显式配置；未配置时用调用方给出的请求 origin（反向代理场景生成可用链接），
   // 无请求上下文时退回监听地址
   const publicUrl = (origin?: string) => (config.publicUrl ?? origin ?? `http://${config.host}:${config.port}`).replace(/\/$/, '');
@@ -59,16 +66,13 @@ export function createApp(deps: AppDependencies) {
   app.locals.closeMcp = () => mcpHandler.close();
 
   const requireAdmin = async (req: Request, res: Response, next: NextFunction) => {
+    const provided = bearer(req) ?? req.header('x-admin-token');
     // env 管理令牌（本地开发未设置时跳过鉴权，保持原行为）
-    if (config.adminToken && (safeTokenEqual(bearer(req), config.adminToken) || safeTokenEqual(req.header('x-admin-token'), config.adminToken))) return next();
-    // 数据库轮换令牌：存的是 sha256 哈希，用 safeSecretEqual 比较（与 Agent Key 同模型）
-    const rotated = await repository.getAdminTokenHash();
-    if (rotated.hash) {
-      const provided = bearer(req) ?? req.header('x-admin-token');
-      if (provided && safeSecretEqual(provided, rotated.hash)) return next();
-    }
+    if (config.adminToken && safeTokenEqual(provided, config.adminToken)) return next();
+    if (provided && await repository.authenticateAdminToken(provided)) return next();
+    const hasDatabaseToken = (await repository.listAdminTokens()).some((token) => !token.revokedAt);
     // 未配置任何管理令牌（本地开发，仅 loopback）：放行，保持原行为
-    if (!config.adminToken && !rotated.hash) return next();
+    if (!config.adminToken && !hasDatabaseToken) return next();
     res.status(401).json({ error: '管理密码不正确' });
   };
   const requireAgent = asyncRoute(async (req: Request, res: Response, next: NextFunction) => {
@@ -83,10 +87,13 @@ export function createApp(deps: AppDependencies) {
   app.get('/health', (_req, res) => res.json({ status: 'ok', version: VERSION, queue: 'running' }));
   app.get('/api/meta', asyncRoute(async (req, res) => {
     const publicUrl = (config.publicUrl ?? `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
-    const rotated = await repository.getAdminTokenHash();
+    const hasDatabaseToken = (await repository.listAdminTokens()).some((token) => !token.revokedAt);
     res.json({
       name: 'Walkie', version: VERSION, runtime: 'node',
-      adminAuthRequired: Boolean(config.adminToken) || Boolean(rotated.hash),
+      platform: config.platform,
+      platformProfile: PLATFORM_PROFILES[config.platform],
+      compatibilityEndpoints: COMPATIBILITY_ENDPOINTS,
+      adminAuthRequired: Boolean(config.adminToken) || hasDatabaseToken,
       publicUrl, mcpEndpoint: '/mcp', mcpUrl: `${publicUrl}/mcp`
     });
   }));
@@ -165,12 +172,33 @@ export function createApp(deps: AppDependencies) {
   admin.post('/keys/:id/restore', asyncRoute(async (req, res) => { await repository.restoreKey(String(req.params.id)); res.json({ success: true }); }));
   admin.delete('/keys/:id', asyncRoute(async (req, res) => { await repository.deleteKey(String(req.params.id)); res.status(204).end(); }));
 
-  admin.get('/credentials', asyncRoute(async (_req, res) => res.json(await repository.getCredentialStatus(Boolean(config.adminToken)))));  admin.post('/credentials/admin-token', asyncRoute(async (req, res) => {
+  admin.get('/credentials', asyncRoute(async (_req, res) => res.json(await repository.getCredentialStatus(Boolean(config.adminToken)))));
+  admin.post('/credentials/admin-token', asyncRoute(async (req, res) => {
     const input = credentialTokenSchema.parse(req.body);
     const token = input.token ?? generateAdminToken();
-    await repository.setAdminToken(token);
-    res.status(201).json({ token });
+    const adminToken = await repository.setAdminToken(token, input.name);
+    res.status(201).json({ token, adminToken });
   }));
+  admin.delete('/credentials/admin-tokens/:id', asyncRoute(async (req, res) => {
+    await repository.revokeAdminToken(String(req.params.id), Boolean(config.adminToken));
+    res.status(204).end();
+  }));
+  admin.post('/credentials/admin-tokens/:id/restore', asyncRoute(async (req, res) => {
+    await repository.restoreAdminToken(String(req.params.id));
+    res.json({ success: true });
+  }));
+  admin.get('/usage', asyncRoute(async (_req, res) => res.json(await repository.getUsageSnapshot())));
+  admin.put('/usage', asyncRoute(async (req, res) => {
+    const settings = usageSettingsSchema.parse(req.body);
+    await repository.setUsageSettings(settings);
+    res.json(await repository.getUsageSnapshot());
+  }));
+  if (platformUsage) {
+    admin.get('/platform-usage', asyncRoute(async (_req, res) => res.json(await platformUsage.getStatus(true))));
+    admin.put('/platform-usage', asyncRoute(async (req, res) => res.json(await platformUsage.configure(platformUsageSchema.parse(req.body)))));
+    admin.post('/platform-usage/refresh', asyncRoute(async (_req, res) => res.json(await platformUsage.refresh())));
+    admin.post('/platform-usage/reenable', asyncRoute(async (_req, res) => res.json(await platformUsage.reenableDelivery())));
+  }
   admin.post('/credentials/master-key/rotate', asyncRoute(async (_req, res) => res.json(await repository.rotateMasterKey())));
 
   admin.get('/audit', asyncRoute(async (req, res) => res.json({
@@ -180,14 +208,15 @@ export function createApp(deps: AppDependencies) {
       action: typeof req.query.action === 'string' && req.query.action ? req.query.action : undefined
     })
   })));
+  admin.delete('/audit', asyncRoute(async (_req, res) => res.json({ deleted: await repository.clearAuditEvents() })));
 
   admin.get('/retention', asyncRoute(async (_req, res) => res.json(await repository.getRetention())));
   admin.put('/retention', asyncRoute(async (req, res) => res.json(await repository.setRetention(retentionSchema.parse(req.body)))));
   admin.post('/retention/purge', asyncRoute(async (_req, res) => res.json(await repository.purgeExpiredData())));
 
-  admin.get('/update/check', asyncRoute(async (_req, res) => res.json(await checkUpdate(process.env.UPDATE_REPO))));
+  admin.get('/update/check', asyncRoute(async (_req, res) => res.json(await checkUpdate(process.env.UPDATE_REPO, config.platform))));
   admin.post('/update/apply', asyncRoute(async (_req, res) => {
-    const result = await applyUpdate();
+    const result = await applyUpdate(config.platform);
     if (result.success && result.needsRestart) {
       res.json(result);
       // 给响应 1.5s 发出窗口，然后重启进程（容器管理器会拉起新实例）
@@ -214,6 +243,8 @@ export function createApp(deps: AppDependencies) {
     void worker.drainOnce().catch(() => undefined);
     res.status(202).json(delivery);
   }));
+  admin.get('/schedules', asyncRoute(async (_req, res) => res.json({ schedules: await repository.listSchedules() })));
+  admin.post('/schedules/:id/cancel', asyncRoute(async (req, res) => res.json(await repository.cancelSchedule(String(req.params.id)))));
   admin.post('/queue/drain', asyncRoute(async (_req, res) => res.json({ processed: await worker.drainOnce() })));
   admin.get('/conversations', asyncRoute(async (req, res) => res.json({ conversations: await repository.listConversations({ pendingOnly: req.query.pending === '1', limit: Number(req.query.limit ?? 50) }) })));
   admin.post('/conversations/:id/reply', asyncRoute(async (req, res) => {
@@ -226,9 +257,19 @@ export function createApp(deps: AppDependencies) {
   app.use('/api/admin', admin);
 
   app.post('/api/v1/notify', requireAgent, asyncRoute(async (req, res) => {
-    const delivery = await notifications.send(notificationSchema.parse(req.body), `agent:${req.agentKey!.id}`, req.agentKey);
+    const input = notificationSchema.parse(req.body);
+    const trace = parseWalkieTrace(req.header('x-walkie-trace'));
+    const delivery = await notifications.send({ ...input, ...(trace.length ? { metadata: { ...input.metadata, walkieTrace: trace } } : {}) }, `agent:${req.agentKey!.id}`, req.agentKey);
     void worker.drainOnce().catch(() => undefined);
-    res.status(202).json({ deliveryId: delivery.id, status: delivery.status, createdAt: delivery.createdAt });
+    res.status(202).json({ deliveryId: delivery.id, scheduleId: delivery.scheduleId, status: delivery.status, scheduledAt: delivery.scheduledAt, createdAt: delivery.createdAt });
+  }));
+  app.get('/api/v1/schedules', requireAgent, asyncRoute(async (req, res) => {
+    if (!req.agentKey!.scopes.includes('notifications:send')) return res.status(403).json({ error: 'API Key 缺少 notifications:send 权限' });
+    res.json({ schedules: await repository.listSchedules({ source: `agent:${req.agentKey!.id}` }) });
+  }));
+  app.post('/api/v1/schedules/:id/cancel', requireAgent, asyncRoute(async (req, res) => {
+    if (!req.agentKey!.scopes.includes('notifications:send')) return res.status(403).json({ error: 'API Key 缺少 notifications:send 权限' });
+    res.json(await repository.cancelSchedule(String(req.params.id), `agent:${req.agentKey!.id}`, `agent:${req.agentKey!.id}`));
   }));
   app.get('/api/v1/deliveries/:id', requireAgent, asyncRoute(async (req, res) => res.json(await notifications.getDelivery(String(req.params.id), req.agentKey))));
   app.post('/api/v1/ask', requireAgent, asyncRoute(async (req, res) => {
@@ -261,6 +302,115 @@ export function createApp(deps: AppDependencies) {
     const accepted = await repository.replyConversation(String(req.params.id), reply, 'reply-link', String(req.params.token));
     res.status(accepted ? 200 : 410).type('html').send(renderReplyResult(accepted ? 'done' : 'gone'));
   }));
+
+  // Bark-compatible relay: device_key maps to a configured Bark channel or a single-destination Agent Key.
+  const barkPush = asyncRoute(async (req, res) => {
+    const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+    const params = { ...body, ...req.query } as Record<string, unknown>;
+    try {
+      const result = await sendBark(notifications, repository, params);
+      void worker.drainOnce().catch(() => undefined);
+      res.json(barkSuccess(result.deliveries.length === 1 ? undefined : result.keys.map((key, index) => ({ code: 200, device_key: key, deliveryId: result.deliveries[index] }))));
+    } catch (error) {
+      res.status(400).json(barkFailure(400, error instanceof Error ? error.message : '推送失败'));
+    }
+  });
+  const barkRegister = asyncRoute(async (req, res) => {
+    const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+    const params = { ...req.query, ...body } as Record<string, unknown>;
+    const key = String(params.device_key ?? params.key ?? '').trim();
+    const token = String(params.device_token ?? params.devicetoken ?? '').trim();
+    if (!key) return res.status(400).json(barkFailure(400, 'device key 不能为空'));
+    if (!token) return res.status(400).json(barkFailure(400, 'device token 不能为空'));
+    try {
+      await resolveBarkDestination(repository, key);
+      res.json(registerResponse(key, token));
+    } catch (error) {
+      res.status(400).json(barkFailure(400, error instanceof Error ? error.message : '设备未注册'));
+    }
+  });
+  app.get('/ping', (_req, res) => res.json(barkSuccess()));
+  app.get('/healthz', (_req, res) => res.json(barkSuccess()));
+  app.get('/info', (_req, res) => res.json(barkSuccess({ version: VERSION, server: 'Walkie Bark relay' })));
+  app.get('/register', barkRegister);
+  app.post('/register', barkRegister);
+  app.get(/^\/register\/([^/]+)$/, asyncRoute(async (req, res) => {
+    try { await resolveBarkDestination(repository, String(req.params[0])); res.json(barkSuccess()); }
+    catch (error) { res.status(400).json(barkFailure(400, error instanceof Error ? error.message : '设备未注册')); }
+  }));
+  app.get('/push', barkPush);
+  app.post('/push', barkPush);
+
+  app.post('/message', asyncRoute(async (req, res) => {
+    const params = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+    try {
+      const delivery = await sendWithAgentKey(repository, notifications, String(req.query.token ?? params.token ?? ''), {
+        title: String(params.title ?? 'Gotify').slice(0, 200),
+        body: String(params.message ?? '').trim().slice(0, 20_000) || 'Empty Message',
+        severity: prioritySeverity(params.priority),
+        metadata: { via: 'gotify-compat', extras: params.extras ?? {} }
+      }, 'gotify-compat');
+      void worker.drainOnce().catch(() => undefined);
+      res.json({ id: delivery.id });
+    } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : '推送失败' }); }
+  }));
+
+  const pushplusCompat = asyncRoute(async (req, res) => {
+    const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+    const params = { ...req.query, ...body } as Record<string, unknown>;
+    try {
+      const delivery = await sendWithAgentKey(repository, notifications, String(params.token ?? ''), {
+        title: String(params.title ?? 'PushPlus').slice(0, 200),
+        body: String(params.content ?? params.body ?? '').trim().slice(0, 20_000) || 'Empty Message',
+        severity: 'info',
+        metadata: { via: 'pushplus-compat', template: params.template, topic: params.topic }
+      }, 'pushplus-compat');
+      void worker.drainOnce().catch(() => undefined);
+      res.json({ code: 200, msg: '请求成功', data: delivery.id });
+    } catch (error) { res.status(400).json({ code: 400, msg: error instanceof Error ? error.message : '推送失败' }); }
+  });
+  app.get('/send', pushplusCompat);
+  app.post('/send', pushplusCompat);
+
+  app.post(/^\/ntfy\/([^/]+)$/, asyncRoute(async (req, res) => {
+    const params = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+    const message = typeof req.body === 'string' ? req.body : String(params.message ?? params.body ?? '');
+    try {
+      const delivery = await sendWithAgentKey(repository, notifications, bearer(req) ?? '', {
+        destination: String(req.params[0]),
+        title: String(req.header('title') ?? params.title ?? 'ntfy').slice(0, 200),
+        body: message.trim().slice(0, 20_000) || 'Empty Message',
+        severity: prioritySeverity(req.header('priority') ?? params.priority, 'ntfy'),
+        url: safeCompatUrl(req.header('click') ?? params.click),
+        tags: String(req.header('tags') ?? params.tags ?? '').slice(0, 200) || undefined,
+        metadata: { via: 'ntfy-compat' }
+      }, 'ntfy-compat');
+      void worker.drainOnce().catch(() => undefined);
+      res.json({ id: delivery.id, time: Math.floor(Date.now() / 1000), event: 'message', topic: String(req.params[0]), message });
+    } catch (error) { res.status(400).json({ code: 400, error: error instanceof Error ? error.message : '推送失败' }); }
+  }));
+
+  const barkLegacy = asyncRoute(async (req, res) => {
+    const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+    const query = req.query as Record<string, unknown>;
+    const params: Record<string, unknown> = { ...query, ...body };
+    const key = String(req.params[0] ?? '');
+    const pathParts = [req.params[1], req.params[2], req.params[3]].map((value) => value === undefined ? '' : String(value));
+    params.device_key = key;
+    if (pathParts[2]) { params.title = pathParts[0]; params.subtitle = pathParts[1]; params.body = pathParts[2]; }
+    else if (pathParts[1]) { params.title = pathParts[0]; params.body = pathParts[1]; }
+    else if (pathParts[0]) params.body = pathParts[0];
+    try {
+      await sendBark(notifications, repository, params);
+      void worker.drainOnce().catch(() => undefined);
+      res.json(barkSuccess());
+    } catch (error) {
+      res.status(400).json(barkFailure(400, error instanceof Error ? error.message : '推送失败'));
+    }
+  });
+  const barkLegacyPattern = /^\/(?!api(?:\/|$)|mcp(?:\/|$)|reply(?:\/|$)|assets(?:\/|$)|send(?:\/|$)|health$|healthz$|info$|ping$|push$|register(?:\/|$)|[^/]*\.[^/]+$)([^/]+)(?:\/([^/]+))?(?:\/([^/]+))?(?:\/([^/]+))?$/;
+  app.get(barkLegacyPattern, barkLegacy);
+  app.post(barkLegacyPattern, barkLegacy);
 
   // Server酱兼容入口：GET/POST /{key}.send 或 /send/{key}.send，key 为 Agent API Key。
   // 参数 title/text、desp、tags、short 与 Server酱³ 一致；destination 指定目的地（Key 白名单只有一个时可省略）。

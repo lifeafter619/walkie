@@ -24,14 +24,14 @@ AI Agent 跑长任务时，你不想盯着终端。Walkie 是一个自托管的�
 
 - **Agent → 你**：构建完成、部署失败、审批请求，推送到 Telegram、WhatsApp、企业微信、飞书、Expo、OneSignal、邮件、短信……75+ 渠道任选；
 - **你 → Agent**：Agent 调用 `ask_user` 把问题推到你手机，你点开一次性链接（或直接在控制台）回复，Agent 拿到答案继续干活；
-- **一个入口**：MCP（Streamable HTTP）、REST API、Server酱兼容 URL 三种接入方式，凭据加密存储，全部跑在你自己的基础设施上。
+- **一个实例，多种入口**：MCP、REST、Server酱、Bark、Gotify、PushPlus、ntfy 兼容端点共用同一套频道与 Agent Key。
 
 ## 核心特性
 
 - 📡 **75+ 通知渠道**——聊天（Telegram / WhatsApp / 企业微信应用 / 飞书 / 钉钉 / Slack / Discord / Teams / Google Chat / KOOK / QQ 官方机器人 / Matrix / LINE…）、推送（FCM / Expo / OneSignal / Huawei / HONOR / Xiaomi / OPPO / vivo / 魅族 / JPush / 个推 / Join / Pushy / Pushsafer / Simplepush / Pusher Beams / Pushpad / Bark / ntfy / Gotify / Pushover / Server酱 / PushPlus / WxPusher…）、编排（Novu / Knock / Courier）、自动化（IFTTT Webhooks）、邮件（SMTP / SendGrid / Resend / Postmark / Mailgun / Brevo）、短信（Twilio / 阿里云 / 腾讯云 / AWS SNS / Vonage / Plivo / Telnyx / Bird / Infobip）、PagerDuty、Jira Service Management、Alertmanager、Apprise、通用 Webhook。新增渠道的官方契约和验证边界见 [`docs/providers.md`](docs/providers.md)。
 - 🔁 **双向会话**——`ask_user` 提问 + 一次性回复链接 + 控制台会话页直接回复，`check_reply` 长轮询取答案
 - 🧭 **路由**——多个频道组成「并发广播」或「故障转移链」，一个稳定标识符对外
-- 🔑 **密钥即密码**——Agent Key 和管理密码都可以自定义成任意想要的值（≥8 位），也可一键随机生成
+- 🔑 **密钥即密码**——Agent Key 和管理密码都可自定义；多条管理密码可并存、统计和单独撤销
 - 🪝 **投递回调**——`callbackUrl` 在投递到达终态时回推结果
 - ⏱️ **限流与静默时段**——按频道每分钟限流；`22:00-08:00@Asia/Shanghai` 静默期延后发送，critical 穿透
 - 🔒 **安全默认**——凭据 AES-256-GCM 加密（KEK/DEK 两级密钥，可在线轮换）、密钥哈希存储、SSRF 防护（默认禁私网/HTTP）、scope 与目的地白名单
@@ -43,7 +43,7 @@ AI Agent 跑长任务时，你不想盯着终端。Walkie 是一个自托管的�
 
 ### 一、Cloudflare Workers（推荐）
 
-免费额度足够个人使用；数据存 Durable Objects SQLite，无需外部数据库。
+数据存 Durable Objects SQLite，无需外部数据库。免费额度见下方「免费额度与用量监控」。
 
 ```bash
 git clone https://github.com/<你的用户名>/walkie.git && cd walkie
@@ -82,7 +82,7 @@ Serverless 部署，状态存 [Turso](https://turso.tech)（libSQL），队列�
 | `CRON_SECRET` | 保护 `/api/cron/drain` 的随机串（Vercel 自动注入到 Cron 请求头） |
 | `PUBLIC_URL` | 站点最终地址，如 `https://walkie.example.com`（用于回复链接） |
 
-4. 部署。Cron 每 10 分钟兜底排空一次重试队列（`vercel.json` 可调）。
+4. 部署。Hobby 计划的 Cron 每天最多运行一次，因此默认每天 03:00 UTC 兜底排空重试队列；正常请求仍会立即触发投递。
 
 > 一键部署链接：`https://vercel.com/new/clone?repository-url=https://github.com/<你的用户名>/walkie`
 
@@ -106,6 +106,23 @@ walkie.example.com {
     reverse_proxy 127.0.0.1:4310
 }
 ```
+
+### 免费额度与用量监控
+
+截至 2026-08，平台公开免费额度如下；平台可能调整，部署前以官方页面为准：
+
+| 平台 | 免费计划主要限制 | 官方来源 |
+| --- | --- | --- |
+| Cloudflare Workers | 100,000 请求/天、10 ms CPU/请求、128 MB 内存；Durable Objects 100,000 请求/天；DO SQLite 读取 500 万行/天、写入 10 万行/天、5 GB | [Workers Limits](https://developers.cloudflare.com/workers/platform/limits/) / [Durable Objects Pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/) |
+| Vercel Hobby（Fluid Compute） | 1,000,000 函数调用/月、4 CPU 小时/月、360 GB-hours 内存/月；Cron 每天最多一次且精度为 ±59 分钟 | [Hobby Plan](https://vercel.com/docs/plans/hobby) / [Limits](https://vercel.com/docs/limits) / [Cron](https://vercel.com/docs/cron-jobs/usage-and-pricing) |
+
+「系统 → 额度与用量」同时显示 Walkie 自己的投递统计和平台 API 快照。平台 Token 使用现有 DEK 做 AES-GCM 加密，接口和浏览器只会看到“已配置”状态，不会返回明文。
+
+- Cloudflare：填写 API Token、Account ID 和 Worker 脚本名。用量读取需要 `Account → Account Analytics → Read`；自动识别 Workers Free/Paid 还需要 `Account → Billing → Read`，不授予账单权限时可手动选择套餐。系统每 15 分钟通过 [GraphQL Analytics API](https://developers.cloudflare.com/analytics/graphql-api/tutorials/querying-workers-metrics/) 读取当天的请求、错误和子请求。
+- Vercel：填写 Access Token；Team ID 和 Project ID 可选。系统读取 [Billing Charges API](https://vercel.com/docs/rest-api/billing/list-focus-billing-charges) 的当月 FOCUS JSONL 数据，按实际返回的服务与单位展示指标。管理页打开时最多每 15 分钟同步一次；Hobby 空闲部署受 Cron 限制，只能保证每日检查一次。
+- 每个指标可设置绝对阈值，并选择“仅告警”“仅暂停新推送”或“告警并暂停新推送”。阈值告警按平台计费周期幂等去重；API 请求失败或快照过期不会触发暂停，暂停后可在同一页面手动恢复。
+
+平台账单数据可能延迟，CPU、Durable Objects 行读写及 Turso 用量仍应以各平台控制台为最终依据。
 
 ### 四、企业 / 私有网络部署
 
@@ -204,6 +221,12 @@ curl -X POST https://你的域名/api/v1/notify \
   -d '{"destination":"prod-alerts","title":"部署完成","body":"v2.4.0 已上线","severity":"success"}'
 ```
 
+### 连接其他 Walkie 实例
+
+不同平台部署的 Walkie 可以直接互相调用：远端管理员先创建一个仅允许访问指定频道或路由、具备 `notifications:send` 权限的 Agent Key；本地在「频道」中新增「Walkie 实例」，填写远端站点地址、该 Agent Key 和远端目的地 ID / slug。之后该频道可以像普通频道一样加入本地路由。
+
+跨实例投递会自动携带本地投递 ID 作为远端幂等键，并在 `X-Walkie-Trace` 中记录已访问实例。再次进入相同实例或超过 8 跳时会终止转发，避免路由配置错误形成通知回环。多个域名指向同一实例时仍以 8 跳上限兜底。
+
 `POST /api/v1/ask` 提问、`GET /api/v1/conversations/:id` 取回复、`GET /api/v1/deliveries/:id` 查投递。
 
 ### Server酱兼容
@@ -215,6 +238,28 @@ https://你的域名/send/<AgentKey>.send
 ```
 
 支持 `title` / `desp` / `tags` / `short` 参数；Key 配置了多个目的地时用 `destination` 参数指定。
+
+### Bark 兼容
+
+Walkie 提供 Bark V2 `/push`、旧式路径推送，以及 `/ping`、`/healthz`、`/info` 端点。`device_key` 使用已配置 Bark 频道的 Device Key，或使用只绑定一个目的地的 Agent Key：
+
+```bash
+curl -X POST https://你的域名/push \
+  -H "content-type: application/json" \
+  -d '{"device_key":"<Bark Device Key 或 Agent Key>","title":"部署完成","body":"v2.4.0 已上线","level":"active"}'
+```
+
+这是兼容 relay，不是独立 APNs Bark 后端；`/register` 只校验已有 key，不保存 Bark 设备令牌。需要完整设备注册/APNs 服务时，使用 `Finb/bark-server`、`cwxiaos/bark-worker` 或其他专用 Bark server。
+
+### Gotify / PushPlus / ntfy 兼容
+
+| 协议 | 兼容入口 | 鉴权 |
+| --- | --- | --- |
+| Gotify | `POST /message?token=<AgentKey>` | 查询参数中的 Agent Key |
+| PushPlus | `GET/POST /send` | `token` 参数使用 Agent Key |
+| ntfy | `POST /ntfy/<destination>` | `Authorization: Bearer <AgentKey>` |
+
+Gotify 和 PushPlus 在 Agent Key 只绑定一个目的地时可直接发送；ntfy 用路径中的 `destination` 指定频道或路由。完整参数和各协议官方文档可在「系统 → 实例状态 → 全屏查看兼容端点」中直接查看。
 
 ## 双向确认是怎么工作的
 
@@ -253,11 +298,11 @@ Agent  ── check_reply 长轮询 ──► 拿到答案，继续执行
 - 出站通知默认拒绝私网/回环/保留地址与明文 HTTP（SSRF 防护），重定向一律拒绝；
 - 每个 Agent Key 可限定 scope（发送/读取/配置管理）与目的地白名单（如 5 个渠道开 5 个 Key 各管一个），可随时编辑范围，一键吊销；
 - 回复链接带一次性 token，回复后立即失效；所有敏感操作写审计表，「审计」页可按操作者与动作类型检索；
-- 「系统」页可配置数据保留策略（投递/会话/审计各自保留天数，0 为永久），每日自动清理过期数据，也可手动触发。
+- 「系统」页可配置数据保留策略和通知量软限制；用量每 30 秒刷新，过期数据可自动或手动清理。
 
 ## 常见问题
 
-**忘记管理密码？** 设置一个新的 env 密码即可：Cloudflare 用 `wrangler secret put ADMIN_TOKEN`；Docker/Node 改环境变量后重启。登录后可在面板再改。注意：面板轮换过的密码保存在数据库中，重设 env 后旧的面板密码仍有效，需登录面板重新轮换覆盖。
+**忘记管理密码？** 设置一个新的 env 密码即可：Cloudflare 用 `wrangler secret put ADMIN_TOKEN`；Docker/Node 改环境变量后重启。登录后可在「密钥」页创建多条管理密码并逐条撤销；环境变量密码只能在部署平台修改或移除。系统会阻止撤销最后一条有效凭据。
 
 **换设备后 Agent Key 丢了？** 「密钥」页可直接查看并复制（明文加密存储）；也可以吊销后重建。
 

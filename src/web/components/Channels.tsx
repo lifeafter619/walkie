@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import {
   Check, Edit3, ExternalLink, KeyRound, LoaderCircle, MessageSquareText,
-  Plus, Search, TestTube2, Trash2
+  Plus, Search, Send, Trash2
 } from 'lucide-react';
 import type { Channel, ProviderDefinition, ProviderId } from '../../shared/types';
 import { api } from '../api';
@@ -351,7 +351,7 @@ export function Channels({
                     </td>
                     <td data-label="操作">
                       <div className="row-actions">
-                        <IconButton label="发送测试" icon={busyId === channel.id + 'test' ? LoaderCircle : TestTube2} spin={busyId === channel.id + 'test'} disabled={busyId !== ''} onClick={() => act(channel, 'test')} />
+                        <IconButton label="发送测试" icon={busyId === channel.id + 'test' ? LoaderCircle : Send} spin={busyId === channel.id + 'test'} disabled={busyId !== ''} onClick={() => act(channel, 'test')} />
                         <IconButton label="编辑" icon={Edit3} disabled={busyId !== ''} onClick={() => setEditing(channel)} />
                         <IconButton label="删除" icon={Trash2} disabled={busyId !== ''} onClick={() => act(channel, 'delete')} />
                       </div>

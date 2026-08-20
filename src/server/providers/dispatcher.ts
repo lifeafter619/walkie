@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import nodemailer from 'nodemailer';
 import type { ProviderId, Severity } from '../../shared/types.js';
+import { appendWalkieTrace } from '../../shared/instance-link.js';
 import type { AppConfig } from '../config.js';
 import { assertSafeHost, safeFetch, type ResolveHost } from './network.js';
 
@@ -325,6 +326,19 @@ export class ProviderDispatcher {
   private async buildRequest(provider: ProviderId, config: Record<string, unknown>, message: ProviderMessage): Promise<{ url: string; init: RequestInit }> {
     const bodyText = text(message);
     switch (provider) {
+      case 'walkie': {
+        const server = string(config, 'server').replace(/\/$/, '');
+        const trace = appendWalkieTrace(message.metadata.walkieTrace, server);
+        return {
+          url: `${server}/api/v1/notify`,
+          init: this.json({
+            destination: string(config, 'destination'), title: message.title, body: message.body,
+            severity: message.severity, ...(message.url ? { url: message.url } : {}),
+            idempotencyKey: `walkie:${String(message.metadata.walkieDeliveryId ?? message.metadata.idempotencyKey ?? randomUUID())}`,
+            metadata: { via: 'walkie-instance' }
+          }, { Authorization: `Bearer ${string(config, 'agentKey')}`, 'X-Walkie-Trace': JSON.stringify(trace) })
+        };
+      }
       case 'join': {
         const endpoint = new URL('https://joinjoaomgcd.appspot.com/_ah/api/messaging/v1/sendPush');
         endpoint.search = new URLSearchParams({ apikey: string(config, 'apiKey'), deviceIds: lines(config.deviceIds).join(','), title: message.title, text: message.body, ...(message.url ? { url: message.url } : {}), priority: String(message.severity === 'critical' ? 2 : message.severity === 'warning' ? 1 : 0) }).toString();
@@ -573,17 +587,33 @@ export class ProviderDispatcher {
       }
       case 'pushbullet':
         return { url: 'https://api.pushbullet.com/v2/pushes', init: this.json({ type: message.url ? 'link' : 'note', title: message.title, body: message.body, url: message.url, device_iden: config.deviceIden || undefined }, { 'Access-Token': string(config, 'accessToken') }) };
-      case 'bark':
+      case 'bark': {
+        const bark = message.metadata.bark && typeof message.metadata.bark === 'object'
+          ? message.metadata.bark as Record<string, unknown>
+          : {};
+        const value = (key: string, fallback: unknown) => bark[key] ?? fallback;
+        const level = value('level', message.severity === 'critical' ? 'critical' : message.severity === 'warning' ? 'timeSensitive' : 'active');
         return { url: `${string(config, 'server').replace(/\/$/, '')}/push`, init: this.json({
           device_key: string(config, 'deviceKey'), title: message.title, body: message.body,
-          group: string(config, 'group') || 'Walkie',
-          level: message.severity === 'critical' ? 'critical' : message.severity === 'warning' ? 'timeSensitive' : 'active',
-          ...(message.severity === 'critical' && config.criticalVolume !== undefined && config.criticalVolume !== '' ? { volume: Number(config.criticalVolume) } : {}),
-          ...(config.sound ? { sound: string(config, 'sound') } : {}),
-          ...(config.icon ? { icon: string(config, 'icon') } : {}),
-          ...(message.severity === 'critical' && config.callOnCritical ? { call: '1' } : {}),
+          ...(bark.subtitle !== undefined ? { subtitle: String(bark.subtitle) } : {}),
+          group: value('group', string(config, 'group') || 'Walkie'), level,
+          ...(bark.volume !== undefined ? { volume: Number(bark.volume) } : message.severity === 'critical' && config.criticalVolume !== undefined && config.criticalVolume !== '' ? { volume: Number(config.criticalVolume) } : {}),
+          ...(value('sound', config.sound) ? { sound: String(value('sound', config.sound)) } : {}),
+          ...(value('icon', config.icon) ? { icon: String(value('icon', config.icon)) } : {}),
+          ...(value('call', message.severity === 'critical' && config.callOnCritical ? '1' : '') ? { call: String(value('call', message.severity === 'critical' && config.callOnCritical ? '1' : '')) } : {}),
+          ...(bark.badge !== undefined ? { badge: bark.badge } : {}),
+          ...(bark.autoCopy !== undefined ? { autoCopy: bark.autoCopy } : {}),
+          ...(bark.copy !== undefined ? { copy: bark.copy } : {}),
+          ...(bark.image !== undefined ? { image: bark.image } : {}),
+          ...(bark.action !== undefined ? { action: bark.action } : {}),
+          ...(bark.id !== undefined ? { id: bark.id } : {}),
+          ...(bark.delete !== undefined ? { delete: bark.delete } : {}),
+          ...(bark.isArchive !== undefined ? { isArchive: bark.isArchive } : {}),
+          ...(bark.ttl !== undefined ? { ttl: bark.ttl } : {}),
+          ...(bark.ciphertext !== undefined ? { ciphertext: bark.ciphertext } : {}),
           url: message.url
         }) };
+      }
       case 'serverchan': {
         const sendKey = string(config, 'sendKey');
         const desp = `${message.body}${message.url ? `\n\n${message.url}` : ''}`;

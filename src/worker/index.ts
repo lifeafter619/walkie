@@ -5,9 +5,10 @@ import { ZodError } from 'zod';
 import type { AuthInfo } from '@modelcontextprotocol/server';
 import type { ApiKey, ProviderId } from '../shared/types.js';
 import { VERSION } from '../shared/version.js';
-import { askSchema, channelSchema, credentialTokenSchema, keySchema, keyUpdateSchema, notificationSchema, retentionSchema, routeSchema } from '../shared/schemas.js';
+import { askSchema, channelSchema, credentialTokenSchema, keySchema, keyUpdateSchema, notificationSchema, platformUsageSchema, retentionSchema, routeSchema, usageSettingsSchema } from '../shared/schemas.js';
 import { RelayRepository } from '../server/database.js';
-import { generateAdminToken, safeSecretEqual, safeTokenEqual } from '../server/crypto.js';
+import { generateAdminToken, safeTokenEqual } from '../server/crypto.js';
+import { COMPATIBILITY_ENDPOINTS, PLATFORM_PROFILES } from '../shared/platform.js';
 import { createRelayMcpHandler } from '../server/mcp.js';
 import { renderReplyForm, renderReplyResult } from '../server/reply-page.js';
 import { NotificationService } from '../server/notifications.js';
@@ -15,8 +16,12 @@ import { PROVIDERS } from '../server/providers/catalog.js';
 import { ProviderDispatcher } from '../server/providers/dispatcher.js';
 import { DeliveryWorker } from '../server/queue.js';
 import { assertKeyDestinations, validateChannelCreate, validateChannelUpdate, validateRouteChannelIds } from '../server/validation.js';
-import { BodyTooLargeError, readBody } from './body.js';
+import { barkFailure, barkSuccess, registerResponse, resolveBarkDestination, sendBark } from '../server/bark-compat.js';
+import { prioritySeverity, safeCompatUrl, sendWithAgentKey } from '../server/compat.js';
+import { BodyTooLargeError, readBody, readTextBody } from './body.js';
 import { DurableRelayDatabase } from './database.js';
+import { PlatformUsageMonitor } from '../server/platform-usage.js';
+import { parseWalkieTrace } from '../shared/instance-link.js';
 
 type WorkerEnv = Env & {
   ADMIN_TOKEN?: string;
@@ -62,6 +67,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
   private readonly dispatcher: ProviderDispatcher;
   private readonly worker: DeliveryWorker;
   private readonly mcp: ReturnType<typeof createRelayMcpHandler>;
+  private readonly platformUsage: PlatformUsageMonitor;
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env);
@@ -81,10 +87,13 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       maxSendsPerMin: integer(env.MAX_SENDS_PER_MIN, 0, 0, 100_000)
     });
     this.notifications = new NotificationService(this.repository, () => ctx.waitUntil(this.drainAndSchedule()));
+    this.platformUsage = new PlatformUsageMonitor(this.repository, this.notifications, 'cloudflare-workers');
     this.mcp = createRelayMcpHandler(this.repository, this.notifications, this.dispatcher, (request) => request ? new URL(request.url).origin : '');
   }
 
   async alarm(): Promise<void> {
+    try { await this.platformUsage.refreshIfDue(); }
+    catch (error) { console.error(JSON.stringify({ event: 'platform-usage.refresh.failed', message: error instanceof Error ? error.message : String(error) })); }
     await this.drainAndSchedule();
     // 数据保留清理挂在 alarm 上（幂等，retention 全 0 时零开销）。空闲实例无 alarm，
     // 但空闲时也无新数据产生；下一次活动触发 alarm 后过期行自然被清
@@ -95,7 +104,10 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
   private async drainAndSchedule(): Promise<void> {
     // drain 前先设临时兜底 alarm：isolate 中途被逐时仍有定时器能回来收拾残局
     // （正常结束后会被下面的精确时间覆盖；空闲路径不设，避免永久 6 分钟心跳）
-    if (await this.repository.nextDueAttempt()) await this.ctx.storage.setAlarm(Date.now() + 6 * 60_000);
+    if (await this.repository.nextDueAttempt()) {
+      const monitorAt = await this.platformUsage.nextCheckAt();
+      await this.ctx.storage.setAlarm(Math.min(Date.now() + 6 * 60_000, monitorAt ?? Number.POSITIVE_INFINITY));
+    }
     try { await this.worker.drainOnce(); }
     catch (error) { console.error(JSON.stringify({ event: 'drain.error', message: error instanceof Error ? error.message : String(error) })); }
     const due = await this.repository.nextDueAttempt();
@@ -103,18 +115,18 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     // nextDueAttempt 不看 sending，不设的话单频道投递会无限期卡在 processing；
     // 6 分钟 > claimDueAttempts 的 5 分钟回收阈值，触发时必然可回收
     const stuck = await this.repository.hasStuckSending();
-    if (due) await this.ctx.storage.setAlarm(Math.max(Date.now() + 250, new Date(due).getTime()));
-    else if (stuck) await this.ctx.storage.setAlarm(Date.now() + 6 * 60_000);
+    const monitorAt = await this.platformUsage.nextCheckAt();
+    const next = [due ? new Date(due).getTime() : undefined, stuck ? Date.now() + 6 * 60_000 : undefined, monitorAt]
+      .filter((value): value is number => value !== undefined);
+    if (next.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + 250, Math.min(...next)));
   }
 
   private async requireAdmin(request: Request): Promise<Response | undefined> {
     const provided = bearer(request) ?? request.headers.get('x-admin-token') ?? undefined;
     if (this.env.ADMIN_TOKEN && provided && safeTokenEqual(provided, this.env.ADMIN_TOKEN)) return;
-    // 数据库轮换令牌：存的是 sha256 哈希，用 safeSecretEqual 比较（与 Agent Key 同模型）。
-    // env ADMIN_TOKEN 缺失时轮换令牌也必须可用，否则轮换后重新部署会把管理员锁死。
-    const rotated = await this.repository.getAdminTokenHash();
-    if (rotated.hash && provided && safeSecretEqual(provided, rotated.hash)) return;
-    if (!this.env.ADMIN_TOKEN && !rotated.hash) return json({ error: 'ADMIN_TOKEN secret is required' }, 503);
+    if (provided && await this.repository.authenticateAdminToken(provided)) return;
+    const hasDatabaseToken = (await this.repository.listAdminTokens()).some((token) => !token.revokedAt);
+    if (!this.env.ADMIN_TOKEN && !hasDatabaseToken) return json({ error: 'ADMIN_TOKEN secret is required' }, 503);
     return json({ error: '管理密码不正确' }, 401);
   }
 
@@ -131,12 +143,73 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       const path = url.pathname;
       if (path === '/health' && request.method === 'GET') return json({ status: 'ok', version: VERSION, runtime: 'cloudflare-workers', queue: 'alarm' });
       if (path === '/api/meta' && request.method === 'GET') {
-        const rotated = await this.repository.getAdminTokenHash();
+        const hasDatabaseToken = (await this.repository.listAdminTokens()).some((token) => !token.revokedAt);
         return json({
           name: 'Walkie', version: VERSION, runtime: 'cloudflare-workers',
-          adminAuthRequired: Boolean(this.env.ADMIN_TOKEN) || Boolean(rotated.hash),
+          platform: 'cloudflare-workers', platformProfile: PLATFORM_PROFILES['cloudflare-workers'], compatibilityEndpoints: COMPATIBILITY_ENDPOINTS,
+          adminAuthRequired: Boolean(this.env.ADMIN_TOKEN) || hasDatabaseToken,
           publicUrl: url.origin, mcpEndpoint: '/mcp', mcpUrl: `${url.origin}/mcp`
         });
+      }
+
+      if (path === '/ping' && request.method === 'GET') return json(barkSuccess());
+      if (path === '/healthz' && request.method === 'GET') return json(barkSuccess());
+      if (path === '/info' && request.method === 'GET') return json(barkSuccess({ version: VERSION, server: 'Walkie Bark relay' }));
+      if ((path === '/push' && ['GET', 'POST'].includes(request.method))) return this.barkPush(request, url);
+      if ((path === '/register' && ['GET', 'POST'].includes(request.method))) return this.barkRegister(request, url);
+      const registerCheck = /^\/register\/([^/]+)$/.exec(path);
+      if (registerCheck && request.method === 'GET') {
+        try { await resolveBarkDestination(this.repository, decodeURIComponent(registerCheck[1]!)); return json(barkSuccess()); }
+        catch (error) { return json(barkFailure(400, error instanceof Error ? error.message : '设备未注册'), 400); }
+      }
+      if (path === '/message' && request.method === 'POST') {
+        const params = await readBody(request);
+        try {
+          const delivery = await sendWithAgentKey(this.repository, this.notifications, url.searchParams.get('token') ?? String(params.token ?? ''), {
+            title: String(params.title ?? 'Gotify').slice(0, 200), body: String(params.message ?? '').trim().slice(0, 20_000) || 'Empty Message',
+            severity: prioritySeverity(params.priority), metadata: { via: 'gotify-compat', extras: params.extras ?? {} }
+          }, 'gotify-compat');
+          return json({ id: delivery.id });
+        } catch (error) { return json({ error: error instanceof Error ? error.message : '推送失败' }, 400); }
+      }
+      if (path === '/send' && ['GET', 'POST'].includes(request.method)) {
+        const body = request.method === 'POST' ? await readBody(request) : {};
+        const params = { ...Object.fromEntries(url.searchParams), ...body };
+        try {
+          const delivery = await sendWithAgentKey(this.repository, this.notifications, String(params.token ?? ''), {
+            title: String(params.title ?? 'PushPlus').slice(0, 200), body: String(params.content ?? params.body ?? '').trim().slice(0, 20_000) || 'Empty Message',
+            severity: 'info', metadata: { via: 'pushplus-compat', template: params.template, topic: params.topic }
+          }, 'pushplus-compat');
+          return json({ code: 200, msg: '请求成功', data: delivery.id });
+        } catch (error) { return json({ code: 400, msg: error instanceof Error ? error.message : '推送失败' }, 400); }
+      }
+      const ntfy = /^\/ntfy\/([^/]+)$/.exec(path);
+      if (ntfy && request.method === 'POST') {
+        const isText = (request.headers.get('content-type') ?? '').includes('text/plain');
+        const content = isText ? await readTextBody(request) : await readBody(request);
+        const params = typeof content === 'string' ? {} : content;
+        const message = typeof content === 'string' ? content : String(params.message ?? params.body ?? '');
+        try {
+          const delivery = await sendWithAgentKey(this.repository, this.notifications, bearer(request) ?? '', {
+            destination: decodeURIComponent(ntfy[1]!), title: String(request.headers.get('title') ?? params.title ?? 'ntfy').slice(0, 200),
+            body: message.trim().slice(0, 20_000) || 'Empty Message', severity: prioritySeverity(request.headers.get('priority') ?? params.priority, 'ntfy'),
+            url: safeCompatUrl(request.headers.get('click') ?? params.click),
+            tags: String(request.headers.get('tags') ?? params.tags ?? '').slice(0, 200) || undefined, metadata: { via: 'ntfy-compat' }
+          }, 'ntfy-compat');
+          return json({ id: delivery.id, time: Math.floor(Date.now() / 1000), event: 'message', topic: decodeURIComponent(ntfy[1]!), message });
+        } catch (error) { return json({ code: 400, error: error instanceof Error ? error.message : '推送失败' }, 400); }
+      }
+      const legacyBark = /^\/(?!api(?:\/|$)|mcp(?:\/|$)|reply(?:\/|$)|assets(?:\/|$)|send(?:\/|$)|health$|healthz$|info$|ping$|push$|register(?:\/|$)|[^/]*\.[^/]+$)([^/]+)(?:\/([^/]+))?(?:\/([^/]+))?(?:\/([^/]+))?$/.exec(path);
+      if (legacyBark && ['GET', 'POST'].includes(request.method)) {
+        const body = request.method === 'POST' ? await readBody(request) : {};
+        const params: Record<string, unknown> = { ...Object.fromEntries(url.searchParams), ...body, device_key: decodeURIComponent(legacyBark[1]!) };
+        const part = (index: number) => legacyBark[index] ? decodeURIComponent(legacyBark[index]!) : '';
+        const [bodyPart, title, subtitle, finalBody] = [part(2), part(2), part(3), part(4)];
+        if (finalBody) { params.title = title; params.subtitle = subtitle; params.body = finalBody; }
+        else if (subtitle) { params.title = title; params.body = subtitle; }
+        else if (bodyPart) params.body = bodyPart;
+        try { await sendBark(this.notifications, this.repository, params); return json(barkSuccess()); }
+        catch (error) { return json(barkFailure(400, error instanceof Error ? error.message : '推送失败'), 400); }
       }
 
       if (path === '/mcp') {
@@ -149,8 +222,23 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       if (path === '/api/v1/notify' && request.method === 'POST') {
         const agent = await this.authenticateAgent(request);
         if (agent instanceof Response) return agent;
-        const delivery = await this.notifications.send(notificationSchema.parse(await readBody(request)), `agent:${agent.apiKey.id}`, agent.apiKey);
-        return json({ deliveryId: delivery.id, status: delivery.status, createdAt: delivery.createdAt }, 202);
+        const input = notificationSchema.parse(await readBody(request));
+        const trace = parseWalkieTrace(request.headers.get('x-walkie-trace'));
+        const delivery = await this.notifications.send({ ...input, ...(trace.length ? { metadata: { ...input.metadata, walkieTrace: trace } } : {}) }, `agent:${agent.apiKey.id}`, agent.apiKey);
+        return json({ deliveryId: delivery.id, scheduleId: delivery.scheduleId, status: delivery.status, scheduledAt: delivery.scheduledAt, createdAt: delivery.createdAt }, 202);
+      }
+      if (path === '/api/v1/schedules' && request.method === 'GET') {
+        const agent = await this.authenticateAgent(request);
+        if (agent instanceof Response) return agent;
+        if (!agent.apiKey.scopes.includes('notifications:send')) return json({ error: 'API Key 缺少 notifications:send 权限' }, 403);
+        return json({ schedules: await this.repository.listSchedules({ source: `agent:${agent.apiKey.id}` }) });
+      }
+      const agentSchedule = /^\/api\/v1\/schedules\/([^/]+)\/cancel$/.exec(path);
+      if (agentSchedule && request.method === 'POST') {
+        const agent = await this.authenticateAgent(request);
+        if (agent instanceof Response) return agent;
+        if (!agent.apiKey.scopes.includes('notifications:send')) return json({ error: 'API Key 缺少 notifications:send 权限' }, 403);
+        return json(await this.repository.cancelSchedule(agentSchedule[1]!, `agent:${agent.apiKey.id}`, `agent:${agent.apiKey.id}`));
       }
       const agentDelivery = /^\/api\/v1\/deliveries\/([^/]+)$/.exec(path);
       if (agentDelivery && request.method === 'GET') {
@@ -302,10 +390,32 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
     if (path === '/api/admin/credentials/admin-token' && request.method === 'POST') {
       const input = credentialTokenSchema.parse(await readBody(request));
       const token = input.token ?? generateAdminToken();
-      await this.repository.setAdminToken(token);
-      return json({ token }, 201);
+      const adminToken = await this.repository.setAdminToken(token, input.name);
+      return json({ token, adminToken }, 201);
     }
+    const revokeAdminToken = /^\/api\/admin\/credentials\/admin-tokens\/([^/]+)$/.exec(path);
+    if (revokeAdminToken && request.method === 'DELETE') { await this.repository.revokeAdminToken(revokeAdminToken[1]!, Boolean(this.env.ADMIN_TOKEN)); return new Response(null, { status: 204 }); }
+    const restoreAdminToken = /^\/api\/admin\/credentials\/admin-tokens\/([^/]+)\/restore$/.exec(path);
+    if (restoreAdminToken && request.method === 'POST') { await this.repository.restoreAdminToken(restoreAdminToken[1]!); return json({ success: true }); }
     if (path === '/api/admin/credentials/master-key/rotate' && request.method === 'POST') return json(await this.repository.rotateMasterKey());
+
+    if (path === '/api/admin/usage' && request.method === 'GET') return json(await this.repository.getUsageSnapshot());
+    if (path === '/api/admin/usage' && request.method === 'PUT') {
+      await this.repository.setUsageSettings(usageSettingsSchema.parse(await readBody(request)));
+      return json(await this.repository.getUsageSnapshot());
+    }
+    if (path === '/api/admin/platform-usage' && request.method === 'GET') return json(await this.platformUsage.getStatus(true));
+    if (path === '/api/admin/platform-usage' && request.method === 'PUT') {
+      const status = await this.platformUsage.configure(platformUsageSchema.parse(await readBody(request)));
+      await this.drainAndSchedule();
+      return json(status);
+    }
+    if (path === '/api/admin/platform-usage/refresh' && request.method === 'POST') {
+      const status = await this.platformUsage.refresh();
+      await this.drainAndSchedule();
+      return json(status);
+    }
+    if (path === '/api/admin/platform-usage/reenable' && request.method === 'POST') return json(await this.platformUsage.reenableDelivery());
 
     if (path === '/api/admin/audit' && request.method === 'GET') {
       return json({ events: await this.repository.listAuditEvents({
@@ -314,6 +424,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
         action: url.searchParams.get('action') || undefined
       }) });
     }
+    if (path === '/api/admin/audit' && request.method === 'DELETE') return json({ deleted: await this.repository.clearAuditEvents() });
 
     if (path === '/api/admin/retention' && request.method === 'GET') return json(await this.repository.getRetention());
     if (path === '/api/admin/retention' && request.method === 'PUT') return json(await this.repository.setRetention(retentionSchema.parse(await readBody(request))));
@@ -328,7 +439,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
         const release = await response.json() as { tag_name: string; html_url: string; body?: string };
         const latestVersion = release.tag_name.replace(/^v/, '');
         const hasUpdate = isNewerVersion(latestVersion, VERSION);
-        return json({ currentVersion: VERSION, latestVersion, hasUpdate, releaseNotes: release.body?.slice(0, 500), releaseUrl: release.html_url, canApply: false, applyHint: 'Cloudflare Workers 不支持应用内更新，请运行 npm run deploy:cf 重新部署。' });
+        return json({ currentVersion: VERSION, latestVersion, hasUpdate, releaseNotes: release.body?.slice(0, 500), releaseUrl: release.html_url, canApply: false, applyHint: PLATFORM_PROFILES['cloudflare-workers'].updateHint });
       } catch (error) {
         return json({ currentVersion: VERSION, latestVersion: VERSION, hasUpdate: false, canApply: false, applyHint: `检查更新失败：${error instanceof Error ? error.message : '网络错误'}` });
       }
@@ -350,6 +461,9 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       return item ? json(item) : json({ error: '投递不存在' }, 404);
     }
     if (path === '/api/admin/send' && request.method === 'POST') return json(await this.notifications.send(notificationSchema.parse(await readBody(request)), 'admin'), 202);
+    if (path === '/api/admin/schedules' && request.method === 'GET') return json({ schedules: await this.repository.listSchedules() });
+    const cancelSchedule = /^\/api\/admin\/schedules\/([^/]+)\/cancel$/.exec(path);
+    if (cancelSchedule && request.method === 'POST') return json(await this.repository.cancelSchedule(cancelSchedule[1]!));
     if (path === '/api/admin/queue/drain' && request.method === 'POST') {
       const processed = await this.worker.drainOnce();
       await this.drainAndSchedule();
@@ -389,12 +503,38 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       return json({ code: 40004, message: error instanceof Error ? error.message : '发送失败', data: {} }, 400);
     }
   }
+
+  private async barkPush(request: Request, url: URL): Promise<Response> {
+    const body = request.method === 'POST' ? await readBody(request) : {};
+    const params = { ...body, ...Object.fromEntries(url.searchParams) } as Record<string, unknown>;
+    try {
+      const result = await sendBark(this.notifications, this.repository, params);
+      return json(barkSuccess(result.deliveries.length === 1 ? undefined : result.keys.map((key, index) => ({ code: 200, device_key: key, deliveryId: result.deliveries[index] }))));
+    } catch (error) {
+      return json(barkFailure(400, error instanceof Error ? error.message : '推送失败'), 400);
+    }
+  }
+
+  private async barkRegister(request: Request, url: URL): Promise<Response> {
+    const body = request.method === 'POST' ? await readBody(request) : {};
+    const params = { ...Object.fromEntries(url.searchParams), ...body } as Record<string, unknown>;
+    const key = String(params.device_key ?? params.key ?? '').trim();
+    const token = String(params.device_token ?? params.devicetoken ?? '').trim();
+    if (!key) return json(barkFailure(400, 'device key 不能为空'), 400);
+    if (!token) return json(barkFailure(400, 'device token 不能为空'), 400);
+    try {
+      await resolveBarkDestination(this.repository, key);
+      return json(registerResponse(key, token));
+    } catch (error) {
+      return json(barkFailure(400, error instanceof Error ? error.message : '设备未注册'), 400);
+    }
+  }
 }
 
 export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const path = new URL(request.url).pathname;
-    if (path === '/health' || path === '/mcp' || path.startsWith('/api/') || path.startsWith('/reply/') || /^\/(?:send\/)?[^/]+\.send$/.test(path)) {
+    if (path === '/health' || path === '/push' || path === '/ping' || path === '/healthz' || path === '/info' || path === '/register' || path.startsWith('/register/') || path === '/mcp' || path.startsWith('/api/') || path.startsWith('/reply/') || /^\/(?:send\/)?[^/]+\.send$/.test(path) || /^\/(?!assets(?:\/|$))[^/]+(?:\/[^/]+){0,3}$/.test(path)) {
       return env.WALKIE.getByName('default').fetch(request);
     }
     return env.ASSETS.fetch(request);

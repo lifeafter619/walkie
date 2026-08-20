@@ -94,13 +94,18 @@ export const SEVERITY_LABEL: Record<'info' | 'success' | 'warning' | 'critical',
 const modalStack: symbol[] = [];
 
 export function Modal({
-  title, children, onClose, wide = false
-}: { title: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
+  title, children, onClose, wide = false, full = false
+}: { title: string; children: ReactNode; onClose: () => void; wide?: boolean; full?: boolean }) {
   // onClose 走 ref、注册只在挂载时做一次：若把 onClose 放进 deps，父组件每次重渲染
   // （内联箭头函数变身份）都会让 token 出栈再入栈，叠层顺序被打乱，Esc 会关错层
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
+  // 焦点管理：打开时焦点移入对话框（键盘用户不必从页首一路 Tab 进来），
+  // 关闭时还给此前聚焦的元素（通常是触发按钮）
+  const panelRef = useRef<HTMLElement>(null);
   useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    panelRef.current?.focus();
     const token = Symbol('modal');
     modalStack.push(token);
     const close = (event: KeyboardEvent) => {
@@ -112,11 +117,12 @@ export function Modal({
       const index = modalStack.indexOf(token);
       if (index >= 0) modalStack.splice(index, 1);
       window.removeEventListener('keydown', close);
+      previouslyFocused?.focus();
     };
   }, []);
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className={`modal ${wide ? 'modal-wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}>
+      <section ref={panelRef} tabIndex={-1} className={`modal ${wide ? 'modal-wide' : ''} ${full ? 'modal-full' : ''}`} role="dialog" aria-modal="true" aria-label={title}>
         <header>
           <h2>{title}</h2>
           <IconButton label="关闭" icon={X} onClick={onClose} />

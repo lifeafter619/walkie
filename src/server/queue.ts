@@ -148,6 +148,7 @@ export class DeliveryWorker {
   }
 
   private async drain(): Promise<number> {
+    await this.repository.materializeDueSchedules();
     const attempts = await this.repository.claimDueAttempts(this.config.deliveryWorkers, this.config.maxDeliveryAttempts);
     await Promise.all(attempts.map((attempt) => this.processAttempt(attempt)));
     // 旁路终态（禁用频道、滞留回收等）不经过 processAttempt，这里补扫漏发的终态回调；
@@ -198,7 +199,11 @@ export class DeliveryWorker {
           body: delivery.body,
           severity: delivery.severity,
           url: delivery.url,
-          metadata: { ...delivery.metadata, ...(delivery.idempotencyKey ? { idempotencyKey: delivery.idempotencyKey } : {}) }
+          metadata: {
+            ...delivery.metadata,
+            ...(delivery.idempotencyKey ? { idempotencyKey: delivery.idempotencyKey } : {}),
+            ...(channel.provider === 'walkie' ? { walkieDeliveryId: delivery.id } : {})
+          }
         });
         // 发送结果一旦确定立即提交；后续记账失败也不得把已送达改写回重试中（会造成重复推送）
         await this.repository.completeAttempt(attempt.id, { success: true, responseCode: result.responseCode });

@@ -1,4 +1,5 @@
-import type { ApiKey, AuditEvent, Channel, Conversation, CredentialStatus, DashboardStats, Delivery, Destination, ProviderDefinition, RetentionSettings, Route } from '../shared/types';
+import type { AdminToken, ApiKey, AuditEvent, Channel, Conversation, CredentialStatus, DashboardStats, Delivery, DeploymentPlatform, Destination, PlatformUsageInput, PlatformUsageStatus, ProviderDefinition, RetentionSettings, Route, Schedule, UsageSettings, UsageSnapshot } from '../shared/types';
+import type { CompatibilityEndpoint, PlatformProfile } from '../shared/platform';
 
 const TOKEN_KEY = 'walkie_admin_token';
 export const getToken = () => localStorage.getItem(TOKEN_KEY) ?? '';
@@ -7,6 +8,9 @@ export const setToken = (token: string) => token ? localStorage.setItem(TOKEN_KE
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
+
+/** 服务端 /api/admin/deliveries 每页条数（app.ts 的 limit 默认值）；满页即代表可能还有更早的记录 */
+export const DELIVERY_PAGE_SIZE = 100;
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getToken();
@@ -21,7 +25,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  meta: () => request<{ name: string; version: string; runtime: 'node' | 'cloudflare-workers'; adminAuthRequired: boolean; publicUrl: string; mcpEndpoint: string; mcpUrl: string }>('/api/meta'),
+  meta: () => request<{ name: string; version: string; runtime: 'node' | 'cloudflare-workers'; platform: DeploymentPlatform; platformProfile: PlatformProfile; compatibilityEndpoints: CompatibilityEndpoint[]; adminAuthRequired: boolean; publicUrl: string; mcpEndpoint: string; mcpUrl: string }>('/api/meta'),
   session: () => request<{ authenticated: boolean }>('/api/admin/session'),
   stats: () => request<DashboardStats>('/api/admin/stats'),
   providers: () => request<{ providers: ProviderDefinition[] }>('/api/admin/providers'),
@@ -51,6 +55,8 @@ export const api = {
   },
   delivery: (id: string) => request<Delivery>(`/api/admin/deliveries/${id}`),
   send: (body: unknown) => request<Delivery>('/api/admin/send', { method: 'POST', body: JSON.stringify(body) }),
+  schedules: () => request<{ schedules: Schedule[] }>('/api/admin/schedules'),
+  cancelSchedule: (id: string) => request<Schedule>(`/api/admin/schedules/${id}/cancel`, { method: 'POST' }),
   conversations: (pending = false) => request<{ conversations: Conversation[] }>(`/api/admin/conversations${pending ? '?pending=1' : ''}`),
   replyConversation: (id: string, reply: string) => request<{ success: boolean }>(`/api/admin/conversations/${id}/reply`, { method: 'POST', body: JSON.stringify({ reply }) }),
   credentials: () => request<CredentialStatus>('/api/admin/credentials'),
@@ -62,11 +68,20 @@ export const api = {
     const suffix = query.toString() ? `?${query.toString()}` : '';
     return request<{ events: AuditEvent[] }>(`/api/admin/audit${suffix}`);
   },
-  rotateAdminToken: (body: unknown) => request<{ token: string }>('/api/admin/credentials/admin-token', { method: 'POST', body: JSON.stringify(body) }),
+  createAdminToken: (body: unknown) => request<{ token: string; adminToken: AdminToken }>('/api/admin/credentials/admin-token', { method: 'POST', body: JSON.stringify(body) }),
+  revokeAdminToken: (id: string) => request<void>(`/api/admin/credentials/admin-tokens/${id}`, { method: 'DELETE' }),
+  restoreAdminToken: (id: string) => request<{ success: boolean }>(`/api/admin/credentials/admin-tokens/${id}/restore`, { method: 'POST' }),
   rotateMasterKey: () => request<{ version: number; rotatedAt: string }>('/api/admin/credentials/master-key/rotate', { method: 'POST' }),
   checkUpdate: () => request<{ currentVersion: string; latestVersion: string; hasUpdate: boolean; releaseNotes?: string; releaseUrl?: string; canApply: boolean; applyHint?: string }>('/api/admin/update/check'),
   applyUpdate: () => request<{ success: boolean; message: string; needsRestart: boolean }>('/api/admin/update/apply', { method: 'POST' }),
   getRetention: () => request<RetentionSettings>('/api/admin/retention'),
   setRetention: (body: RetentionSettings) => request<RetentionSettings>('/api/admin/retention', { method: 'PUT', body: JSON.stringify(body) }),
-  purgeNow: () => request<{ deliveries: number; conversations: number; auditEvents: number }>('/api/admin/retention/purge', { method: 'POST' })
+  purgeNow: () => request<{ deliveries: number; conversations: number; auditEvents: number }>('/api/admin/retention/purge', { method: 'POST' }),
+  usage: () => request<UsageSnapshot>('/api/admin/usage'),
+  setUsage: (body: UsageSettings) => request<UsageSnapshot>('/api/admin/usage', { method: 'PUT', body: JSON.stringify(body) }),
+  platformUsage: () => request<PlatformUsageStatus>('/api/admin/platform-usage'),
+  setPlatformUsage: (body: PlatformUsageInput) => request<PlatformUsageStatus>('/api/admin/platform-usage', { method: 'PUT', body: JSON.stringify(body) }),
+  refreshPlatformUsage: () => request<PlatformUsageStatus>('/api/admin/platform-usage/refresh', { method: 'POST' }),
+  reenablePlatformDelivery: () => request<PlatformUsageStatus>('/api/admin/platform-usage/reenable', { method: 'POST' }),
+  clearAudit: () => request<{ deleted: number }>('/api/admin/audit', { method: 'DELETE' })
 };

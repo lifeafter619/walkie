@@ -4,7 +4,7 @@ import {
   MessageCircleQuestion, MessageSquareText, RefreshCw, Route as RouteIcon, ScrollText, ServerCog, X
 } from 'lucide-react';
 import type { ApiKey, Channel, DashboardStats, Delivery, Destination, ProviderDefinition, Route } from '../shared/types';
-import { api, ApiError, getToken, setToken } from './api';
+import { api, ApiError, DELIVERY_PAGE_SIZE, getToken, setToken } from './api';
 import { Button, IconButton, ThemeToggle, Toasts, type Notify, type Toast } from './components/ui';
 import { Login } from './components/Login';
 import { Overview } from './components/Overview';
@@ -85,17 +85,29 @@ export default function App() {
   // ref 供 loadAll 取值（不进 useCallback deps，避免改筛选让引导 effect 重跑）；state 供 Deliveries 受控渲染
   const [deliveryFilter, setDeliveryFilter] = useState('');
   const deliveryFilterRef = useRef('');
+  // 已加载到第几页：>1 表示用户点过「加载更早的投递」，此时 30s 轮询不能把列表打回第一页
+  const deliveryPagesRef = useRef(1);
+  // 最近一次取回的页未满 = 已经到最早的记录，用它决定是否还显示「加载更早」按钮
+  const [deliveryAtEnd, setDeliveryAtEnd] = useState(false);
+  // 投递数据请求自增守卫：loadAll 轮询与 refreshDeliveries（搜索/筛选/加载更多）共享，
+  // 旧请求的响应晚到时直接丢弃，防止旧筛选结果覆盖新筛选列表
+  const deliveryRequestRef = useRef(0);
   const changeDeliveryFilter = useCallback((status: string) => {
     deliveryFilterRef.current = status;
+    deliveryPagesRef.current = 1;
     setDeliveryFilter(status);
   }, []);
   // 服务端搜索词同模式提升（防抖在 Deliveries 组件内做，这里只存已提交的值）
   const deliverySearchRef = useRef('');
   const changeDeliverySearch = useCallback((q: string) => {
     deliverySearchRef.current = q;
+    deliveryPagesRef.current = 1;
   }, []);
 
   const loadAll = useCallback(async (quiet = false) => {
+    // 与 refreshDeliveries 同一个自增守卫：loadAll（30s 轮询）与搜索/筛选触发的
+    // 轻量刷新并发时，先发出的旧筛选结果晚到会覆盖新筛选列表
+    const current = ++deliveryRequestRef.current;
     try {
       // 概览的「最近投递」永远展示未筛选数据：投递页筛选激活时补拉一份全量，
       // 否则筛选「失败」后概览会只显示失败投递（甚至误报「暂无投递」）
@@ -107,11 +119,16 @@ export default function App() {
         api.stats(), api.channels(), api.routes(), api.keys(),
         filteredDeliveries, recentDeliveries, api.destinations(), api.providers(), api.conversations(true)
       ]);
+      if (deliveryRequestRef.current !== current) return;
       setStats(nextStats);
       setChannels(channelData.channels);
       setRoutes(routeData.routes);
       setKeys(keyData.keys);
-      setDeliveries(deliveryData.deliveries);
+      // 用户点过「加载更早」时列表已跨多页，轮询只刷新其余数据，否则会把翻出来的历史打回第一页
+      if (deliveryPagesRef.current === 1) {
+        setDeliveries(deliveryData.deliveries);
+        setDeliveryAtEnd(deliveryData.deliveries.length < DELIVERY_PAGE_SIZE);
+      }
       setRecentDeliveries(recentData.deliveries);
       setDestinations(destinationData.destinations);
       setProviders(providerData.providers);
@@ -119,10 +136,12 @@ export default function App() {
       setAuthenticated(true);
     } catch (error) {
       if (error instanceof ApiError && (error.status === 401 || error.status === 403)) setAuthenticated(false);
-      else {
+      else if (deliveryRequestRef.current === current) {
         // 非鉴权失败（瞬时 500/网络抖动）不把已登录用户踢回登录页：带着现有数据进主界面并提示
         setAuthenticated(true);
         if (!quiet) notify('error', error instanceof Error ? error.message : '加载失败');
+      } else {
+        setAuthenticated(true);
       }
     } finally {
       setLoading(false);
@@ -155,18 +174,23 @@ export default function App() {
 
   // 投递列表轻量轮询/分页（Deliveries 页使用；quiet 避免轮询失败刷 toast）
   const refreshDeliveries = useCallback(async (status = '', q = '', before = '', quiet = false, append = false) => {
+    const current = ++deliveryRequestRef.current;
     try {
       const result = await api.deliveries(status, q, before);
+      if (deliveryRequestRef.current !== current) return;
       setDeliveries((old) => {
         if (!append) return result.deliveries;
         // 加载更多：按 id 去重合并（before 游标页与当前页理论上不重叠，稳妥起见仍去重）
         const seen = new Set(old.map((item) => item.id));
         return [...old, ...result.deliveries.filter((item) => !seen.has(item.id))];
       });
+      deliveryPagesRef.current = append ? deliveryPagesRef.current + 1 : 1;
+      // 未满页说明服务端已经没有更早的记录了（服务端按 DELIVERY_PAGE_SIZE 截断）
+      setDeliveryAtEnd(result.deliveries.length < DELIVERY_PAGE_SIZE);
       // 筛选/搜索激活时这份是子集，不能覆盖概览的全量「最近投递」；无筛选时恰好是全量最新页
       if (!status && !q && !before) setRecentDeliveries(result.deliveries);
     } catch (error) {
-      if (!quiet) notify('error', error instanceof Error ? error.message : '加载失败');
+      if (!quiet && deliveryRequestRef.current === current) notify('error', error instanceof Error ? error.message : '加载失败');
     }
   }, [notify]);
 
@@ -197,7 +221,7 @@ export default function App() {
     : page === 'routes'
     ? <Routes routes={routes} channels={channels} refresh={refresh} notify={notify} />
     : page === 'deliveries'
-    ? <Deliveries deliveries={deliveries} refresh={refreshDeliveries} notify={notify} filterStatus={deliveryFilter} onFilterChange={changeDeliveryFilter} onSearchChange={changeDeliverySearch} />
+    ? <Deliveries deliveries={deliveries} refresh={refreshDeliveries} notify={notify} filterStatus={deliveryFilter} onFilterChange={changeDeliveryFilter} onSearchChange={changeDeliverySearch} atEnd={deliveryAtEnd} />
     : page === 'conversations'
     ? <Conversations notify={notify} onChanged={refresh} />
     : page === 'keys'
@@ -220,8 +244,9 @@ export default function App() {
           {nav.map(({ id, label, icon: Icon }) => (
             <button key={id} className={page === id ? 'active' : ''} onClick={() => { go(id); setMenu(false); }}>
               <Icon size={16} /><span>{label}</span>
-              {id === 'deliveries' && stats?.failed24h ? <i>{stats.failed24h}</i> : null}
-              {id === 'conversations' && pendingConversations ? <i className="nav-pending">{pendingConversations}</i> : null}
+              {/* 裸数字读起来像「总数」；标红并补 title，说明这是近 24h 的失败数 */}
+              {id === 'deliveries' && stats?.failed24h ? <i className="nav-failed" title={`近 24 小时 ${stats.failed24h} 次投递失败`}>{stats.failed24h}</i> : null}
+              {id === 'conversations' && pendingConversations ? <i className="nav-pending" title={`${pendingConversations} 个会话等待回复`}>{pendingConversations}</i> : null}
             </button>
           ))}
         </nav>

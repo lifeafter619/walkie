@@ -81,6 +81,7 @@ const SUCCESS_BODIES: Partial<Record<ProviderId, string>> = {
 
 // 每个渠道能走到 fetch 的最小配置（跳过 catalog 的表单校验，专注传输层兼容）
 const MINIMAL_CONFIGS: Record<ProviderId, Record<string, unknown>> = {
+  walkie: { server: 'https://remote.example.com', agentKey: 'rdk_remote', destination: 'ops' },
   telegram: { botToken: 'bot-token', chatId: '-1001234' },
   bark: { server: 'https://api.day.app', deviceKey: 'dk' },
   wecom: { key: 'wecom-key' },

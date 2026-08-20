@@ -28,6 +28,21 @@ describe('provider dispatcher', () => {
     expect(JSON.parse(String(init?.body))).toEqual({ subject: 'A "quoted" title', text: 'line 1\nline 2', env: 'prod' });
   });
 
+  it('forwards notifications to another Walkie instance with loop and retry protection', async () => {
+    const fetcher = vi.fn(async () => new Response('{}', { status: 202 })) as unknown as typeof fetch;
+    const dispatcher = new ProviderDispatcher(config, fetcher);
+    const message = { title: 'Deploy', body: 'Done', severity: 'success' as const, metadata: { walkieDeliveryId: 'delivery-1', walkieTrace: ['https://first.example.com'] } };
+    await dispatcher.send('walkie', { server: 'https://second.example.com/', agentKey: 'rdk_remote', destination: 'ops' }, message);
+
+    const [url, init] = vi.mocked(fetcher).mock.calls[0];
+    expect(String(url)).toBe('https://second.example.com/api/v1/notify');
+    expect(new Headers(init?.headers).get('authorization')).toBe('Bearer rdk_remote');
+    expect(JSON.parse(String(init?.body))).toMatchObject({ destination: 'ops', title: 'Deploy', idempotencyKey: 'walkie:delivery-1' });
+    expect(JSON.parse(String(new Headers(init?.headers).get('x-walkie-trace')))).toEqual(['https://first.example.com', 'https://second.example.com']);
+
+    await expect(dispatcher.send('walkie', { server: 'https://first.example.com', agentKey: 'rdk_remote', destination: 'ops' }, message)).rejects.toThrow('通知回环');
+  });
+
   it('routes serverchan sendkeys to Turbo or Server酱³ endpoints', async () => {
     const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
     const dispatcher = new ProviderDispatcher(config, fetcher);
@@ -134,8 +149,10 @@ describe('new providers', () => {
     const dispatcher = new ProviderDispatcher(config, fetcher);
     await dispatcher.send('bark', { server: 'https://api.day.app', deviceKey: 'k', callOnCritical: true, criticalVolume: 8 }, { title: 'T', body: 'B', severity: 'critical', metadata: {} });
     expect(JSON.parse(String(vi.mocked(fetcher).mock.calls[0][1]?.body))).toMatchObject({ level: 'critical', call: '1', volume: 8 });
+    await dispatcher.send('bark', { server: 'https://api.day.app', deviceKey: 'k' }, { title: 'T', body: 'B', severity: 'info', metadata: { bark: { subtitle: 'Sub', group: 'Ops', badge: 3, sound: 'minuet' } } });
+    expect(JSON.parse(String(vi.mocked(fetcher).mock.calls[1][1]?.body))).toMatchObject({ subtitle: 'Sub', group: 'Ops', badge: 3, sound: 'minuet' });
     await dispatcher.send('feishu', { webhookUrl: 'https://open.feishu.cn/hook/x' }, { title: 'T', body: 'B', severity: 'info', metadata: {} });
-    expect(JSON.parse(String(vi.mocked(fetcher).mock.calls[1][1]?.body)).card.header.template).toBe('blue');
+    expect(JSON.parse(String(vi.mocked(fetcher).mock.calls[2][1]?.body)).card.header.template).toBe('blue');
   });
 });
 

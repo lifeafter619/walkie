@@ -16,7 +16,7 @@ async function setup(adminToken?: string) {
   const config = {
     port: 4310, host: '127.0.0.1', dataDir: '.', databasePath: ':memory:', adminToken,
     masterKey: randomBytes(32), allowPrivateWebhooks: true, allowInsecureHttp: false,
-    deliveryWorkers: 1, maxSendsPerMin: 0, maxDeliveryAttempts: 1, retryBaseMs: 1, isProduction: false
+    deliveryWorkers: 1, maxSendsPerMin: 0, maxDeliveryAttempts: 1, retryBaseMs: 1, isProduction: false, platform: 'node'
   } satisfies AppConfig;
   const repository = await createNodeRepository(':memory:', config.masterKey); repositories.push(repository);
   const notifications = new NotificationService(repository);

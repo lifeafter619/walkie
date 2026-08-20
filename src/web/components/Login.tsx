@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { AlertTriangle, ArrowRight, Eye, EyeOff, Radio } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Eye, EyeOff, Radio, ServerCog } from 'lucide-react';
 import { api, ApiError, getToken, setToken } from '../api';
 import { Button, IconButton } from './ui';
 
@@ -34,28 +34,15 @@ export function Login({ meta, onSuccess }: { meta: Meta; onSuccess: () => void }
         <div className="login-brand-inner">
           <div className="login-logo"><Radio size={28} /></div>
           <h1>Walkie</h1>
-          <p className="login-tagline">AI Agent 与你之间的双向对讲机</p>
-          <ul className="login-features">
-            <li>
-              <strong>MCP · REST · Server酱</strong>
-              <span>三种接入方式，一条连接搞定</span>
-            </li>
-            <li>
-              <strong>30+ 通知渠道</strong>
-              <span>Telegram · 企微 · 飞书 · Bark · ntfy …</span>
-            </li>
-            <li>
-              <strong>凭据加密存储</strong>
-              <span>DEK/KEK 双层加密，密钥不出服务器</span>
-            </li>
-          </ul>
+          <p className="login-tagline">通知控制平面</p>
+          <div className="login-context"><span><ServerCog size={14} />管理控制台</span><span>{meta.platformProfile.label}</span><code>{meta.publicUrl}</code></div>
         </div>
       </section>
       <section className="login-form-side">
         <form className="login-form" onSubmit={submit}>
           <div className="login-form-head">
             <h2>进入控制台</h2>
-            <p>输入管理密码以继续。</p>
+            <p>验证管理密码后查看实例状态、频道与用量。</p>
           </div>
           <label>
             <span className="login-field-label">管理密码</span>

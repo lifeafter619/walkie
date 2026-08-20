@@ -1,4 +1,5 @@
 export type ProviderId =
+  | 'walkie'
   | 'join'
   | 'ifttt'
   | 'novu'
@@ -81,6 +82,7 @@ export type DeliveryStatus = 'queued' | 'processing' | 'delivered' | 'partial' |
 export type AttemptStatus = 'pending' | 'sending' | 'delivered' | 'retrying' | 'failed' | 'skipped';
 export type Severity = 'info' | 'success' | 'warning' | 'critical';
 export type RouteStrategy = 'fanout' | 'fallback';
+export type DeploymentPlatform = 'node' | 'docker' | 'vercel' | 'cloudflare-workers';
 
 export interface ConfigField {
   key: string;
@@ -179,6 +181,8 @@ export interface Delivery {
   source: string;
   status: DeliveryStatus;
   idempotencyKey?: string;
+  scheduledAt?: string;
+  scheduleId?: string;
   createdAt: string;
   updatedAt: string;
   attempts?: DeliveryAttempt[];
@@ -198,6 +202,34 @@ export interface NotificationInput {
   idempotencyKey?: string;
   /** 投递到达终态后 POST 结果到该地址（SSRF 校验同 webhook） */
   callbackUrl?: string;
+  /** 相对延迟秒数；与 sendAt 二选一。 */
+  delaySeconds?: number;
+  /** 首次发送的绝对时间（带时区的 ISO 8601）。 */
+  sendAt?: string;
+  /** 周期秒数；最短 60 秒。 */
+  repeatEverySeconds?: number;
+  /** 总发送次数；省略表示持续执行。 */
+  repeatCount?: number;
+}
+
+export interface Schedule {
+  id: string;
+  targetType: 'channel' | 'route';
+  targetId: string;
+  targetName?: string;
+  title: string;
+  body: string;
+  severity: Severity;
+  url?: string;
+  metadata: Record<string, unknown>;
+  source: string;
+  intervalSeconds: number;
+  nextRunAt: string;
+  remainingRuns?: number;
+  lastDeliveryId?: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Conversation {
@@ -241,6 +273,17 @@ export interface AdminTokenStatus {
   /** 轮换令牌前缀预览（rd_xxxx…），仅 rotated 时有值 */
   prefix?: string;
   envConfigured: boolean;
+  activeCount: number;
+  tokens: AdminToken[];
+}
+
+export interface AdminToken {
+  id: string;
+  name: string;
+  prefix: string;
+  createdAt: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
 }
 
 /** 主密钥（KEK/DEK）状态 */
@@ -272,4 +315,70 @@ export interface RetentionSettings {
   deliveriesDays: number;
   conversationsDays: number;
   auditDays: number;
+}
+
+export interface UsageSettings {
+  dailyDeliveryLimit: number;
+  monthlyDeliveryLimit: number;
+  warningPercent: number;
+}
+
+export interface UsageSnapshot {
+  settings: UsageSettings;
+  today: { deliveries: number; attempts: number };
+  month: { deliveries: number; attempts: number };
+}
+
+export type PlatformUsageAction = 'notify' | 'disable' | 'notify-and-disable';
+export type PlatformUsagePlan = 'auto' | 'workers-free' | 'workers-paid' | 'hobby' | 'pro' | 'enterprise';
+
+export interface PlatformUsageMetric {
+  key: string;
+  label: string;
+  value: number;
+  unit: string;
+  limit?: number;
+  period?: 'day' | 'month' | 'current';
+  group?: string;
+}
+
+export interface PlatformUsageSettings {
+  enabled: boolean;
+  alertsEnabled: boolean;
+  plan: PlatformUsagePlan;
+  hiddenMetricKeys: string[];
+  accountId: string;
+  scriptName: string;
+  teamId: string;
+  projectId: string;
+  warningPercent: number;
+  action: PlatformUsageAction;
+  destination: string;
+}
+
+export interface PlatformUsageRuntime {
+  metrics: PlatformUsageMetric[];
+  periodStart?: string;
+  periodEnd?: string;
+  lastAttemptAt?: string;
+  lastCheckedAt?: string;
+  lastError?: string;
+  warnings?: string[];
+  deliveryDisabled: boolean;
+  disabledAt?: string;
+  disabledReason?: string;
+  detectedPlan?: Exclude<PlatformUsagePlan, 'auto'>;
+  planDetectionError?: string;
+}
+
+export interface PlatformUsageStatus extends PlatformUsageRuntime {
+  platform: Extract<DeploymentPlatform, 'cloudflare-workers' | 'vercel'>;
+  configured: boolean;
+  apiTokenConfigured: boolean;
+  effectivePlan: Exclude<PlatformUsagePlan, 'auto'>;
+  settings: PlatformUsageSettings;
+}
+
+export interface PlatformUsageInput extends PlatformUsageSettings {
+  apiToken?: string;
 }

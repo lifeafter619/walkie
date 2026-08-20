@@ -55,13 +55,30 @@ export function createRelayMcpServer(repository: RelayRepository, notifications:
       short: z.string().max(200).optional().describe('Short card summary for push channels'),
       metadata: z.record(z.string(), z.unknown()).optional(),
       idempotencyKey: z.string().min(1).max(200).optional(),
-      callbackUrl: z.url().optional().describe('Optional webhook that receives the final delivery result')
+      callbackUrl: z.url().optional().describe('Optional webhook that receives the final delivery result'),
+      delaySeconds: z.number().int().min(1).max(157_680_000).optional(),
+      sendAt: z.string().datetime({ offset: true }).optional(),
+      repeatEverySeconds: z.number().int().min(60).max(31_536_000).optional(),
+      repeatCount: z.number().int().min(2).max(10_000).optional()
     }),
     annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: true }
   }, async (input) => {
     const delivery = await notifications.send(input, `agent:${apiKey.id}`, apiKey);
-    return result({ deliveryId: delivery.id, status: delivery.status, createdAt: delivery.createdAt });
+    return result({ deliveryId: delivery.id, scheduleId: delivery.scheduleId, status: delivery.status, scheduledAt: delivery.scheduledAt, createdAt: delivery.createdAt });
   });
+
+  if (apiKey.scopes.includes('notifications:send')) server.registerTool('list_schedules', {
+    title: 'List recurring schedules',
+    description: 'List recurring schedules owned by this Agent Key.',
+    inputSchema: z.object({})
+  }, async () => result({ schedules: await repository.listSchedules({ source: `agent:${apiKey.id}` }) }));
+
+  if (apiKey.scopes.includes('notifications:send')) server.registerTool('cancel_schedule', {
+    title: 'Cancel recurring schedule',
+    description: 'Disable a recurring schedule owned by this Agent Key.',
+    inputSchema: z.object({ scheduleId: z.string().uuid() }),
+    annotations: { destructiveHint: true, openWorldHint: true }
+  }, async ({ scheduleId }) => result({ schedule: await repository.cancelSchedule(scheduleId, `agent:${apiKey.id}`, `agent:${apiKey.id}`) }));
 
   if (apiKey.scopes.includes('notifications:send')) server.registerTool('ask_user', {
     title: 'Ask the human a question',

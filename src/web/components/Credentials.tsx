@@ -1,14 +1,11 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { AlertTriangle, Check, LoaderCircle, RefreshCw, ShieldCheck } from 'lucide-react';
-import type { CredentialStatus } from '../../shared/types';
-import { api, setToken } from '../api';
-import { Button, Modal, type Notify, formatDate } from './ui';
+import { AlertTriangle, Check, KeyRound, LoaderCircle, RefreshCw, RotateCcw, ShieldCheck, Trash2 } from 'lucide-react';
+import type { AdminToken, CredentialStatus } from '../../shared/types';
+import { ApiError, api, setToken } from '../api';
+import { Button, IconButton, Modal, type Notify, formatDate } from './ui';
 
 /* ────────────────────────────────────────────────────────────
- * 实例凭据区块（「密钥」页下半）：管理密码设置、主密钥(KEK/DEK)轮换。
- *
- * 管理密码像普通密码一样：自己输入一个（≥8 字符）即可，保存后本浏览器
- * 自动切换到新密码，无需重新登录。
+ * 实例凭据区块（「密钥」页下半）：多管理密码、主密钥(KEK/DEK)轮换。
  *
  * 关键约束（诚实声明，写入 UI）：
  * - env ADMIN_TOKEN / MASTER_KEY 是不可变环境密钥，面板无法改写它们本身；
@@ -21,13 +18,20 @@ export function CredentialPanels({ notify, refresh }: { notify: Notify; refresh:
   const [status, setStatus] = useState<CredentialStatus>();
   const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [name, setName] = useState('');
   const [password, setPassword] = useState('');
+  const [revokeTarget, setRevokeTarget] = useState<AdminToken>();
   const [confirmRotateKey, setConfirmRotateKey] = useState(false);
 
   const load = useCallback(async () => {
     setLoadFailed(false);
     try { setStatus(await api.credentials()); }
     catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setToken('');
+        window.location.reload();
+        return;
+      }
       setLoadFailed(true);
       notify('error', error instanceof Error ? error.message : '加载凭据状态失败');
     }
@@ -35,18 +39,46 @@ export function CredentialPanels({ notify, refresh }: { notify: Notify; refresh:
 
   useEffect(() => { void load(); }, [load]);
 
-  const saveAdminPassword = async (event: FormEvent) => {
+  const createAdminPassword = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     try {
-      await api.rotateAdminToken({ token: password });
-      setToken(password); // 当前浏览器无缝切换到新密码
-      notify('success', '管理密码已更新，本浏览器已自动使用新密码');
+      const result = await api.createAdminToken({ name: name.trim() || undefined, token: password });
+      setToken(result.token);
+      notify('success', '管理密码已创建，本浏览器已自动切换');
+      setName('');
       setPassword('');
       await load();
       refresh();
     } catch (error) {
       notify('error', error instanceof Error ? error.message : '设置失败');
+    } finally { setBusy(false); }
+  };
+
+  const revokeAdminPassword = async () => {
+    if (!revokeTarget) return;
+    const target = revokeTarget;
+    setRevokeTarget(undefined);
+    setBusy(true);
+    try {
+      await api.revokeAdminToken(target.id);
+      notify('success', `管理密码「${target.name}」已撤销`);
+      await load();
+      refresh();
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : '撤销失败');
+    } finally { setBusy(false); }
+  };
+
+  const restoreAdminPassword = async (token: AdminToken) => {
+    setBusy(true);
+    try {
+      await api.restoreAdminToken(token.id);
+      notify('success', `管理密码「${token.name}」已重新启用`);
+      await load();
+      refresh();
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : '启用失败');
     } finally { setBusy(false); }
   };
 
@@ -72,23 +104,40 @@ export function CredentialPanels({ notify, refresh }: { notify: Notify; refresh:
   return (
     <>
       <section className="panel">
-        <div className="section-head"><h2>管理密码</h2></div>
-        <p className="panel-note">登录本控制台与访问 <code>/api/admin</code> 接口的密码，可随时改成任意想要的值。</p>
-        <dl className="cred-meta">
-          <div>
-            <dt>当前来源</dt>
-            <dd>
-              {status.admin.source === 'env'
-                ? <span><ShieldCheck size={15} />环境变量（ADMIN_TOKEN）</span>
-                : <span><Check size={15} />已自定义{status.admin.prefix ? <code>{status.admin.prefix}</code> : null}</span>}
-            </dd>
-          </div>
-          <div>
-            <dt>环境令牌</dt>
-            <dd>{status.admin.envConfigured ? <span className="state-dot active">已配置，仍有效</span> : <span className="muted">未配置</span>}</dd>
-          </div>
-        </dl>
-        <form className="cred-form" onSubmit={saveAdminPassword}>
+        <div className="section-head">
+          <h2>管理密码</h2>
+          <span className="credential-count"><ShieldCheck size={14} />{status.admin.activeCount} 个有效</span>
+        </div>
+        <p className="panel-note">每个管理密码都能登录控制台和访问 <code>/api/admin</code>。明文只在创建时使用，不会存入数据库。</p>
+        <div className="admin-token-list">
+          {status.admin.envConfigured && (
+            <div className="admin-token-row">
+              <KeyRound size={16} />
+              <span><strong>环境变量 ADMIN_TOKEN</strong><small>部署配置 · 需在平台环境变量中撤销</small></span>
+              <span className="state-dot active">有效</span>
+            </div>
+          )}
+          {status.admin.tokens.map((token) => (
+            <div className="admin-token-row" key={token.id}>
+              <KeyRound size={16} />
+              <span>
+                <strong>{token.name}</strong>
+                <small><code>{token.prefix}</code> · 创建于 {formatDate(token.createdAt)}{token.lastUsedAt ? ` · 最近使用 ${formatDate(token.lastUsedAt)}` : ''}</small>
+              </span>
+              {token.revokedAt
+                ? <><span className="state-dot muted">已撤销</span><IconButton label={`重新启用${token.name}`} icon={RotateCcw} disabled={busy} onClick={() => void restoreAdminPassword(token)} /></>
+                : <><span className="state-dot active">有效</span><IconButton label={`撤销${token.name}`} icon={Trash2} disabled={busy} onClick={() => setRevokeTarget(token)} /></>}
+            </div>
+          ))}
+        </div>
+        <form className="cred-form" onSubmit={createAdminPassword}>
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="名称，例如：运维电脑"
+            maxLength={100}
+            required
+          />
           <input
             type="password"
             value={password}
@@ -99,14 +148,14 @@ export function CredentialPanels({ notify, refresh }: { notify: Notify; refresh:
             autoComplete="new-password"
             required
           />
-          <Button type="submit" variant="primary" icon={RefreshCw} loading={busy} disabled={password.length < 8}>
-            设置管理密码
+          <Button type="submit" variant="primary" icon={Check} loading={busy} disabled={!name.trim() || password.length < 8}>
+            创建管理密码
           </Button>
         </form>
         {status.admin.envConfigured && (
           <p className="cred-note warning-text">
             <AlertTriangle size={14} />
-            <span>环境变量中的旧令牌仍然有效。如需彻底弃用，请在重新部署时移除 ADMIN_TOKEN。</span>
+            <span>环境变量令牌始终有效。如需彻底弃用，请在重新部署时移除 ADMIN_TOKEN。</span>
           </p>
         )}
       </section>
@@ -137,6 +186,18 @@ export function CredentialPanels({ notify, refresh }: { notify: Notify; refresh:
             <footer className="modal-actions">
               <Button onClick={() => setConfirmRotateKey(false)}>取消</Button>
               <Button variant="primary" icon={RefreshCw} loading={busy} onClick={rotateMasterKey}>确认轮换</Button>
+            </footer>
+          </div>
+        </Modal>
+      )}
+
+      {revokeTarget && (
+        <Modal title="确认撤销管理密码" onClose={() => setRevokeTarget(undefined)}>
+          <div className="modal-body">
+            <p>撤销「{revokeTarget.name}」后，使用该密码的浏览器和 API 客户端将无法继续访问。此操作不可恢复。</p>
+            <footer className="modal-actions">
+              <Button onClick={() => setRevokeTarget(undefined)}>取消</Button>
+              <Button variant="danger" icon={Trash2} loading={busy} onClick={revokeAdminPassword}>确认撤销</Button>
             </footer>
           </div>
         </Modal>
