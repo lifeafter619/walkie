@@ -25,7 +25,7 @@ import { appriseSeverity, discordText, parseAlertmanager, prioritySeverity, safe
 import { handleTelegramWebhook } from './telegram-webhook.js';
 import { handleSlackEvent, handleSlackInteractive } from './slack-interactive.js';
 import { handleDiscordInteraction } from './discord-interactions.js';
-import { handleClaudeHook } from './claude-hook.js';
+import { handleClaudeHook, parseMinSeverity } from './claude-hook.js';
 import { generateVapidKeys } from './providers/webpush.js';
 import { parseMultipart } from '../shared/multipart.js';
 import { openApiSpec } from '../shared/openapi.js';
@@ -362,13 +362,20 @@ export function createApp(deps: AppDependencies) {
     void worker.drainOnce().catch(() => undefined);
     res.status(202).json({ deliveryId: delivery.id, scheduleId: delivery.scheduleId, status: delivery.status, scheduledAt: delivery.scheduledAt, createdAt: delivery.createdAt });
   }));
-  // Claude Code HTTP hook：事件 JSON 直接 POST，翻译成带 severity 的通知。
-  // key 绑多个目的地时用 ?destination=<slug> 指定；无行动价值的事件收下不转发
-  app.post('/api/v1/hooks/claude', requireAgent, asyncRoute(async (req, res) => {
-    const destination = typeof req.query.destination === 'string' ? req.query.destination : undefined;
-    const result = await handleClaudeHook(repository, notifications, req.body, bearer(req) ?? '', destination, () => void worker.drainOnce().catch(() => undefined));
-    res.status(result.statusCode).json(result.body);
-  }));
+  // 编码 Agent HTTP hook：事件 JSON 直接 POST，翻译成带 severity 的通知。
+  // key 绑多个目的地时用 ?destination=<slug> 指定；?min_severity= 过滤低级别事件
+  // （用户/Agent 安装时自选通知条件）。/claude 是早期别名，与 /agent 同处理器
+  const hookQuery = (req: Request) => ({
+    destination: typeof req.query.destination === 'string' ? req.query.destination : undefined,
+    minSeverity: parseMinSeverity(typeof req.query.min_severity === 'string' ? req.query.min_severity : undefined)
+  });
+  for (const hookPath of ['/api/v1/hooks/agent', '/api/v1/hooks/claude']) {
+    app.post(hookPath, requireAgent, asyncRoute(async (req, res) => {
+      const { destination, minSeverity } = hookQuery(req);
+      const result = await handleClaudeHook(repository, notifications, req.body, bearer(req) ?? '', destination, () => void worker.drainOnce().catch(() => undefined), minSeverity);
+      res.status(result.statusCode).json(result.body);
+    }));
+  }
   app.get('/api/v1/schedules', requireAgent, asyncRoute(async (req, res) => {
     if (!req.agentKey!.scopes.includes('notifications:send')) return res.status(403).json({ error: 'API Key 缺少 notifications:send 权限' });
     res.json({ schedules: await repository.listSchedules({ source: `agent:${req.agentKey!.id}` }) });

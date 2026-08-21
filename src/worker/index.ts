@@ -19,7 +19,7 @@ import { assertKeyDestinations, validateChannelCreate, validateChannelUpdate, va
 import { barkFailure, barkSuccess, registerResponse, resolveBarkDestination, sendBark } from '../server/bark-compat.js';
 import { appriseSeverity, discordText, parseAlertmanager, prioritySeverity, safeCompatUrl, sendWithAgentKey, slackText } from '../server/compat.js';
 import { handleTelegramWebhook } from '../server/telegram-webhook.js';
-import { handleClaudeHook } from '../server/claude-hook.js';
+import { handleClaudeHook, parseMinSeverity } from '../server/claude-hook.js';
 import { handleSlackEvent, handleSlackInteractive } from '../server/slack-interactive.js';
 import { handleDiscordInteraction } from '../server/discord-interactions.js';
 import { generateVapidKeys } from '../server/providers/webpush.js';
@@ -387,11 +387,11 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
         const delivery = await this.notifications.send({ ...input, ...(trace.length ? { metadata: { ...input.metadata, walkieTrace: trace } } : {}) }, `agent:${agent.apiKey.id}`, agent.apiKey);
         return json({ deliveryId: delivery.id, scheduleId: delivery.scheduleId, status: delivery.status, scheduledAt: delivery.scheduledAt, createdAt: delivery.createdAt }, 202);
       }
-      // Claude Code HTTP hook（与 Node 版行为一致）；路径带尾缀时按目的地分发
-      const claudeHook = /^\/api\/v1\/hooks\/claude$/.exec(path);
-      if (claudeHook && request.method === 'POST') {
+      // 编码 Agent HTTP hook（与 Node 版行为一致）：/agent 为正式端点，/claude 为兼容别名
+      const agentHook = /^\/api\/v1\/hooks\/(?:agent|claude)$/.exec(path);
+      if (agentHook && request.method === 'POST') {
         const token = bearer(request);
-        const result = await handleClaudeHook(this.repository, this.notifications, await readBody(request), token ?? '', url.searchParams.get('destination') ?? undefined, () => { void this.worker.drainOnce().catch(() => undefined); });
+        const result = await handleClaudeHook(this.repository, this.notifications, await readBody(request), token ?? '', url.searchParams.get('destination') ?? undefined, () => { void this.worker.drainOnce().catch(() => undefined); }, parseMinSeverity(url.searchParams.get('min_severity') ?? undefined));
         return json(result.body, result.statusCode);
       }
       if (path === '/api/v1/schedules' && request.method === 'GET') {

@@ -4,7 +4,7 @@ import request from 'supertest';
 import { createNodeRepository } from '../src/server/database-node.js';
 import type { RelayRepository } from '../src/server/database.js';
 import { NotificationService } from '../src/server/notifications.js';
-import { claudeHookToNotification, handleClaudeHook } from '../src/server/claude-hook.js';
+import { claudeHookToNotification, handleClaudeHook, parseMinSeverity } from '../src/server/claude-hook.js';
 import { testConfig } from './helpers.js';
 import { createApp } from '../src/server/app.js';
 import { ProviderDispatcher } from '../src/server/providers/dispatcher.js';
@@ -70,6 +70,44 @@ describe('claude hook event → notification mapping', () => {
     expect(claudeHookToNotification({ hook_event_name: 'PostToolUseFailure', tool_name: 'Bash' })).toBeUndefined();
     expect(claudeHookToNotification({ hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', cursor_version: '1.0', message: 'exit 1' })!.severity).toBe('warning');
   });
+
+  it('maps Gemini CLI AfterAgent and Codex notify agent-turn-complete payloads', () => {
+    // Gemini CLI：AfterAgent（agent 循环结束）
+    const gemini = claudeHookToNotification({ hook_event_name: 'AfterAgent', message: '重构完成', cwd: CWD });
+    expect(gemini).toMatchObject({ severity: 'success' });
+    expect(gemini!.body).toContain('重构完成');
+
+    // Codex notify：无 hook_event_name，用 type=agent-turn-complete + kebab-case 字段
+    const codex = claudeHookToNotification({ type: 'agent-turn-complete', 'last-assistant-message': '测试全绿', cwd: CWD });
+    expect(codex).toMatchObject({ severity: 'success' });
+    expect(codex!.body).toContain('测试全绿');
+  });
+
+  it('parseMinSeverity validates values', () => {
+    expect(parseMinSeverity('critical')).toBe('critical');
+    expect(parseMinSeverity('info')).toBe('info');
+    expect(parseMinSeverity('bogus')).toBeUndefined();
+    expect(parseMinSeverity(undefined)).toBeUndefined();
+  });
+
+  it('minSeverity filters lower-severity events but keeps critical ones', async () => {
+    const repository = await createNodeRepository(':memory:', randomBytes(32));
+    repositories.push(repository);
+    const channel = await repository.createChannel({ name: 'T', slug: 't', provider: 'webhook', config: { url: 'https://hooks.example.com/t', method: 'POST', bodyTemplate: '{}' } });
+    const { secret } = await repository.createKey({ name: 'k', destinationIds: [channel.id] });
+    const notifications = new NotificationService(repository);
+    const drain = () => undefined;
+
+    // --only critical：任务完成（success）被过滤，不投递
+    const filtered = await handleClaudeHook(repository, notifications, { hook_event_name: 'Stop', last_assistant_message: 'done' }, secret, undefined, drain, 'critical');
+    expect(filtered.body).toMatchObject({ filtered: true, severity: 'success' });
+    // 等你操作（critical）照常投递
+    const urgent = await handleClaudeHook(repository, notifications, { hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'approve?' }, secret, undefined, drain, 'critical');
+    expect(urgent.body).toMatchObject({ ok: true });
+    const deliveries = await repository.listDeliveries({ limit: 5 });
+    expect(deliveries.filter((item) => item.source === 'agent-hook')).toHaveLength(1);
+    expect(deliveries.find((item) => item.source === 'agent-hook')?.severity).toBe('critical');
+  });
 });
 
 describe('POST /api/v1/hooks/claude', () => {
@@ -100,9 +138,9 @@ describe('POST /api/v1/hooks/claude', () => {
     expect(response.body).toMatchObject({ ok: true });
 
     const deliveries = await repository.listDeliveries({ limit: 5 });
-    const sent = deliveries.find((item) => item.title.includes('Claude'));
+    const sent = deliveries.find((item) => item.title.includes('Agent'));
     expect(sent?.severity).toBe('success');
-    expect(sent?.source).toBe('claude-hook');
+    expect(sent?.source).toBe('agent-hook');
   });
 
   it('returns 200 with ignored:true for no-op events (Claude Code must not see hook errors)', async () => {
@@ -115,7 +153,7 @@ describe('POST /api/v1/hooks/claude', () => {
       .send({ hook_event_name: 'SessionEnd', reason: 'clear' })
       .expect(200);
     expect(response.body).toMatchObject({ ignored: true });
-    expect((await repository.listDeliveries({ limit: 5 })).find((item) => item.source === 'claude-hook')).toBeUndefined();
+    expect((await repository.listDeliveries({ limit: 5 })).find((item) => item.source === 'agent-hook')).toBeUndefined();
   });
 
   it('surfaces a clear error when the key has multiple destinations and none was given', async () => {
@@ -149,6 +187,6 @@ describe('POST /api/v1/hooks/claude', () => {
     }, secret, undefined, () => undefined);
     expect(result.statusCode).toBe(200);
     const deliveries = await repository.listDeliveries({ limit: 5 });
-    expect(deliveries.find((item) => item.source === 'claude-hook')?.severity).toBe('critical');
+    expect(deliveries.find((item) => item.source === 'agent-hook')?.severity).toBe('critical');
   });
 });

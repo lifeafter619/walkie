@@ -322,29 +322,36 @@ Only the chat/channel configured on the Walkie channel is accepted, so a strange
 
 Long-running agents can be steered mid-task. Type into **Conversations → Send to agent** in the console, or just message your Telegram bot when nothing is pending; the agent picks it up on its next `wait_for_inbox` call and each message is claimed exactly once. This is the reliable push path: most MCP clients drop server-initiated notifications, but every client surfaces a tool result.
 
-### Keep an eye on Claude Code / Cursor sessions (hooks)
+### Keep an eye on coding agents (hooks)
 
-Get pinged when a coding agent finishes, fails, or is waiting for your approval — no babysitting. One command installs the hooks for both tools:
+Get pinged when a coding agent finishes, fails, or is waiting for your approval — no babysitting. One command installs hooks for **Claude Code, Cursor, Codex, ZCode and Gemini CLI** (auto-detects which are installed):
 
 ```bash
-npx walkie-notify hook --url https://your-domain --token rdk_xxx
+npx walkie-notify hook --url https://your-domain --token rdk_xxx --only critical
 ```
 
-The command first sends a real test notification (so a bad key or destination fails loudly, before anything is written), then merges the hooks into `~/.claude/settings.json` and `~/.cursor/hooks.json` — your existing hooks and settings are preserved, re-running is idempotent, and `npx walkie-notify hook --uninstall` removes exactly what was added. Finally export `WALKIE_URL` and `WALKIE_TOKEN` in your shell profile: the stored config references `$WALKIE_TOKEN`, so the secret never lands in a config file. Keys targeting multiple destinations need `--destination <slug>`.
+The command first sends a real test notification (a bad key or destination fails loudly before anything is written), then merges into each tool's config — your existing hooks and settings are preserved, re-running is idempotent, and `--uninstall` removes exactly what was added. Export `WALKIE_URL` and `WALKIE_TOKEN` in your shell profile: the config references `$WALKIE_TOKEN`, so the secret never lands in a file.
 
-What you get, per event:
+**When you get notified** (that's what the hooks listen to):
 
-| Event | Severity |
+| Tool | Waiting on you | Task done | Failures |
+| --- | --- | --- | --- |
+| Claude Code | permission / idle / agent-input prompts (`Notification`) | `Stop` (with the agent's summary) | `StopFailure` (API errors) |
+| Cursor | — | `stop` | `stop` with `status: error`, `sessionEnd` with `reason: error` |
+| Codex | — | `stop` / `sessionEnd` via hooks | same as Cursor |
+| ZCode | — | `Stop` | `PostToolUseFailure` |
+| Gemini CLI | `Notification` | `AfterAgent` | — |
+
+**Choose what deserves a ping** — `--only <level>` sets the minimum severity at install time, and `WALKIE_MIN_SEVERITY` changes it later without reinstalling:
+
+| Level | What you get |
 | --- | --- |
-| `Notification` `permission_prompt` / `agent_needs_input` / `elicitation_*` — waiting on you | critical |
-| `StopFailure` — the turn died on an API error; Cursor `stop` with `status: error` / `sessionEnd` with `reason: error` | critical |
-| `Stop` / `agent_completed` — task finished | success |
-| `idle_prompt` / `SubagentStop` | info |
-| `SessionEnd`, `PreToolUse` and other high-frequency events | acknowledged, not sent |
+| `critical` | Only the quiet mode: waiting-for-you prompts and hard failures |
+| `warning` | + tool-call failures |
+| `success` | + task-completed notifications |
+| `info` | everything, including idle hints and subagent completions (default) |
 
-**Claude Code (v2.1+)** hooks are native `type: "http"` handlers — no scripts. **Cursor** hooks are command-based; the installer drops a small forwarding script at `~/.cursor/hooks/walkie-notify.sh` (it always exits 0, so it can never block your workflow, and stays silent on machines without `WALKIE_URL` set — so the config can travel with the repo via `--scope project`).
-
-Prefer manual setup? The endpoint is `POST /api/v1/hooks/claude` with the event JSON as the body — see `docs/` and `/openapi.json` on your instance.
+The agent can pick the level too — it's just a `min_severity` query parameter on the endpoint (`POST /api/v1/hooks/agent`). Manual setup for any tool: point its hook at that endpoint with the event JSON as the body; see `/openapi.json`.
 
 ### Web Push — notifications without any third-party account
 

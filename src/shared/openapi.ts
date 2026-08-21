@@ -107,14 +107,24 @@ export function openApiSpec(publicUrl: string): Record<string, unknown> {
           responses: { 200: { description: 'Cancelled' }, 404: { description: 'Not found or not owned' } }
         }
       },
+      '/api/v1/hooks/agent': {
+        post: {
+          summary: 'Coding-agent hook receiver (Claude Code / Cursor / Codex / ZCode / Gemini CLI)',
+          description: 'POST agent hook event JSON here — Claude Code natively via type:"http" hooks, other tools via the walkie-notify forwarding script. Events are normalized (camelCase names, Codex notify type, Gemini AfterAgent) and translated into notifications: permission waits and hard failures → critical, tool failures → warning, task completion → success, idle hints → info; no-op events (SessionEnd, PreToolUse…) are acknowledged with ignored:true. min_severity drops events below the chosen level (the user or agent picks what deserves a ping); filtered:true in the response means it was dropped by that rule. The key must target exactly one destination, or pass ?destination=<slug>.',
+          security,
+          parameters: [
+            { name: 'destination', in: 'query', required: false, schema: { type: 'string' }, description: 'Destination slug, required when the key has multiple destinations' },
+            { name: 'min_severity', in: 'query', required: false, schema: { type: 'string', enum: ['info', 'success', 'warning', 'critical'] }, description: 'Minimum severity to actually notify; lower-severity events are acknowledged with filtered:true' }
+          ],
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { hook_event_name: { type: 'string', description: 'Notification | Stop | StopFailure | SubagentStop | stop | sessionEnd | AfterAgent | … (case-insensitive first letter)' }, type: { type: 'string', description: 'Codex notify events, e.g. agent-turn-complete' }, message: { type: 'string' }, notification_type: { type: 'string' }, last_assistant_message: { type: 'string' }, status: { type: 'string', description: 'Cursor stop: completed | error | aborted' }, reason: { type: 'string', description: 'sessionEnd reason; error → critical' }, cwd: { type: 'string' } } } } } },
+          responses: { 200: { description: '{ ok, deliveryId?, ignored?, filtered? }' }, 400: { description: 'Key has multiple destinations and none was specified' }, 401: { description: 'Invalid agent key' } }
+        }
+      },
       '/api/v1/hooks/claude': {
         post: {
-          summary: 'Claude Code HTTP hook receiver',
-          description: 'POST Claude Code hook event JSON here (type:"http" hooks). Events are translated into notifications with severity mapping: permission_prompt/agent_needs_input/elicitation_* and StopFailure → critical, Stop/agent_completed → success, idle_prompt/SubagentStop → info; no-op events (SessionEnd, PreToolUse…) are acknowledged with ignored:true. The key must target exactly one destination, or pass ?destination=<slug>.',
+          summary: 'Alias of /api/v1/hooks/agent (early name)',
           security,
-          parameters: [{ name: 'destination', in: 'query', required: false, schema: { type: 'string' }, description: 'Destination slug, required when the key has multiple destinations' }],
-          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['hook_event_name'], properties: { hook_event_name: { type: 'string', description: 'Notification | Stop | StopFailure | SubagentStop | …' }, message: { type: 'string' }, notification_type: { type: 'string' }, last_assistant_message: { type: 'string' }, cwd: { type: 'string' } } } } } },
-          responses: { 200: { description: '{ ok, deliveryId? , ignored? }' }, 400: { description: 'Key has multiple destinations and none was specified' }, 401: { description: 'Invalid agent key' } }
+          responses: { 200: { description: 'Same as /api/v1/hooks/agent' } }
         }
       },
       '/reply/{id}/{token}': { get: { summary: 'One-time reply form (no auth; token in URL)', security: [], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }, { name: 'token', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Reply form HTML' }, 410: { description: 'Already replied or expired' } } } },

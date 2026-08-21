@@ -3,25 +3,24 @@ import type { RelayRepository } from './database.js';
 import { sendWithAgentKey } from './compat.js';
 
 /**
- * Claude Code HTTP hook 接收端点（POST /api/v1/hooks/claude）。
+ * 编码 Agent HTTP hook 接收端点（POST /api/v1/hooks/agent）。
  *
- * Claude Code v2.1+ 的 hook 支持 type: "http"——事件 JSON 直接 POST 过来，
- * 连脚本都不用写。这里把官方事件 schema（code.claude.com/docs/en/hooks）翻译成
- * Walkie 通知，按事件语义映射 severity：
+ * 一个端点接所有工具：Claude Code（原生 http hook）、Cursor / Codex / ZCode /
+ * Gemini CLI（command hook 转发脚本 POST 过来）。各家事件 schema 高度同构，
+ * 服务端统一归一化后按语义映射 severity：
  *
- *   Notification.permission_prompt / agent_needs_input / elicitation_*  → critical（在等你）
- *   Notification.idle_prompt                                            → info（60s 没动，提醒而已）
- *   Notification.agent_completed                                        → success（后台任务完成）
- *   Stop                                                                → success（本轮干完了）
- *   SubagentStop                                                        → info（子代理完成，太频繁不刷屏）
- *   StopFailure                                                         → critical（API 报错，回合中断）
- *   SessionEnd                                                          → 不通知（没有行动价值）
+ *   等你操作类（permission_prompt / agent_needs_input / elicitation_* / Gemini Notification）
+ *     与失败类（StopFailure / Cursor stop.status=error / sessionEnd.reason=error）
+ *     → critical
+ *   任务完成类（Stop / agent_completed / Codex agent-turn-complete / Gemini AfterAgent）
+ *     → success
+ *   轻提示类（idle_prompt / SubagentStop）→ info
+ *   高频无行动价值类（SessionEnd / PreToolUse / auth_success）→ 不发
  *
- * 其余事件（PreToolUse 等）也接收但不发通知——那类事件每次工具调用都触发，
- * 发出来就是垃圾信息轰炸；端点统一回 2xx，避免 Claude Code 侧报 hook error。
- *
- * 目的地规则与兼容端点一致：Agent Key 只配一个目的地时自动用之；
- * key 绑了多个目的地时要求 URL 带 ?destination=<slug>（或为 hook 单独建一个 key）。
+ * 通知条件由安装时选定、编码进 URL 查询参数（用户与 Agent 都能改）：
+ *   ?min_severity=<info|success|warning|critical>   低于该级别的事件收下但不发
+ *   ?destination=<slug>                              key 绑多目的地时指定
+ * 脚本/配置里看不到密钥明文（经 $WALKIE_TOKEN 插值或转发脚本读环境变量）。
  */
 
 interface HookInput {
@@ -35,9 +34,20 @@ interface HookInput {
   status?: string;
   cwd?: string;
   last_assistant_message?: string;
+  'last-assistant-message'?: string;
+  input_messages?: unknown;
+  'input-messages'?: unknown;
   agent_type?: string;
   tool_name?: string;
   cursor_version?: string;
+  type?: string;
+}
+
+const SEVERITY_ORDER = { info: 0, success: 1, warning: 2, critical: 3 } as const;
+type Severity = keyof typeof SEVERITY_ORDER;
+
+export function parseMinSeverity(value: string | undefined): Severity | undefined {
+  return value && value in SEVERITY_ORDER ? value as Severity : undefined;
 }
 
 /** cwd 取末两段做「哪个项目」的标识：完整路径又长又可能泄漏目录结构 */
@@ -48,39 +58,46 @@ function projectTag(cwd: string | undefined): string {
 }
 
 /**
- * 事件名归一化：Cursor 的 hook 事件是小驼峰（stop / postToolUseFailure / sessionEnd），
- * Claude Code 是大驼峰（Stop / StopFailure / SessionEnd）。转发脚本按原样 POST，
- * 这里统一成大驼峰再走映射——一套翻译管两家。
+ * 事件名归一化：Cursor 用小驼峰（stop / postToolUseFailure / sessionEnd），
+ * Gemini 用 BeforeAgent/AfterAgent，Codex notify 用 type=agent-turn-complete。
+ * 统一成句点大驼峰再走映射——一套翻译管五家。
  */
-function normalizeEvent(name: string | undefined): string {
-  if (!name) return '';
-  const head = name.slice(0, 1).toUpperCase() + name.slice(1);
-  // Cursor 的 sessionEnd 也带 reason；stop 的 status completed|error|aborted 映射到语义
-  return head;
+function normalizeEvent(input: HookInput): string {
+  if (input.hook_event_name) return input.hook_event_name.slice(0, 1).toUpperCase() + input.hook_event_name.slice(1);
+  if (input.type === 'agent-turn-complete') return 'Stop'; // Codex notify 的唯一事件
+  if (input.type) return input.type.slice(0, 1).toUpperCase() + input.type.slice(1);
+  return '';
 }
+
+const lastMessage = (input: HookInput): string =>
+  (input.last_assistant_message ?? input['last-assistant-message'] ?? input.message ?? '').trim();
 
 /** 事件 → 通知的映射；返回 undefined 表示「收下但不发通知」 */
 export function claudeHookToNotification(input: HookInput): {
   title: string;
   body: string;
-  severity: 'info' | 'success' | 'warning' | 'critical';
+  severity: Severity;
   tags: string;
 } | undefined {
   const project = projectTag(input.cwd);
   const where = project ? `（${project}）` : '';
-  const event = normalizeEvent(input.hook_event_name);
+  const event = normalizeEvent(input);
 
   if (event === 'Notification') {
-    const type = input.notification_type ?? '';
+    const type = input.notification_type ?? input.message ?? '';
     if (type === 'permission_prompt' || type === 'agent_needs_input' || type.startsWith('elicitation_')) {
       // 等你操作：critical 配合 Web Push 的 requireInteraction + 长振动
-      return { title: `Claude 需要你${where}`, body: (input.message || '等你授权或输入').slice(0, 2000), severity: 'critical', tags: 'claude-code|permission' };
+      return { title: `Agent 需要你${where}`, body: (input.message || input.title || '等你授权或输入').slice(0, 2000), severity: 'critical', tags: 'agent-hook|permission' };
     }
     if (type === 'agent_completed') {
-      return { title: `Claude 后台任务完成${where}`, body: (input.message || input.title || '后台会话已结束').slice(0, 2000), severity: 'success', tags: 'claude-code' };
+      return { title: `后台任务完成${where}`, body: (input.message || input.title || '后台会话已结束').slice(0, 2000), severity: 'success', tags: 'agent-hook' };
     }
     if (type === 'idle_prompt') {
-      return { title: `Claude 在等你${where}`, body: (input.message || '回复已挂起 60 秒').slice(0, 2000), severity: 'info', tags: 'claude-code|idle' };
+      return { title: `Agent 在等你${where}`, body: (input.message || '回复已挂起 60 秒').slice(0, 2000), severity: 'info', tags: 'agent-hook|idle' };
+    }
+    // Gemini CLI 的 Notification 事件：系统级提示，多数无行动价值，仅在带 message 时作 info
+    if (input.cursor_version === undefined && input.message && !input.notification_type) {
+      return { title: `Agent 提示${where}`, body: input.message.slice(0, 2000), severity: 'info', tags: 'agent-hook|notification' };
     }
     return undefined; // auth_success 等无行动价值
   }
@@ -88,38 +105,44 @@ export function claudeHookToNotification(input: HookInput): {
   if (event === 'Stop') {
     // Cursor 的 stop 事件带 status（completed|error|aborted）；错误回合要按 critical 告警
     if (input.status === 'error') {
-      return { title: `Cursor 回合失败${where}`, body: (input.last_assistant_message || input.message || '回合以错误结束').slice(0, 2000), severity: 'critical', tags: 'cursor|error' };
+      return { title: `回合失败${where}`, body: (lastMessage(input) || '回合以错误结束').slice(0, 2000), severity: 'critical', tags: 'agent-hook|error' };
     }
     if (input.status === 'aborted') return undefined; // 用户主动打断，无行动价值
-    const summary = (input.last_assistant_message ?? input.message ?? '').trim();
+    const summary = lastMessage(input);
     // 摘要截前 600 字符：通知里够读就行，完整内容在会话里
-    return { title: `Claude 完成了任务${where}`, body: summary ? summary.slice(0, 600) : '回合结束，等待下一步指令。', severity: 'success', tags: 'claude-code|stop' };
+    return { title: `Agent 完成了任务${where}`, body: summary ? summary.slice(0, 600) : '回合结束，等待下一步指令。', severity: 'success', tags: 'agent-hook|stop' };
+  }
+
+  // Gemini CLI：agent 循环结束（AfterAgent）
+  if (event === 'AfterAgent') {
+    const summary = lastMessage(input);
+    return { title: `Agent 完成了任务${where}`, body: summary ? summary.slice(0, 600) : '回合结束。', severity: 'success', tags: 'agent-hook|stop' };
   }
 
   if (event === 'PostToolUseFailure') {
     // Claude Code 也有此事件但每次工具失败都触发，太吵——只在 Cursor 转发（带 cursor_version）
     // 时按 warning 告警一次；Cursor 侧由 CLI 只挂 stop/sessionEnd，这里是兜底
     if (!input.cursor_version) return undefined;
-    return { title: `工具调用失败${where}`, body: `${input.tool_name ?? 'tool'}${input.message ? `：${input.message}` : ''}`.slice(0, 2000) || '工具调用失败', severity: 'warning', tags: 'cursor|tool-failure' };
+    return { title: `工具调用失败${where}`, body: `${input.tool_name ?? 'tool'}${input.message ? `：${input.message}` : ''}`.slice(0, 2000) || '工具调用失败', severity: 'warning', tags: 'agent-hook|tool-failure' };
   }
 
   if (event === 'StopFailure') {
     return {
-      title: `Claude 回合失败${where}`,
+      title: `Agent 回合失败${where}`,
       body: `${input.error ?? 'unknown'}${input.error_details ? `：${input.error_details}` : ''}`.slice(0, 2000),
-      severity: 'critical', tags: 'claude-code|error'
+      severity: 'critical', tags: 'agent-hook|error'
     };
   }
 
   if (event === 'SubagentStop') {
-    return { title: `子代理完成（${input.agent_type ?? 'agent'}）${where}`, body: (input.last_assistant_message ?? '').trim().slice(0, 400) || '子代理回合结束。', severity: 'info', tags: 'claude-code|subagent' };
+    return { title: `子代理完成（${input.agent_type ?? 'agent'}）${where}`, body: lastMessage(input).slice(0, 400) || '子代理回合结束。', severity: 'info', tags: 'agent-hook|subagent' };
   }
 
   if (event === 'SessionEnd') {
     // Claude Code 的 SessionEnd（clear/logout 等）无行动价值；Cursor 的 sessionEnd
     // 带 reason=error + error_message——会话死于错误要按 critical 告警
     if (input.reason === 'error') {
-      return { title: `会话异常终止${where}`, body: (input.last_assistant_message || input.message || '会话以错误结束').slice(0, 2000), severity: 'critical', tags: 'cursor|error' };
+      return { title: `会话异常终止${where}`, body: (lastMessage(input) || '会话以错误结束').slice(0, 2000), severity: 'critical', tags: 'agent-hook|error' };
     }
     return undefined;
   }
@@ -127,28 +150,33 @@ export function claudeHookToNotification(input: HookInput): {
   return undefined;
 }
 
-/** 处理 POST /api/v1/hooks/claude；返回给 Claude Code 的 JSON（2xx 即成功） */
+/** 处理 POST /api/v1/hooks/agent（与 /api/v1/hooks/claude 同一处理器的别名） */
 export async function handleClaudeHook(
   repository: RelayRepository,
   notifications: NotificationService,
   body: unknown,
   token: string,
   destination: string | undefined,
-  drain: () => void
+  drain: () => void,
+  minSeverity: Severity | undefined = undefined
 ): Promise<{ statusCode: number; body: Record<string, unknown> }> {
   const input = (body && typeof body === 'object' ? body : {}) as HookInput;
   const mapped = claudeHookToNotification(input);
-  if (!mapped) return { statusCode: 200, body: { ok: true, ignored: true, event: input.hook_event_name ?? null } };
+  if (!mapped) return { statusCode: 200, body: { ok: true, ignored: true, event: input.hook_event_name ?? input.type ?? null } };
+  // 通知条件过滤：低于选定级别的事件收下不转发（用户/Agent 安装时自选，改 URL 即改条件）
+  if (minSeverity !== undefined && SEVERITY_ORDER[mapped.severity] < SEVERITY_ORDER[minSeverity]) {
+    return { statusCode: 200, body: { ok: true, filtered: true, severity: mapped.severity } };
+  }
   // 先验 key：无效/缺失走 401（与 requireAgent 语义一致；Node 端由中间件前置，DO 端这里补）
   if (!token || !(await repository.authenticateKey(token))) {
     return { statusCode: 401, body: { ok: false, error: '无效或已吊销的 Agent API Key' } };
   }
   try {
-    const delivery = await sendWithAgentKey(repository, notifications, token, { destination, ...mapped, metadata: { via: 'claude-hook' } }, 'claude-hook');
+    const delivery = await sendWithAgentKey(repository, notifications, token, { destination, ...mapped, metadata: { via: 'agent-hook' } }, 'agent-hook');
     drain();
     return { statusCode: 200, body: { ok: true, deliveryId: delivery.id } };
   } catch (error) {
-    // 配置类错误（key 多目的地等）用 4xx 回给用户看；Claude Code 对非 2xx 只记 debug 不影响会话
+    // 配置类错误（key 多目的地等）用 4xx 回给用户看；各家 CLI 对非 2xx 只记 debug 不影响会话
     return { statusCode: 400, body: { ok: false, error: error instanceof Error ? error.message : String(error) } };
   }
 }

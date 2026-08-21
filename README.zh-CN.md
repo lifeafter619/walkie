@@ -337,29 +337,36 @@ curl "https://api.telegram.org/bot<BotToken>/setWebhook" \
 
 长任务跑到一半也能改方向。在控制台「会话 → 发消息给 Agent」输入，或在没有待回复问题时直接给 Telegram 机器人发消息；Agent 下一次调用 `wait_for_inbox` 就会读到，每条消息只被取走一次。这是最可靠的推送路径：绝大多数 MCP 客户端会丢弃服务端主动下发的 notification，但没有客户端会丢弃 tool 结果。
 
-### 盯住 Claude Code / Cursor 会话（hooks）
+### 盯住编码 Agent 会话（hooks）
 
-编码 Agent 干完了、失败了、在等你授权——都推到你手机上，不用守着终端。一条命令装好两个工具的 hooks：
+编码 Agent 干完了、失败了、在等你授权——都推到你手机上，不用守着终端。一条命令装好 **Claude Code、Cursor、Codex、ZCode、Gemini CLI** 的 hooks（自动检测装了哪些）：
 
 ```bash
-npx walkie-notify hook --url https://你的域名 --token rdk_xxx
+npx walkie-notify hook --url https://你的域名 --token rdk_xxx --only critical
 ```
 
-命令会先发一条真实测试通知（key 或目的地配错会当场报错，绝不带病写入），然后合并进 `~/.claude/settings.json` 与 `~/.cursor/hooks.json`——已有的 hooks 与配置原样保留，重复执行幂等，`npx walkie-notify hook --uninstall` 精确摘除只属于 walkie 的部分。最后在 shell 配置里导出 `WALKIE_URL` 和 `WALKIE_TOKEN` 即可：写入的配置引用 `$WALKIE_TOKEN` 环境变量，密钥不落盘。key 绑多个目的地时加 `--destination <slug>`。
+命令会先发一条真实测试通知（key 或目的地配错当场报错，绝不带病写入），然后合并进各工具的配置——已有 hooks 与配置原样保留，重复执行幂等，`--uninstall` 精确摘除。最后在 shell 配置里导出 `WALKIE_URL` 和 `WALKIE_TOKEN`：写入的配置引用 `$WALKIE_TOKEN`，密钥不落盘。
 
-各事件的推送级别：
+**什么时候通知你**（hooks 监听的事件）：
 
-| 事件 | 级别 |
+| 工具 | 在等你 | 任务完成 | 失败 |
+| --- | --- | --- | --- |
+| Claude Code | 授权/闲置/等你输入提示（`Notification`） | `Stop`（带 Agent 摘要） | `StopFailure`（API 错误） |
+| Cursor | — | `stop` | `stop` 带 `status: error`、`sessionEnd` 带 `reason: error` |
+| Codex | — | `stop` / `sessionEnd`（hooks） | 同 Cursor |
+| ZCode | — | `Stop` | `PostToolUseFailure` |
+| Gemini CLI | `Notification` | `AfterAgent` | — |
+
+**自己选什么才值得打扰你**——安装时用 `--only <级别>` 定最低通知级别，之后改环境变量 `WALKIE_MIN_SEVERITY` 即可调整、无需重装：
+
+| 级别 | 收到什么 |
 | --- | --- |
-| `Notification` `permission_prompt` / `agent_needs_input` / `elicitation_*`——在等你 | critical |
-| `StopFailure`——回合因 API 错误中断；Cursor `stop` 带 `status: error`、`sessionEnd` 带 `reason: error` | critical |
-| `Stop` / `agent_completed`——任务完成 | success |
-| `idle_prompt` / `SubagentStop` | info |
-| `SessionEnd`、`PreToolUse` 等高频事件 | 收下但不发（防轰炸） |
+| `critical` | 安静模式：只推「在等你」和硬故障 |
+| `warning` | + 工具调用失败 |
+| `success` | + 任务完成通知 |
+| `info` | 全部，含闲置提示与子代理完成（默认） |
 
-**Claude Code（v2.1+）**走原生 `type: "http"` hook，零脚本。**Cursor** 的 hook 是 command 型，安装器会在 `~/.cursor/hooks/walkie-notify.sh` 放一个小转发脚本（永远 exit 0 不阻塞工作流；没配 `WALKIE_URL` 的机器静默——所以 `--scope project` 装进仓库后可以随仓库分发）。
-
-想手动配置？端点是 `POST /api/v1/hooks/claude`，body 为事件 JSON——详见实例上的 `/openapi.json`。
+Agent 也能选级别——它就是端点上的一个 `min_severity` 查询参数（`POST /api/v1/hooks/agent`）。任何工具手动接入：把 hook 指到该端点、body 为事件 JSON；详见实例上的 `/openapi.json`。
 
 ### Web Push——不依赖任何第三方账号
 
