@@ -4,6 +4,7 @@ import type { Channel, PlatformUsageSettings, PlatformUsageStatus, ProviderDefin
 import { api } from '../api';
 import { Badge, Button, IconButton, Modal, type Notify } from './ui';
 import { ProviderIcon } from './ProviderIcon';
+import { WebPushPanel } from './WebPushPanel';
 
 type Meta = Awaited<ReturnType<typeof api.meta>>;
 
@@ -478,6 +479,8 @@ export function SystemPage({ meta, channels, providers, refresh, notify }: { met
             <div className="modal-loading"><LoaderCircle className="spin" /></div>
           )}
         </section>
+
+        <WebPushPanel notify={notify} />
 
         <section className="panel version-panel">
           <div className="section-head">

@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的旧运行自动取消：PR 连续推送时不排队浪费额度
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck (browser + node + workerd + vercel)
+        run: npm run typecheck
+      - run: npm test
+      - name: Build web + server
+        run: npm run build
+      # 兼容端点与 SQL 在 workerd 上跑的是同一份代码，构建产物必须两端都能过
+      - name: Typecheck worker bundle
+        run: npm run build:worker
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build image
+        run: docker build -t walkie:ci .
+      - name: Boot and probe /health
+        run: |
+          docker run -d --name walkie-ci -p 4310:4310 \
+            -e ADMIN_TOKEN=ci-admin-token \
+            -e MASTER_KEY="$(head -c 32 /dev/urandom | base64 -w0)" \
+            walkie:ci
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4310/health; then exit 0; fi
+            sleep 2
+          done
+          echo "health check never came up"; docker logs walkie-ci; exit 1
+      - if: always()
+        run: docker rm -f walkie-ci || true

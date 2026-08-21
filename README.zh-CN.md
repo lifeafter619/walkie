@@ -7,6 +7,7 @@
 Agent 干完活呼叫你、拿不准主意时问你，你在任何设备上按下回复——一条 MCP 连接搞定。
 
 [![License](https://img.shields.io/badge/license-MIT-22c55e)](LICENSE)
+[![CI](https://github.com/lifeafter619/walkie/actions/workflows/ci.yml/badge.svg)](https://github.com/lifeafter619/walkie/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-0.3.0-black)](package.json)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6366f1)](https://modelcontextprotocol.io)
@@ -26,13 +27,15 @@ Agent 干完活呼叫你、拿不准主意时问你，你在任何设备上按�
 AI Agent 跑长任务时，你不想盯着终端。Walkie 是一个自托管的通知控制平面：
 
 - **Agent → 你**：构建完成、部署失败、审批请求，推送到 Telegram、WhatsApp、企业微信、飞书、Expo、OneSignal、邮件、短信……75+ 渠道任选；
-- **你 → Agent**：Agent 调用 `ask_user` 把问题推到你手机，你点开一次性链接（或直接在控制台）回复，Agent 拿到答案继续干活；
+- **你 → Agent**：Agent 调用 `ask_user` 把问题推到你手机，你点按钮、回一句话或点开一次性链接，Agent 拿到答案继续干活；跑到一半想改方向，也可以主动发消息进它的收件箱；
 - **一个实例，多种入口**：MCP、REST、Server酱、Bark、Gotify、PushPlus、ntfy 兼容端点共用同一套频道与 Agent Key。
 
 ## 核心特性
 
 - 📡 **75+ 通知渠道**——聊天（Telegram / WhatsApp / 企业微信应用 / 飞书 / 钉钉 / Slack / Discord / Teams / Google Chat / KOOK / QQ 官方机器人 / Matrix / LINE…）、推送（FCM / Expo / OneSignal / Huawei / HONOR / Xiaomi / OPPO / vivo / 魅族 / JPush / 个推 / Join / Pushy / Pushsafer / Simplepush / Pusher Beams / Pushpad / Bark / ntfy / Gotify / Pushover / Server酱 / PushPlus / WxPusher…）、编排（Novu / Knock / Courier）、自动化（IFTTT Webhooks）、邮件（SMTP / SendGrid / Resend / Postmark / Mailgun / Brevo）、短信（Twilio / 阿里云 / 腾讯云 / AWS SNS / Vonage / Plivo / Telnyx / Bird / Infobip）、PagerDuty、Jira Service Management、Alertmanager、Apprise、通用 Webhook。新增渠道的官方契约和验证边界见 [`docs/providers.md`](docs/providers.md)。
-- 🔁 **双向会话**——`ask_user` 提问 + 一次性回复链接 + 控制台会话页直接回复，`check_reply` 长轮询取答案
+- 🔁 **双向会话**——`ask_user` 提问 + 一次性回复链接，Telegram / Slack / Discord 按钮点按即回，Telegram 与 Slack 还能直接回一句话；`check_reply` 长轮询取答案
+- 📥 **你也能主动找 Agent**——`wait_for_inbox` 让你在控制台或直接给机器人发消息，中途改变正在跑的 Agent 的方向，不用等它来问
+- 🖥️ **内置 Web Push**——控制台一键订阅本浏览器（VAPID + RFC 8291），不用上架 App，也不用第三方账号
 - 🧭 **路由**——多个频道组成「并发广播」或「故障转移链」，一个稳定标识符对外
 - 🔑 **密钥即密码**——Agent Key 和管理密码都可自定义；多条管理密码可并存、统计和单独撤销
 - 🪝 **投递回调**——`callbackUrl` 在投递到达终态时回推结果
@@ -206,8 +209,9 @@ bearer_token_env_var = "WALKIE_API_KEY"
 | `list_destinations` | 列出该 Key 可用的频道与路由 |
 | `send_notification` | 发送通知，返回 deliveryId |
 | `get_delivery` | 查询投递的总体与分频道状态 |
-| `ask_user` | 向人类提问，推送一次性回复链接（Telegram 渠道渲染内联按钮，点按即回） |
+| `ask_user` | 向人类提问，推送一次性回复链接（Telegram / Slack / Discord 渲染按钮，点按即回） |
 | `check_reply` | 长轮询等待人类回复 |
+| `wait_for_inbox` | 长轮询取走人类**主动**发来的消息——来自控制台或直接发给 Telegram 机器人；每条消息只会被一个 Agent 取到 |
 | `report_idle` | 上报人类离开键盘秒数；idle < 120s 时非 critical 的手机推送延后，桌面照推 |
 | `list_routes` | 列出可用路由 |
 | `list_channel_types` / `list_channels` | 渠道类型字段定义 / 渠道列表（`config:write`） |
@@ -249,10 +253,10 @@ curl -X POST https://你的域名/api/v1/notify \
 } } }
 ```
 
-### CLI 与 GitHub Action — `npx walkie send`
+### CLI 与 GitHub Action — `npx walkie-notify send`
 
 ```bash
-npx walkie send --url https://你的域名 --token rdk_... --to prod-alerts \
+npx walkie-notify send --url https://你的域名 --token rdk_... --to prod-alerts \
   --title "部署失败" --body "已执行回滚" --severity critical
 ```
 
@@ -305,6 +309,37 @@ Agent  ── check_reply 长轮询 ──► 拿到答案，继续执行
 ```
 
 链接一次有效、到期作废（30 秒 ~ 24 小时可调），无需给回复者任何账号。
+
+### 直接在聊天软件里回，不用点链接
+
+Telegram、Slack、Discord 都能就地闭环。打开「频道 → 编辑」，里面的**双向回调地址**由 bot token 派生，不需要额外配置项：
+
+| 渠道 | URL 填到哪 | 能做什么 |
+| --- | --- | --- |
+| Telegram | `setWebhook`（URL 末段同时作为 `secret_token`） | 按钮点按即回、直接回一句话即作答、其余消息进 Agent 收件箱 |
+| Slack | *Interactivity & Shortcuts → Request URL*（按钮）与 *Event Subscriptions → Request URL*（消息，订阅 `message.channels`） | Block Kit 按钮、频道里回一句话即作答、其余消息进收件箱 |
+| Discord | *General Information → Interactions Endpoint URL* | 按钮点按即回 |
+
+```bash
+# Telegram 一条命令搞定
+curl "https://api.telegram.org/bot<BotToken>/setWebhook" \
+  -d "url=https://你的域名/telegram/webhook/<secret>" \
+  -d "secret_token=<secret>"
+```
+
+只接受频道里配置的那个 chat / channel，找到这个机器人的陌生人无法替你回答。
+
+**关于验签**：Discord 强制 Ed25519 验签，必须先在频道表单里填 Application Public Key，否则 Discord 保存端点时的探测就过不去。Slack 填了 App 的 Signing Secret 就启用官方 `X-Slack-Signature` 验签；留空则回调 URL 里的高熵密钥本身是唯一凭据。Telegram 用它自己的 `secret_token` 头。
+
+**Discord 没有自由文本回复**：Discord 只把 *interaction* 推到 HTTP webhook，普通聊天消息要常驻 Gateway(WebSocket) 连接才收得到，Serverless 部署撑不住。所以按钮可用，「在频道里回一句话」不可用。
+
+### 反方向——你主动找 Agent
+
+长任务跑到一半也能改方向。在控制台「会话 → 发消息给 Agent」输入，或在没有待回复问题时直接给 Telegram 机器人发消息；Agent 下一次调用 `wait_for_inbox` 就会读到，每条消息只被取走一次。这是最可靠的推送路径：绝大多数 MCP 客户端会丢弃服务端主动下发的 notification，但没有客户端会丢弃 tool 结果。
+
+### Web Push——不依赖任何第三方账号
+
+「系统 → Web Push → 订阅本设备」把当前浏览器（桌面或手机）注册到实例自己生成的 VAPID 密钥对上。再新建一个 `Web Push（本站订阅）` 频道并设为目的地即可；载荷按 RFC 8291 端到端加密。需要 HTTPS；iOS 上要先把站点「添加到主屏幕」。
 
 ## 环境变量参考
 

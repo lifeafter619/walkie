@@ -63,15 +63,21 @@ export async function safeFetch(
   const response = await fetcher(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(12_000) });
   const body = (await response.text()).slice(0, 4096);
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${body || response.statusText}`);
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(body) as Record<string, unknown>;
-    const code = parsed.errcode ?? parsed.code;
+    parsed = JSON.parse(body);
+  } catch {
+    return { status: response.status, body }; // 非 JSON 响应（纯文本 ok 等）按成功处理
+  }
+  // JSON 也可能是 null / 数组 / 标量：只有对象才有平台错误码可读，其余直接放行
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const record = parsed as Record<string, unknown>;
+    const code = record.errcode ?? record.code;
     // 0/'0'/200 为通用成功码；1000 是 WxPusher、80000000 是华为 Push Kit 的成功码。
-    if (code !== undefined && code !== 0 && code !== '0' && code !== 200 && code !== '200' && code !== 1000 && code !== '80000000' && code !== 80000000) throw new Error(String(parsed.errmsg ?? parsed.description ?? parsed.msg ?? parsed.message ?? parsed.info ?? `平台返回错误码 ${code}`));
-    if (parsed.ok === false) throw new Error(String(parsed.description ?? '平台拒绝了消息'));
-  } catch (error) {
-    if (error instanceof SyntaxError) return { status: response.status, body };
-    throw error;
+    if (code !== undefined && code !== 0 && code !== '0' && code !== 200 && code !== '200' && code !== 1000 && code !== '80000000' && code !== 80000000) {
+      throw new Error(String(record.errmsg ?? record.description ?? record.msg ?? record.message ?? record.info ?? `平台返回错误码 ${code}`));
+    }
+    if (record.ok === false) throw new Error(String(record.description ?? '平台拒绝了消息'));
   }
   return { status: response.status, body };
 }

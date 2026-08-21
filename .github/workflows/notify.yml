@@ -51,15 +51,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Send Walkie notification
+        # 直接打 REST 端点，不依赖已发布的 npm 包：fork 本仓库后立刻可用
         run: |
-          npx -y walkie@latest send \
-            --url "$WALKIE_URL" \
-            --token "$WALKIE_API_KEY" \
-            --to "$DESTINATION" \
-            --title "$TITLE" \
-            --body "$BODY" \
-            --severity "$SEVERITY" \
-            ${{ inputs.link && format('--link "{0}"', inputs.link) || '' }}
+          payload=$(jq -nc \
+            --arg destination "$DESTINATION" \
+            --arg title "$TITLE" \
+            --arg body "$BODY" \
+            --arg severity "$SEVERITY" \
+            --arg link "$LINK" \
+            --arg key "walkie-action:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" \
+            '{destination:$destination,title:$title,body:$body,severity:$severity,idempotencyKey:$key}
+             + (if $link == "" then {} else {url:$link} end)')
+          curl --fail-with-body --silent --show-error \
+            -X POST "${WALKIE_URL%/}/api/v1/notify" \
+            -H "authorization: Bearer $WALKIE_API_KEY" \
+            -H 'content-type: application/json' \
+            -d "$payload"
         env:
           WALKIE_URL: ${{ secrets.WALKIE_URL }}
           WALKIE_API_KEY: ${{ secrets.WALKIE_API_KEY }}
@@ -67,3 +74,4 @@ jobs:
           TITLE: ${{ inputs.title }}
           BODY: ${{ inputs.body }}
           SEVERITY: ${{ inputs.severity }}
+          LINK: ${{ inputs.link }}

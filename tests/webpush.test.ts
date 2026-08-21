@@ -1,9 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { MockFetch } from './helpers.js';
 import { encryptPushPayload, generateVapidKeys, vapidHeader, type PushSubscription, type VapidKeys } from '../src/server/providers/webpush.js';
+import { ProviderDispatcher } from '../src/server/providers/dispatcher.js';
+
+/** TS 5.9 起 Buffer<ArrayBufferLike> 不再满足 BufferSource；统一拷成 ArrayBuffer 视图 */
+const view = (value: Uint8Array): Uint8Array<ArrayBuffer> => {
+  const copy = new Uint8Array(new ArrayBuffer(value.byteLength));
+  copy.set(value);
+  return copy;
+};
 
 async function hkdf(salt: Buffer, ikm: Buffer, info: Buffer, length: number): Promise<Buffer> {
-  const key = await globalThis.crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
-  const bits = await globalThis.crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info } as globalThis.HkdfParams, key, length * 8);
+  const key = await globalThis.crypto.subtle.importKey('raw', view(ikm), 'HKDF', false, ['deriveBits']);
+  const bits = await globalThis.crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: view(salt), info: view(info) } as globalThis.HkdfParams, key, length * 8);
   return Buffer.from(bits);
 }
 
@@ -24,7 +33,7 @@ async function decryptAes128gcm(body: Buffer, subscription: PushSubscription & {
     y: Buffer.from(asBytes(subscription.p256dh).subarray(33)).toString('base64url'),
     d: subscription.p256dhPriv
   }, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
-  const serverKey = await globalThis.crypto.subtle.importKey('raw', serverPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const serverKey = await globalThis.crypto.subtle.importKey('raw', view(serverPublic), { name: 'ECDH', namedCurve: 'P-256' }, false, []);
   const ikm = new Uint8Array(await globalThis.crypto.subtle.deriveBits({ name: 'ECDH', public: serverKey }, priv, 256));
 
   // PRK = HKDF(salt=auth, ikm, info="WebPush: info"\0 || ua_public)
@@ -34,8 +43,8 @@ async function decryptAes128gcm(body: Buffer, subscription: PushSubscription & {
   const cek = await hkdf(salt, prk, Buffer.from('Content-Encoding: aes128gcm\0', 'utf8'), 16);
   const nonce = await hkdf(salt, prk, Buffer.from('Content-Encoding: nonce\0', 'utf8'), 12);
 
-  const aesKey = await globalThis.crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['decrypt']);
-  const plaintext = new Uint8Array(await globalThis.crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce, additionalData: new Uint8Array(0) }, aesKey, encrypted));
+  const aesKey = await globalThis.crypto.subtle.importKey('raw', view(cek), 'AES-GCM', false, ['decrypt']);
+  const plaintext = new Uint8Array(await globalThis.crypto.subtle.decrypt({ name: 'AES-GCM', iv: view(nonce), additionalData: new Uint8Array(0) }, aesKey, view(encrypted)));
   const text = Buffer.from(plaintext).toString('utf8');
   return text.replace(/\x02$/, '');
 }
@@ -79,5 +88,46 @@ describe('webpush RFC 8291/8292', () => {
     const key = await globalThis.crypto.subtle.importKey('raw', new Uint8Array(Buffer.from(keys.publicKey, 'base64url')), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
     const ok = await globalThis.crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, raw, new TextEncoder().encode(`${h}.${p}`));
     expect(ok).toBe(true);
+  });
+
+  it('truncates oversized bodies so the push service does not reject the whole notification', async () => {
+    const subscription = await browserSubscription();
+    let sentBody: Uint8Array = new Uint8Array();
+    const captured = vi.fn(async (_url: unknown, init: RequestInit) => {
+      sentBody = init.body as Uint8Array;
+      return new Response('', { status: 201 });
+    });
+    // resolveHost 打桩成公网地址：测试机不该真去解析 fcm.googleapis.com
+    const dispatcher = new ProviderDispatcher({ allowPrivateWebhooks: false, allowInsecureHttp: false },
+      captured as unknown as MockFetch, async () => ['142.250.0.1']);
+    dispatcher.pushSubscriptions = async () => ({ subscriptions: [subscription], vapid: await generateVapidKeys() });
+
+    await dispatcher.send('webpush', {}, { title: '长正文', body: '啊'.repeat(20_000), severity: 'info', metadata: {} });
+    // 密文 = 明文 + 1 padding + 16 tag，加上 86 字节头，整体必须留在 4096 以内
+    expect(sentBody.byteLength).toBeLessThanOrEqual(4096);
+    expect(await decryptAes128gcm(Buffer.from(sentBody), subscription)).toMatch(/…"/);
+  });
+
+  it('drops an oversized url before truncating the body — the notification itself must survive', async () => {
+    const subscription = await browserSubscription();
+    let sentBody: Uint8Array = new Uint8Array();
+    const captured = vi.fn(async (_url: unknown, init: RequestInit) => {
+      sentBody = init.body as Uint8Array;
+      return new Response('', { status: 201 });
+    });
+    const dispatcher = new ProviderDispatcher({ allowPrivateWebhooks: false, allowInsecureHttp: false },
+      captured as unknown as MockFetch, async () => ['142.250.0.1']);
+    dispatcher.pushSubscriptions = async () => ({ subscriptions: [subscription], vapid: await generateVapidKeys() });
+
+    // schema 之后仍可能出现的极端组合：长标题 + 长 URL + 长正文。
+    // 丢 url 保正文——通知不能整条被推送服务 413 掉
+    await dispatcher.send('webpush', {}, {
+      title: '超'.repeat(120), body: '正文'.repeat(600), severity: 'critical',
+      url: `https://example.com/${'很长的路径'.repeat(180)}`, metadata: {}
+    });
+    expect(sentBody.byteLength).toBeLessThanOrEqual(4096);
+    const decrypted = await decryptAes128gcm(Buffer.from(sentBody), subscription);
+    expect(decrypted).toContain('"title"');
+    expect(decrypted).not.toContain('https://example.com/');
   });
 });

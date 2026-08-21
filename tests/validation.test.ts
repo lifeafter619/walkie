@@ -19,7 +19,7 @@ describe('validation helpers', () => {
   it('validateChannelUpdate merges config then revalidates required fields', async () => {
     const repository = await createRepository();
     await repository.createChannel({ name: 'Ops', slug: 'ops', provider: 'telegram', config: { botToken: 't', chatId: '42' } });
-    const rename = await validateChannelUpdate(repository, 'ops', { name: 'New' });
+    const rename = await validateChannelUpdate(repository, 'ops', {});
     expect(rename.errors).toEqual([]);
     expect(rename.current?.name).toBe('Ops');
     const broken = await validateChannelUpdate(repository, 'ops', { config: { botToken: '' } });

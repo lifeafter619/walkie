@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import type { MockFetch } from './helpers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { createNodeRepository } from '../src/server/database-node.js';
@@ -15,7 +16,7 @@ async function setup() {
   const repository = await createNodeRepository(':memory:', randomBytes(32));
   repositories.push(repository);
   const notifications = new NotificationService(repository);
-  const dispatcher = new ProviderDispatcher({ allowPrivateWebhooks: false, allowInsecureHttp: false }, vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch);
+  const dispatcher = new ProviderDispatcher({ allowPrivateWebhooks: false, allowInsecureHttp: false }, vi.fn(async () => new Response('{}', { status: 200 })) as unknown as MockFetch);
   const worker = new DeliveryWorker(repository, dispatcher, { deliveryWorkers: 1, maxDeliveryAttempts: 1, retryBaseMs: 1, maxSendsPerMin: 0 });
   const app = createApp({
     config: { port: 4310, host: '127.0.0.1', dataDir: '.', databasePath: ':memory:', adminToken: 'a-secure-admin-token', masterKey: randomBytes(32), allowPrivateWebhooks: false, allowInsecureHttp: false, deliveryWorkers: 1, maxSendsPerMin: 0, maxDeliveryAttempts: 1, retryBaseMs: 1, isProduction: false, platform: 'node' } as never,

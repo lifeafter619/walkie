@@ -7,6 +7,7 @@
 Your agent calls you when work is done, asks when it is unsure, and you reply from any device — all over one MCP connection.
 
 [![License](https://img.shields.io/badge/license-MIT-22c55e)](LICENSE)
+[![CI](https://github.com/lifeafter619/walkie/actions/workflows/ci.yml/badge.svg)](https://github.com/lifeafter619/walkie/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-0.3.0-black)](package.json)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6366f1)](https://modelcontextprotocol.io)
@@ -26,13 +27,15 @@ Your agent calls you when work is done, asks when it is unsure, and you reply fr
 When an AI agent runs long tasks, you should not have to babysit the terminal. Walkie is a self-hosted notification control plane:
 
 - **Agent → you**: build finished, deploy failed, approval needed — delivered to Telegram, WhatsApp, WeCom, Feishu, email, SMS, and 75+ more channels;
-- **You → agent**: the agent calls `ask_user`, the question lands on your phone, you tap a one-time link (or reply in the console), and the agent picks up the answer and keeps working;
+- **You → agent**: the agent calls `ask_user`, the question lands on your phone, you tap a button, type a reply in the chat app, or open a one-time link — and the agent picks up the answer and keeps working. Want to redirect it mid-task? Message it unprompted and `wait_for_inbox` delivers;
 - **One instance, many entrances**: MCP, REST, and drop-in compatible endpoints for ServerChan, Bark, Gotify, PushPlus, ntfy, Slack, Discord, Alertmanager, Pushover, and Apprise — all sharing the same channels and Agent Keys.
 
 ## Highlights
 
 - 📡 **75+ notification channels** — chat (Telegram / WhatsApp / WeCom app / Feishu / DingTalk / Slack / Discord / Teams / Google Chat / KOOK / official QQ bot / Matrix / LINE…), push (FCM / Expo / OneSignal / Huawei / HONOR / Xiaomi / OPPO / vivo / Meizu / JPush / Getui / Join / Pushy / Pushsafer / Simplepush / Pusher Beams / Pushpad / Bark / ntfy / Gotify / Pushover / ServerChan / PushPlus / WxPusher…), orchestration (Novu / Knock / Courier), automation (IFTTT webhooks), email (SMTP / SendGrid / Resend / Postmark / Mailgun / Brevo), SMS (Twilio / Aliyun / Tencent Cloud / AWS SNS / Vonage / Plivo / Telnyx / Bird / Infobip), PagerDuty, Jira Service Management, Alertmanager, Apprise, and generic webhooks. See [`docs/providers.md`](docs/providers.md) for each provider's contract.
-- 🔁 **Two-way conversations** — `ask_user` + one-time reply link + reply from the console's session page; `check_reply` long-polls for the answer
+- 🔁 **Two-way conversations** — `ask_user` + one-time reply link, tappable buttons on Telegram / Slack / Discord, or just a plain reply in the chat app; `check_reply` long-polls for the answer
+- 📥 **You → agent, unprompted** — `wait_for_inbox` lets you steer a running agent from the console or by messaging your bot, without waiting to be asked
+- 🖥️ **Web Push built in** — subscribe the browser straight from the console (VAPID + RFC 8291), no App Store, no third-party account
 - 🧭 **Routing** — fanout or fallback chains of channels behind one stable identifier
 - 🪄 **Drop-in compatibility endpoints** — point existing ServerChan / Bark / Gotify / ntfy / PushPlus / Slack webhook / Discord webhook / Alertmanager / Pushover / Apprise tooling at Walkie with zero code changes
 - 🔑 **Keys are passwords** — Agent Keys and admin passwords can both be custom strings; multiple admin passwords can coexist, with per-key stats and revocation
@@ -207,8 +210,9 @@ bearer_token_env_var = "WALKIE_API_KEY"
 | `list_destinations` | List channels and routes this key may use |
 | `send_notification` | Send a notification, returns a deliveryId |
 | `get_delivery` | Query a delivery's overall and per-channel status |
-| `ask_user` | Ask the human a question, pushes a one-time reply link (Telegram channels render inline buttons — tap to reply) |
+| `ask_user` | Ask the human a question, pushes a one-time reply link (Telegram, Slack and Discord render tappable buttons) |
 | `check_reply` | Long-poll for the human's reply |
+| `wait_for_inbox` | Long-poll for messages the human sent **unprompted** — from the console or by messaging your Telegram bot. Each message is handed to exactly one agent |
 | `report_idle` | Report seconds since the human was last at the keyboard; while idle < 120s non-critical mobile pushes are deferred, desktop still fires |
 | `list_routes` | List usable routes |
 | `list_channel_types` / `list_channels` | Channel type field definitions / channel list (`config:write`) |
@@ -231,7 +235,7 @@ curl -X POST https://your-domain/api/v1/notify \
   -d '{"destination":"prod-alerts","title":"Deploy done","body":"v2.4.0 is live","severity":"success"}'
 ```
 
-`POST /api/v1/ask` asks a question, `GET /api/v1/conversations/:id` fetches the reply, `GET /api/v1/deliveries/:id` checks a delivery. Full machine-readable contract: [`GET /openapi.json`](#) (OpenAPI 3.1).
+`POST /api/v1/ask` asks a question, `GET /api/v1/conversations/:id` fetches the reply, `GET /api/v1/deliveries/:id` checks a delivery. Full machine-readable contract: `GET /openapi.json` on your own instance (OpenAPI 3.1).
 
 ### stdio MCP wrapper — zero local deploy
 
@@ -244,10 +248,10 @@ Stdio-only MCP clients can reach a deployed Walkie through [`packages/walkie-mcp
 } } }
 ```
 
-### CLI & GitHub Action — `npx walkie send`
+### CLI & GitHub Action — `npx walkie-notify send`
 
 ```bash
-npx walkie send --url https://your-domain --token rdk_... --to prod-alerts \
+npx walkie-notify send --url https://your-domain --token rdk_... --to prod-alerts \
   --title "Deploy failed" --body "rollback executed" --severity critical
 ```
 
@@ -290,6 +294,37 @@ Agent  ── check_reply long-poll ──► gets the answer, keeps going
 ```
 
 Links are one-time and expire (30 seconds to 24 hours, configurable). The recipient needs no account.
+
+### Reply straight from the chat app (no link)
+
+Telegram, Slack and Discord can close the loop without opening anything. Open the channel in **Channels → Edit**; the **two-way callback URL** shown there is derived from the bot token, so there is nothing extra to configure:
+
+| Channel | Where the URL goes | What you get |
+| --- | --- | --- |
+| Telegram | `setWebhook` (use the last URL segment as `secret_token` too) | Tappable buttons, plain-text replies, and unprompted messages → agent inbox |
+| Slack | *Interactivity & Shortcuts → Request URL* (buttons) and *Event Subscriptions → Request URL* (messages; subscribe `message.channels`) | Block Kit buttons, plain-text replies, and unprompted messages → agent inbox |
+| Discord | *General Information → Interactions Endpoint URL* | Tappable buttons |
+
+```bash
+# Telegram, one command
+curl "https://api.telegram.org/bot<BotToken>/setWebhook" \
+  -d "url=https://your-domain/telegram/webhook/<secret>" \
+  -d "secret_token=<secret>"
+```
+
+Only the chat/channel configured on the Walkie channel is accepted, so a stranger who finds the bot cannot answer on your behalf.
+
+**Signature verification.** Discord always verifies Ed25519 against the application public key — paste it into the channel form, or Discord will refuse to save the endpoint. Slack verifies `X-Slack-Signature` as soon as you fill in the app's Signing Secret; leave it blank and the high-entropy callback URL is the only credential. Telegram uses its own `secret_token` header.
+
+**Discord has no free-text path.** Discord only delivers *interactions* over HTTP webhooks; ordinary chat messages require a persistent Gateway (WebSocket) connection, which a serverless deployment cannot hold. Buttons work; "just reply in the channel" does not.
+
+### The other direction — you ping the agent
+
+Long-running agents can be steered mid-task. Type into **Conversations → Send to agent** in the console, or just message your Telegram bot when nothing is pending; the agent picks it up on its next `wait_for_inbox` call and each message is claimed exactly once. This is the reliable push path: most MCP clients drop server-initiated notifications, but every client surfaces a tool result.
+
+### Web Push — notifications without any third-party account
+
+**System → Web Push → Subscribe this device** registers the browser (desktop or mobile) against a VAPID key pair generated on your instance. Add a `Web Push (this site)` channel and route to it; payloads are encrypted per RFC 8291 end-to-end. Needs HTTPS; on iOS, add the site to the Home Screen first.
 
 ## Environment variables
 

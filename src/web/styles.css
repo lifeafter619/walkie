@@ -345,6 +345,26 @@ td code { color: var(--muted); }
 .conv-reply-form .icon-button { border: 1px solid var(--line); }
 .conv-answer { padding: 10px 12px; border-radius: 6px; background: var(--surface-alt); border: 1px solid var(--line-soft); color: var(--ink-2); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .segments-2 { grid-template-columns: 1fr 1fr; width: 180px; }
+.toolbar-check { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--muted); font-size: 12px; }
+
+/* 收件箱：反方向通道（人 → Agent）。已读消息压暗，未读保持高对比 */
+.inbox-panel { margin-bottom: 14px; }
+.inbox-form { padding: 12px 16px; }
+.inbox-list { list-style: none; margin: 0; padding: 0 16px 12px; display: grid; gap: 8px; }
+.inbox-list li { display: grid; gap: 3px; padding: 9px 11px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--surface-alt); }
+.inbox-list li.claimed { opacity: .6; }
+.inbox-body { font-size: 13px; line-height: 1.55; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.inbox-list small { color: var(--muted); font-size: 11px; }
+
+/* Web Push 订阅面板 */
+.webpush-body { display: grid; gap: 12px; padding: 14px 16px 0; }
+.webpush-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 12px; }
+.webpush-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.webpush-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 11px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--surface-alt); }
+.webpush-list li > span { display: grid; gap: 2px; min-width: 0; }
+.webpush-list code { font-size: 11px; overflow-wrap: anywhere; }
+.webpush-list small { color: var(--muted); font-size: 11px; }
+.webpush-panel .panel-note { margin: 0 -16px; border-bottom: 0; border-top: 1px solid var(--line-soft); }
 
 /* 侧栏/底栏角标。待回复=需要你动手，用实心警示胶囊；失败数只是状态计数，红字即可 */
 .app-shell > aside nav button i.nav-pending { min-width: 17px; height: 17px; padding: 0 5px; border-radius: 9px; display: inline-grid; place-items: center; background: var(--warning); color: #fff; font-size: 11px; font-weight: 600; }

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // walkie — CLI for Walkie (#15): send notifications from CI (GitHub Actions) or the terminal.
 //
-//   walkie send --url https://host --token <key> --to prod-alerts --title "..." --body "..."
-//   walkie status <deliveryId> --url https://host --token <key>
+//   walkie-notify send --url https://host --token <key> --to prod-alerts --title "..." --body "..."
+//   walkie-notify status <deliveryId> --url https://host --token <key>
 //
 // Zero dependencies, Node >= 22 (global fetch).
 
@@ -10,12 +10,12 @@ import process from 'node:process';
 
 const VERSION = '0.1.0';
 
-const USAGE = `walkie — CLI for Walkie notifications
+const USAGE = `walkie-notify — CLI for Walkie notifications
 
 Usage:
-  walkie send [options]              Send a notification via POST /api/v1/notify
-  walkie status <deliveryId> [options]   Fetch delivery status via GET /api/v1/deliveries/<id>
-  walkie --help | --version
+  walkie-notify send [options]              Send a notification via POST /api/v1/notify
+  walkie-notify status <deliveryId> [options]   Fetch delivery status via GET /api/v1/deliveries/<id>
+  walkie-notify --help | --version
 
 Options for send:
   --url <url>          Walkie base URL, e.g. https://walkie.example.com
@@ -26,8 +26,7 @@ Options for send:
   --body <text>        Notification body (required)
   --severity <level>   info | success | warning | critical (default: info)
   --tags <tags>        Pipe-separated tags, e.g. "ops|deploy"
-  --url <link>         Notification link URL (attach after --title/--body via --link)
-  --link <url>         Notification link URL (clearer alias for the link field)
+  --link <url>         Notification link, rendered as the message's click target
   --idempotency-key <k>  Dedup key: retries with the same key return the original delivery
   --json               Print the full JSON response instead of just the delivery ID
 
@@ -37,7 +36,7 @@ Options for status:
 Exit codes: 0 success, 1 usage error, 2 API error (response body printed to stderr).
 
 Example:
-  walkie send --url https://walkie.example.com --token rdk_xxx \\
+  walkie-notify send --url https://walkie.example.com --token rdk_xxx \\
     --to prod-alerts --title "Deploy failed" --body "v2.4.0 rollback executed" --severity critical
 `;
 
@@ -69,7 +68,7 @@ function parseArgs(argv) {
 }
 
 function usageError(message) {
-  process.stderr.write(`walkie: ${message}\n\n${USAGE}`);
+  process.stderr.write(`walkie-notify: ${message}\n\n${USAGE}`);
   process.exit(1);
 }
 
@@ -98,12 +97,12 @@ async function api(path, init) {
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...(init?.headers ?? {}) }
     });
   } catch (error) {
-    process.stderr.write(`walkie: request failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`walkie-notify: request failed: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exit(2);
   }
   const text = await response.text().catch(() => '');
   if (!response.ok) {
-    process.stderr.write(`walkie: HTTP ${response.status}: ${text.slice(0, 2000)}\n`);
+    process.stderr.write(`walkie-notify: HTTP ${response.status}: ${text.slice(0, 2000)}\n`);
     process.exit(2);
   }
   try {
@@ -118,6 +117,8 @@ if (command === 'send') {
   const title = String(args.title ?? '');
   const body = String(args.body ?? '');
   const link = String(args.link ?? '');
+  // --idempotency-key 落在 args['idempotency-key']；camelCase 别名一并接受
+  const idempotencyKey = String(args['idempotency-key'] ?? args.idempotencyKey ?? '');
   if (!destination) usageError('missing --to <destination>');
   if (!title) usageError('missing --title');
   if (!body) usageError('missing --body');
@@ -130,7 +131,7 @@ if (command === 'send') {
     severity,
     ...(args.tags ? { tags: String(args.tags) } : {}),
     ...(link ? { url: link } : {}),
-    ...(args.idempotencyKey ? { idempotencyKey: String(args.idempotencyKey) } : {})
+    ...(idempotencyKey ? { idempotencyKey } : {})
   };
 
   const result = await api('/api/v1/notify', { method: 'POST', body: JSON.stringify(payload) });

@@ -12,6 +12,7 @@ output/
 .claude/settings.local.json
 .dev.vars
 .wrangler/
+.wrangler-logs/
 .superpowers/
 
 # ZCode 工具会话与计划文件

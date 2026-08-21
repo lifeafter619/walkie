@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import type { MockFetch } from './helpers.js';
 import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../src/server/config.js';
@@ -55,7 +56,7 @@ describe('per-channel retry policy', () => {
   it('retries only maxAttempts times for a channel with maxAttempts=1 while global allows 4', async () => {
     const { repository, worker } = await setup(4);
     // 永远失败的发送器
-    const failing = new ProviderDispatcher(config, vi.fn(async () => new Response('boom', { status: 500 })) as unknown as typeof fetch);
+    const failing = new ProviderDispatcher(config, vi.fn(async () => new Response('boom', { status: 500 })) as unknown as MockFetch);
     const failingWorker = new DeliveryWorker(repository, failing, { deliveryWorkers: 1, maxDeliveryAttempts: 4, retryBaseMs: 1 });
     const onceChannel = await repository.createChannel({ name: 'Once', slug: 'once-c', provider: 'webhook', config: { url: 'https://x.example.com', method: 'POST', bodyTemplate: '{}' }, maxAttempts: 1 });
     const defaultChannel = await repository.createChannel({ name: 'Default', slug: 'default-c', provider: 'webhook', config: { url: 'https://x.example.com', method: 'POST', bodyTemplate: '{}' } });
@@ -70,8 +71,8 @@ describe('per-channel retry policy', () => {
 
     // listDeliveries 不带 attempts；用 getDelivery 取完整投递
     const summary = await repository.listDeliveries({});
-    const once = await repository.getDelivery(summary.find((item) => item.title === 'once')!.id)!;
-    const def = await repository.getDelivery(summary.find((item) => item.title === 'default')!.id)!;
+    const once = (await repository.getDelivery(summary.find((item) => item.title === 'once')!.id))!;
+    const def = (await repository.getDelivery(summary.find((item) => item.title === 'default')!.id))!;
     expect(once.status).toBe('failed');
     expect(once.attempts![0].attemptCount).toBe(1); // 只试 1 次
     expect(def.status).toBe('failed');

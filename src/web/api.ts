@@ -1,4 +1,4 @@
-import type { AdminToken, ApiKey, AuditEvent, Channel, Conversation, CredentialStatus, DashboardStats, Delivery, DeploymentPlatform, Destination, PlatformUsageInput, PlatformUsageStatus, ProviderDefinition, RetentionSettings, Route, Schedule, UsageSettings, UsageSnapshot } from '../shared/types';
+import type { AdminToken, ApiKey, AuditEvent, Channel, Conversation, CredentialStatus, DashboardStats, Delivery, DeploymentPlatform, Destination, InboxMessage, PlatformUsageInput, PlatformUsageStatus, ProviderDefinition, RetentionSettings, Route, Schedule, UsageSettings, UsageSnapshot } from '../shared/types';
 import type { CompatibilityEndpoint, PlatformProfile } from '../shared/platform';
 
 const TOKEN_KEY = 'walkie_admin_token';
@@ -33,7 +33,7 @@ export const api = {
   channels: () => request<{ channels: Channel[] }>('/api/admin/channels'),
   createChannel: (body: unknown) => request<Channel>('/api/admin/channels', { method: 'POST', body: JSON.stringify(body) }),
   updateChannel: (id: string, body: unknown) => request<Channel>(`/api/admin/channels/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
-  deleteChannel: (id: string) => request<void>(`/api/admin/channels/${id}`, { method: 'DELETE' }),
+  deleteChannel: (id: string, purge = false) => request<{ removed: boolean; disabled: boolean; purgedAttempts: number }>(`/api/admin/channels/${id}${purge ? '?purge=1' : ''}`, { method: 'DELETE' }),
   testChannel: (id: string) => request<{ success: boolean }>(`/api/admin/channels/${id}/test`, { method: 'POST' }),
   routes: () => request<{ routes: Route[] }>('/api/admin/routes'),
   createRoute: (body: unknown) => request<Route>('/api/admin/routes', { method: 'POST', body: JSON.stringify(body) }),
@@ -59,6 +59,11 @@ export const api = {
   cancelSchedule: (id: string) => request<Schedule>(`/api/admin/schedules/${id}/cancel`, { method: 'POST' }),
   conversations: (pending = false) => request<{ conversations: Conversation[] }>(`/api/admin/conversations${pending ? '?pending=1' : ''}`),
   replyConversation: (id: string, reply: string) => request<{ success: boolean }>(`/api/admin/conversations/${id}/reply`, { method: 'POST', body: JSON.stringify({ reply }) }),
+  inbox: (pending = false) => request<{ messages: InboxMessage[] }>(`/api/admin/inbox${pending ? '?pending=1' : ''}`),
+  sendToAgent: (body: string) => request<{ id: string }>('/api/admin/inbox', { method: 'POST', body: JSON.stringify({ body }) }),
+  webpush: () => request<{ vapidPublicKey: string; subscriptions: Array<{ endpoint: string; createdAt: string }> }>('/api/admin/webpush'),
+  subscribeWebpush: (body: unknown) => request<{ success: boolean }>('/api/admin/webpush/subscribe', { method: 'POST', body: JSON.stringify(body) }),
+  unsubscribeWebpush: (endpoint: string) => request<{ success: boolean }>(`/api/admin/webpush/subscribe?endpoint=${encodeURIComponent(endpoint)}`, { method: 'DELETE' }),
   credentials: () => request<CredentialStatus>('/api/admin/credentials'),
   auditEvents: (params: { limit?: number; actor?: string; action?: string } = {}) => {
     const query = new URLSearchParams();

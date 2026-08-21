@@ -98,11 +98,13 @@ function fail(message) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-if (args.help || args.h) {
+// -h/-v 不以 -- 开头，parseArgs 会把它们收进 _；短旗标同样要认
+const flagged = (long, short) => Boolean(args[long]) || args._.includes(short);
+if (flagged('help', '-h')) {
   process.stdout.write(USAGE);
   process.exit(0);
 }
-if (args.version || args.v) {
+if (flagged('version', '-v')) {
   process.stdout.write(`${VERSION}\n`);
   process.exit(0);
 }
@@ -203,6 +205,11 @@ function requestId(message) {
   return null;
 }
 
+/** JSON-RPC forbids a response to a notification; only requests (id present) get an error back. */
+function reportFailure(id, reason) {
+  if (id !== null) emitJsonRpcError(id, reason);
+}
+
 async function forward(message) {
   const id = requestId(message);
   const controller = new AbortController();
@@ -224,7 +231,7 @@ async function forward(message) {
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       const detail = text ? `: ${text.slice(0, 500)}` : '';
-      if (id !== null || !('id' in (message ?? {}))) emitJsonRpcError(id, `HTTP ${response.status} ${response.statusText}${detail}`);
+      reportFailure(id, `HTTP ${response.status} ${response.statusText}${detail}`);
       return;
     }
 
@@ -252,7 +259,7 @@ async function forward(message) {
     const reason = error && error.name === 'AbortError'
       ? `request timed out after ${Math.round(timeoutMs / 1000)}s`
       : (error instanceof Error ? error.message : String(error));
-    if (id !== null || !('id' in (message ?? {}))) emitJsonRpcError(id, reason);
+    reportFailure(id, reason);
   } finally {
     clearTimeout(timer);
   }
@@ -274,6 +281,23 @@ function drain() {
 }
 
 const rl = Readable.toWeb(process.stdin);
+/** Queue one parsed JSON-RPC message for forwarding, preserving stdin order. */
+function enqueue(text) {
+  if (!text) return;
+  let message;
+  try {
+    message = JSON.parse(text);
+  } catch {
+    emitJsonRpcError(null, `parse error: invalid JSON on stdin: ${text.slice(0, 200)}`);
+    return;
+  }
+  pending++;
+  chain = chain.then(() => forward(message)).finally(() => {
+    pending--;
+    drain();
+  });
+}
+
 try {
   const decoder = new TextDecoder();
   let buffer = '';
@@ -284,23 +308,11 @@ try {
     while ((index = buffer.indexOf('\n')) !== -1) {
       const line = buffer.slice(0, index).replace(/\r$/, '');
       buffer = buffer.slice(index + 1);
-      const text = line.trim();
-      if (!text) continue;
-      let message;
-      try {
-        message = JSON.parse(text);
-      } catch {
-        emitJsonRpcError(null, `parse error: invalid JSON on stdin: ${text.slice(0, 200)}`);
-        continue;
-      }
-      pending++;
-      chain = chain.then(() => forward(message)).finally(() => {
-        pending--;
-        drain();
-      });
+      enqueue(line.trim());
     }
   }
-  buffer += decoder.decode();
+  // A final message written without a trailing newline is still a message — don't drop it.
+  enqueue((buffer + decoder.decode()).replace(/\r$/, '').trim());
 } catch {
   /* stdin error — fall through to exit */
 }

@@ -19,6 +19,8 @@ import { assertKeyDestinations, validateChannelCreate, validateChannelUpdate, va
 import { barkFailure, barkSuccess, registerResponse, resolveBarkDestination, sendBark } from '../server/bark-compat.js';
 import { appriseSeverity, discordText, parseAlertmanager, prioritySeverity, safeCompatUrl, sendWithAgentKey, slackText } from '../server/compat.js';
 import { handleTelegramWebhook } from '../server/telegram-webhook.js';
+import { handleSlackEvent, handleSlackInteractive } from '../server/slack-interactive.js';
+import { handleDiscordInteraction } from '../server/discord-interactions.js';
 import { generateVapidKeys } from '../server/providers/webpush.js';
 import { openApiSpec } from '../shared/openapi.js';
 import { BodyTooLargeError, readBody, readTextBody } from './body.js';
@@ -215,7 +217,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
 
       // ---- 以下五个兼容端点必须在 legacyBark 正则之前匹配：那个模式吃掉任何 1–4 段路径 ----
 
-      // Telegram Bot webhook：inline_keyboard 按钮点按回调（ask_user 选项即点即回）
+      // Telegram Bot webhook：按钮回调 + 自由文本回复 + 收件箱（#11）
       const telegramWebhook = /^\/telegram\/webhook\/([^/]+)$/.exec(path);
       if (telegramWebhook && request.method === 'POST') {
         try {
@@ -225,6 +227,34 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
           console.error(JSON.stringify({ event: 'telegram.webhook.failed', message: error instanceof Error ? error.message : String(error) }));
           return json({ ok: true });
         }
+      }
+
+      // Slack Bot：按钮回调与消息事件。两者都对**原始请求体**验签，所以走 readTextBody
+      const slackInteractive = /^\/slack\/interactive\/([^/]+)$/.exec(path);
+      if (slackInteractive && request.method === 'POST') {
+        const result = await handleSlackInteractive(this.repository, await readTextBody(request), decodeURIComponent(slackInteractive[1]!), {
+          signature: request.headers.get('x-slack-signature') ?? undefined,
+          timestamp: request.headers.get('x-slack-request-timestamp') ?? undefined
+        });
+        return json(result.body, result.statusCode);
+      }
+      const slackEvents = /^\/slack\/events\/([^/]+)$/.exec(path);
+      if (slackEvents && request.method === 'POST') {
+        const result = await handleSlackEvent(this.repository, await readTextBody(request), decodeURIComponent(slackEvents[1]!), {
+          signature: request.headers.get('x-slack-signature') ?? undefined,
+          timestamp: request.headers.get('x-slack-request-timestamp') ?? undefined
+        });
+        return json(result.body, result.statusCode);
+      }
+
+      // Discord Interactions：Ed25519 强制验签（保存端点时 Discord 会故意发坏签名试探）
+      const discordInteractions = /^\/discord\/interactions\/([^/]+)$/.exec(path);
+      if (discordInteractions && request.method === 'POST') {
+        const result = await handleDiscordInteraction(this.repository, await readTextBody(request), decodeURIComponent(discordInteractions[1]!), {
+          signature: request.headers.get('x-signature-ed25519') ?? undefined,
+          timestamp: request.headers.get('x-signature-timestamp') ?? undefined
+        });
+        return json(result.body, result.statusCode);
       }
 
       // Slack Incoming Webhook：POST /services/<T>/<B>/<xxx>，末段为 Agent Key，成功返回纯文本 ok
@@ -456,7 +486,9 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       if (errors.length) return json({ error: errors.join('；') }, 400);
       return json(await this.repository.updateChannel(current!.id, { ...input, ...(provider !== undefined ? { provider: provider as ProviderId } : {}) }));
     }
-    if (channel && request.method === 'DELETE') { await this.repository.deleteChannel(channel[1]); return new Response(null, { status: 204 }); }
+    if (channel && request.method === 'DELETE') {
+      return json(await this.repository.deleteChannel(channel[1], 'admin', { purgeHistory: url.searchParams.get('purge') === '1' }));
+    }
     const testChannel = /^\/api\/admin\/channels\/([^/]+)\/test$/.exec(path);
     if (testChannel && request.method === 'POST') {
       const item = await this.repository.getChannel(testChannel[1]);
@@ -608,6 +640,18 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       const accepted = await this.repository.replyConversation(adminReply[1], text, 'admin');
       return accepted ? json({ success: true }) : json({ error: '会话已回复或已过期' }, 409);
     }
+    // 收件箱：人主动发给 Agent 的消息（与 Node 版行为一致）
+    if (path === '/api/admin/inbox' && request.method === 'GET') {
+      return json({ messages: await this.repository.listInboxMessages({
+        pendingOnly: url.searchParams.get('pending') === '1',
+        limit: Number(url.searchParams.get('limit') ?? 50)
+      }) });
+    }
+    if (path === '/api/admin/inbox' && request.method === 'POST') {
+      const text = String((await readBody(request)).body ?? '').trim().slice(0, 4000);
+      if (!text) return json({ error: '消息内容不能为空' }, 400);
+      return json(await this.repository.pushInboxMessage(text, 'admin'), 201);
+    }
     // Web Push 订阅管理（与 Node 版行为一致）
     if (path === '/api/admin/webpush' && request.method === 'GET') {
       let vapid = await this.repository.getPushVapidKeys();
@@ -717,7 +761,12 @@ export default {
     if (!env.MASTER_KEY) return setupRequired('还没有配置 MASTER_KEY，实例暂时无法启动。');
     if (Buffer.from(env.MASTER_KEY, 'base64').length !== 32) return setupRequired('MASTER_KEY 不是 base64 编码的 32 字节密钥。');
     const path = new URL(request.url).pathname;
-    if (path === '/health' || path === '/openapi.json' || path === '/push' || path === '/ping' || path === '/healthz' || path === '/info' || path === '/register' || path.startsWith('/register/') || path === '/mcp' || path.startsWith('/api/') || path.startsWith('/reply/') || /^\/(?:send\/)?[^/]+\.send$/.test(path) || /^\/(?!assets(?:\/|$))[^/]+(?:\/[^/]+){0,3}$/.test(path)) {
+    // 兜底分流给 DO 的是「1–4 段、末段不带扩展名」的路径（Bark 旧式路径等）。
+    // 必须排掉带扩展名的单段路径，否则 /sw.js、/favicon.ico、/robots.txt 会被 DO 吃掉返回 404，
+    // 永远到不了 ASSETS——run_worker_first 让 Worker 先跑，静态文件不会自动兜底。
+    // /<key>.send 是 Server酱兼容入口，由前一个显式判断先接走，不受这条排除影响。
+    const catchAll = /^\/(?!assets(?:\/|$)|[^/]*\.[^/]+$)[^/]+(?:\/[^/]+){0,3}$/;
+    if (path === '/health' || path === '/openapi.json' || path === '/push' || path === '/ping' || path === '/healthz' || path === '/info' || path === '/register' || path.startsWith('/register/') || path === '/mcp' || path.startsWith('/api/') || path.startsWith('/reply/') || /^\/(?:send\/)?[^/]+\.send$/.test(path) || catchAll.test(path)) {
       return env.WALKIE.getByName('default').fetch(request);
     }
     return env.ASSETS.fetch(request);

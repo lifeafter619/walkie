@@ -235,6 +235,26 @@ export function ChannelForm({
           <small>静默期内消息延后发送，critical 级别照常送达；起止时间都选择后生效，清空任一即关闭</small>
         </label>
 
+        {/* 双向回调：不填这个 URL，ask_user 的按钮与自由文本回复就回不来 */}
+        {channel?.callbackPath && (
+          <label>{channel.provider === 'slack-bot' ? '双向回调地址 · 按钮（Interactivity）' : '双向回调地址'}
+            <input readOnly value={`${window.location.origin}${channel.callbackPath}`} onFocus={(event) => event.currentTarget.select()} />
+            <small>
+              {channel.provider === 'telegram'
+                ? '把它填进 Telegram setWebhook 的 url，并把 URL 末段同时作为 secret_token；之后 ask_user 的按钮与直接给机器人发的消息都会回到本站。'
+                : channel.provider === 'discord-bot'
+                ? '填进 Discord Developer Portal → General Information → Interactions Endpoint URL。必须先在上面填好 Application Public Key，否则 Discord 保存端点时的验签探测会失败。'
+                : '填进 Slack App → Interactivity & Shortcuts 的 Request URL。'}
+            </small>
+          </label>
+        )}
+        {channel?.callbackPathAlt && (
+          <label>双向回调地址 · 消息事件（Event Subscriptions）
+            <input readOnly value={`${window.location.origin}${channel.callbackPathAlt}`} onFocus={(event) => event.currentTarget.select()} />
+            <small>填进 Slack App → Event Subscriptions 的 Request URL，并订阅 <code>message.channels</code>（私聊再加 <code>message.im</code>）。之后在频道里直接说一句话就能回答 ask_user，没有待回复问题时进 Agent 收件箱。</small>
+          </label>
+        )}
+
         <footer className="modal-actions">
           <Button type="button" onClick={close}>取消</Button>
           <Button type="submit" variant="primary" loading={busy} icon={Check}>保存频道</Button>
@@ -254,12 +274,16 @@ export function Channels({
 }) {
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('all');
+  // 有投递历史的频道删除时只软禁用，列表会越积越长；默认藏起停用的
+  const [showDisabled, setShowDisabled] = useState(false);
   const [editing, setEditing] = useState<Channel | null | 'new'>(null);
   const [busyId, setBusyId] = useState('');
 
+  const disabledCount = channels.filter((channel) => !channel.enabled).length;
   const filtered = channels.filter((channel) => {
     const provider = providers.find((item) => item.id === channel.provider);
-    return (category === 'all' || provider?.category === category)
+    return (showDisabled || channel.enabled)
+      && (category === 'all' || provider?.category === category)
       && `${channel.name} ${channel.slug} ${provider?.name}`.toLowerCase().includes(query.toLowerCase());
   });
 
@@ -275,9 +299,14 @@ export function Channels({
         await api.testChannel(channel.id);
         notify('success', '测试通知已送达');
       } else {
-        if (!confirm(`删除频道“${channel.name}”？历史投递使用中的频道将改为停用。`)) return;
-        await api.deleteChannel(channel.id);
-        notify('success', '频道已删除');
+        // 有投递历史的频道默认只软禁用（保住审计链）；再点一次删除时提供彻底清除
+        if (!confirm(`删除频道“${channel.name}”？被路由引用或有投递历史时将改为停用。`)) return;
+        const result = await api.deleteChannel(channel.id);
+        if (result.removed) notify('success', '频道已删除');
+        else if (confirm(`“${channel.name}”有投递历史，已改为停用。\n\n要连同它的投递记录一起彻底删除吗？此操作不可撤销。`)) {
+          const purged = await api.deleteChannel(channel.id, true);
+          notify('success', purged.removed ? `频道已彻底删除（清理 ${purged.purgedAttempts} 条投递记录）` : '频道仍被路由引用，请先从路由中移除');
+        } else notify('success', '频道已停用');
       }
       await refresh();
     } catch (error) {
@@ -309,6 +338,12 @@ export function Channels({
             <option value="sms">短信</option>
             <option value="universal">通用</option>
           </select>
+          {disabledCount > 0 && (
+            <label className="check-row toolbar-check">
+              <input type="checkbox" checked={showDisabled} onChange={(event) => setShowDisabled(event.target.checked)} />
+              显示已停用（{disabledCount}）
+            </label>
+          )}
         </div>
       </div>
 

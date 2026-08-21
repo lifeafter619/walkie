@@ -327,6 +327,9 @@ describe('HTTP API and MCP', () => {
       .send({ destination: channel.id, title: 'x', body: 'x', url: 'data:text/html,<b>' }).expect(400);
     await request(app).post('/api/v1/notify').set('Authorization', `Bearer ${secret}`)
       .send({ destination: channel.id, title: 'x', body: 'x', callbackUrl: 'javascript:alert(1)' }).expect(400);
+    // 2048 字符上限：合法 URL 不会更长；超长 URL 会把 Web Push 载荷顶爆
+    await request(app).post('/api/v1/notify').set('Authorization', `Bearer ${secret}`)
+      .send({ destination: channel.id, title: 'x', body: 'x', url: `https://example.com/${'a'.repeat(3000)}` }).expect(400);
     await request(app).post('/api/v1/notify').set('Authorization', `Bearer ${secret}`)
       .send({ destination: channel.id, title: 'ok', body: 'ok', url: 'https://example.com/a?b=1' }).expect(202);
 

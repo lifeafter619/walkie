@@ -21,7 +21,7 @@
     "start": "node dist/server/index.js",
     "test": "vitest run --config vitest.config.ts",
     "test:watch": "vitest --config vitest.config.ts",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.worker.json --noEmit && tsc -p tsconfig.vercel.json"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.worker.json --noEmit && tsc -p tsconfig.vercel.json && tsc -p tsconfig.test.json --noEmit"
   },
   "dependencies": {
     "@libsql/client": "^0.17.4",

@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { MockFetch } from './helpers.js';
 import { generateKeyPairSync } from 'node:crypto';
 import type { AppConfig } from '../src/server/config.js';
 import { PROVIDERS } from '../src/server/providers/catalog.js';
-import { ProviderDispatcher } from '../src/server/providers/dispatcher.js';
+import { ProviderDispatcher, type ProviderMessage } from '../src/server/providers/dispatcher.js';
 import type { ProviderId } from '../src/shared/types.js';
 
 // workerd（Cloudflare Workers 运行时）的 fetch 会校验 redirect 取值，只接受 follow/manual；
@@ -173,7 +174,7 @@ const MINIMAL_CONFIGS: Record<ProviderId, Record<string, unknown>> = {
   webpush: {}
 } as Record<string, Record<string, unknown>>;
 
-const message = { title: '兼容性验证', body: 'workerd 渠道矩阵测试', severity: 'info', url: 'https://example.com/r', metadata: {} };
+const message: ProviderMessage = { title: '兼容性验证', body: 'workerd 渠道矩阵测试', severity: 'info', url: 'https://example.com/r', metadata: {} };
 
 function makeWorkerdFetch(provider: ProviderId, calls: Array<{ url: string; init: RequestInit | undefined }>) {
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -194,7 +195,7 @@ describe('workerd 渠道兼容矩阵', () => {
       const configForProvider = MINIMAL_CONFIGS[provider.id];
       if (!configForProvider) { failures.push(`${provider.id}: 测试矩阵缺少最小配置`); continue; }
       const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
-      const dispatcher = new ProviderDispatcher(config, makeWorkerdFetch(provider.id, calls) as unknown as typeof fetch);
+      const dispatcher = new ProviderDispatcher(config, makeWorkerdFetch(provider.id, calls) as unknown as MockFetch);
       if (provider.id === 'webpush') {
         // Web Push 需要真实订阅与 VAPID；用一对测试密钥 + 合法 P-256 订阅（65 字节 raw 公钥）
         const { generateVapidKeys } = await import('../src/server/providers/webpush.js');
@@ -214,7 +215,7 @@ describe('workerd 渠道兼容矩阵', () => {
   });
 
   it('manual 模式下 3xx 重定向仍按失败处理（SSRF 防重定向语义不回归）', async () => {
-    const fetcher = vi.fn(async () => new Response('', { status: 302, headers: { location: 'http://127.0.0.1/x' } })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async () => new Response('', { status: 302, headers: { location: 'http://127.0.0.1/x' } })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(config, fetcher);
     await expect(dispatcher.send('telegram', MINIMAL_CONFIGS.telegram!, message)).rejects.toThrow('HTTP 302');
   });
@@ -222,7 +223,7 @@ describe('workerd 渠道兼容矩阵', () => {
 
 describe('pushsafer 错误响应健壮性', () => {
   it('error 为字符串时给出可读错误而不是 TypeError', async () => {
-    const fetcher = vi.fn(async () => new Response('{"status":0,"error":"Invalid key"}', { status: 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async () => new Response('{"status":0,"error":"Invalid key"}', { status: 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(config, fetcher);
     await expect(dispatcher.send('pushsafer', MINIMAL_CONFIGS['pushsafer']!, message)).rejects.toThrow('Invalid key');
   });

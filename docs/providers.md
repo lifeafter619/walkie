@@ -58,4 +58,6 @@ The newly added local artwork is downloaded from the brand assets used by each p
 
 ## Deliberately not native
 
-Direct APNs requires an HTTP/2 transport and direct Web Push requires VAPID payload encryption. The shared dispatcher runs in Node, Vercel and Cloudflare Workers, so these are not represented as a false “native” checkbox. Use Huawei/JPush/Getui/FCM/Expo/OneSignal/Pusher Beams/Pushpad (or Apprise) for those platforms until a runtime-specific transport and mature encryption library are available in every supported deployment target.
+Direct APNs requires an HTTP/2 transport, which the shared dispatcher (Node, Vercel, Cloudflare Workers) cannot provide everywhere, so it is not represented as a false "native" checkbox. Use Huawei/JPush/Getui/FCM/Expo/OneSignal/Pusher Beams/Pushpad (or Apprise) for that platform until a runtime-specific transport is available in every supported deployment target.
+
+Web Push **is** native as of the `webpush` provider: VAPID ES256 signing (RFC 8292) and aes128gcm payload encryption (RFC 8291) are implemented on `globalThis.crypto.subtle`, which exists in all three runtimes, with no third-party library. Subscribe the current browser from **System → Web Push** in the console; payloads over ~3.9 KB are truncated because push services reject bodies above 4 KB.

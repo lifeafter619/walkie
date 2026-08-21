@@ -23,6 +23,8 @@ import { assertKeyDestinations, validateChannelCreate, validateChannelUpdate, va
 import { barkFailure, barkSuccess, registerResponse, resolveBarkDestination, sendBark } from './bark-compat.js';
 import { appriseSeverity, discordText, parseAlertmanager, prioritySeverity, safeCompatUrl, sendWithAgentKey, slackText } from './compat.js';
 import { handleTelegramWebhook } from './telegram-webhook.js';
+import { handleSlackEvent, handleSlackInteractive } from './slack-interactive.js';
+import { handleDiscordInteraction } from './discord-interactions.js';
 import { generateVapidKeys } from './providers/webpush.js';
 import { parseMultipart } from '../shared/multipart.js';
 import { openApiSpec } from '../shared/openapi.js';
@@ -52,10 +54,37 @@ function bearer(req: Request): string | undefined {
 
 export function createApp(deps: AppDependencies) {
   const { config, repository, notifications, dispatcher, worker, platformUsage } = deps;
-  const app = createMcpExpressApp({ host: config.host, jsonLimit: '256kb' });
+  // Slack/Discord 的验签对象是**未解析的原始请求体**，而 createMcpExpressApp 内部第一位就注册了
+  // express.json——一旦它跑过，原始字节就没了。所以外层再包一个 app，把这三条签名路由排在
+  // 解析中间件之前，其余路由照旧挂在外层（mcpApp 作为中间件先跑完 json/host 校验再回来）。
+  const app = express();
+  const mcpApp = createMcpExpressApp({ host: config.host, jsonLimit: '256kb' });
   // 信任第一跳代理的 X-Forwarded-Proto/Host：反代 TLS 终止后 req.protocol 才能还原为 https，
   // 未设 PUBLIC_URL 时回复链接/元数据才不会生成 http://内网地址（req.ip 判定也只信任这一跳）
   app.set('trust proxy', 1);
+
+  const rawBody = express.raw({ type: '*/*', limit: '256kb' });
+  const rawText = (req: Request) => Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '';
+  app.post('/slack/interactive/:secret', rawBody, asyncRoute(async (req, res) => {
+    const result = await handleSlackInteractive(repository, rawText(req), String(req.params.secret), {
+      signature: req.header('x-slack-signature'), timestamp: req.header('x-slack-request-timestamp')
+    });
+    res.status(result.statusCode).json(result.body);
+  }));
+  app.post('/slack/events/:secret', rawBody, asyncRoute(async (req, res) => {
+    const result = await handleSlackEvent(repository, rawText(req), String(req.params.secret), {
+      signature: req.header('x-slack-signature'), timestamp: req.header('x-slack-request-timestamp')
+    });
+    res.status(result.statusCode).json(result.body);
+  }));
+  app.post('/discord/interactions/:secret', rawBody, asyncRoute(async (req, res) => {
+    const result = await handleDiscordInteraction(repository, rawText(req), String(req.params.secret), {
+      signature: req.header('x-signature-ed25519'), timestamp: req.header('x-signature-timestamp')
+    });
+    res.status(result.statusCode).json(result.body);
+  }));
+
+  app.use(mcpApp);
   // createMcpExpressApp 内部已注册 express.json（默认 100kb），此处传入 jsonLimit 统一为 256kb；
   // 不能再重复注册第二个 json 解析器，否则实际生效的仍是最先注册的 100kb 限制。
   app.use(express.urlencoded({ extended: false, limit: '256kb' }));
@@ -139,7 +168,11 @@ export function createApp(deps: AppDependencies) {
     if (errors.length) return res.status(400).json({ error: errors.join('；') });
     res.json(await repository.updateChannel(current!.id, { ...input, ...(provider !== undefined ? { provider: provider as ProviderId } : {}) }));
   }));
-  admin.delete('/channels/:id', asyncRoute(async (req, res) => { await repository.deleteChannel(String(req.params.id)); res.status(204).end(); }));
+  admin.delete('/channels/:id', asyncRoute(async (req, res) => {
+    // ?purge=1：连同该频道的投递历史一并删除。默认保守（软禁用），保住审计链
+    const result = await repository.deleteChannel(String(req.params.id), 'admin', { purgeHistory: req.query.purge === '1' });
+    res.json(result);
+  }));
   admin.post('/channels/:id/test', asyncRoute(async (req, res) => {
     const channel = await repository.getChannel(String(req.params.id));
     if (!channel) return res.status(404).json({ error: '频道不存在' });
@@ -273,6 +306,16 @@ export function createApp(deps: AppDependencies) {
     const accepted = await repository.replyConversation(String(req.params.id), reply, 'admin');
     if (!accepted) return res.status(409).json({ error: '会话已回复或已过期' });
     res.json({ success: true });
+  }));
+
+  // 收件箱：人主动发给 Agent 的消息；Agent 侧由 MCP wait_for_inbox 取走
+  admin.get('/inbox', asyncRoute(async (req, res) => res.json({
+    messages: await repository.listInboxMessages({ pendingOnly: req.query.pending === '1', limit: Number(req.query.limit ?? 50) })
+  })));
+  admin.post('/inbox', asyncRoute(async (req, res) => {
+    const text = String((req.body as Record<string, unknown>)?.body ?? '').trim().slice(0, 4000);
+    if (!text) return res.status(400).json({ error: '消息内容不能为空' });
+    res.status(201).json(await repository.pushInboxMessage(text, 'admin'));
   }));
 
   // Web Push 订阅管理（#6）：控制台登录后订阅本设备；VAPID 密钥对惰性生成存 settings
@@ -447,7 +490,7 @@ export function createApp(deps: AppDependencies) {
     } catch (error) { res.status(400).json({ code: 400, error: error instanceof Error ? error.message : '推送失败' }); }
   }));
 
-  // Telegram Bot webhook：inline_keyboard 按钮点按回调（ask_user 选项即点即回）
+  // Telegram Bot webhook：inline_keyboard 按钮点按回调 + 自由文本回复 + 收件箱（#11）
   app.post('/telegram/webhook/:secret', asyncRoute(async (req, res) => {
     try {
       const result = await handleTelegramWebhook(repository, (url, init) => dispatcher.rawPost(url, init), req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {}, req.header('x-telegram-bot-api-secret-token'));
@@ -458,6 +501,9 @@ export function createApp(deps: AppDependencies) {
       console.error(JSON.stringify({ event: 'telegram.webhook.failed', message: error instanceof Error ? error.message : String(error) }));
     }
   }));
+
+  // Slack Bot 交互回调与 Discord Interactions 需要原始请求体验签，已在文件顶部的外层
+  // app 上注册（必须排在 body 解析中间件之前）。
 
   // ---- 以下五个兼容端点都必须注册在 barkLegacy 正则之前：那个模式吃掉任何 1–4 段路径 ----
 

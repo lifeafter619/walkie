@@ -20,7 +20,7 @@ export function createRelayMcpServer(repository: RelayRepository, notifications:
     { name: 'Walkie', version: VERSION },
     {
       supportedProtocolVersions: ['2026-07-28', ...SUPPORTED_PROTOCOL_VERSIONS],
-      instructions: 'Use list_destinations before sending. Call send_notification with an allowed destination slug or ID, then use get_delivery with the returned deliveryId when delivery status is needed. To ask the human a question, call ask_user, then poll check_reply with the returned conversationId until status is replied or the deadline passes. Never invent destination IDs.'
+      instructions: 'Use list_destinations before sending. Call send_notification with an allowed destination slug or ID, then use get_delivery with the returned deliveryId when delivery status is needed. To ask the human a question, call ask_user, then poll check_reply with the returned conversationId until status is replied or the deadline passes. During long-running work, call wait_for_inbox every 30-60 seconds so messages the human sends you unprompted are picked up; acknowledge anything it returns before continuing. Never invent destination IDs.'
         + (apiKey.scopes.includes('config:write')
           ? ' When the user asks to set up or change notification channels or routes: call list_channel_types to learn the provider\'s required fields, ask the user for any missing required values, then create_channel, test_channel, and report the result. Never echo config values back to the user or logs.'
           : '')
@@ -125,6 +125,25 @@ export function createRelayMcpServer(repository: RelayRepository, notifications:
       if (status !== 'pending' || Date.now() >= deadline) {
         return result({ status, reply: conversation.reply, repliedAt: conversation.repliedAt, expiresAt: conversation.expiresAt });
       }
+      await sleep(1000);
+    }
+  });
+
+  // 人主动找 Agent 的通路：控制台「会话」页或聊天渠道（Telegram 直接发消息）写入收件箱。
+  // 大多数 MCP 客户端会丢弃服务端 notification，只有 tool 结果一定会被呈现——所以做成长轮询工具
+  if (apiKey.scopes.includes('notifications:send')) server.registerTool('wait_for_inbox', {
+    title: 'Wait for messages from the human',
+    description: 'Long-poll for unsolicited messages the human sent you (from the Walkie console or by messaging a connected chat channel such as Telegram). Waits up to waitSeconds and returns as soon as anything arrives; returns an empty list on timeout. Claimed messages are never returned twice. Call this periodically during long-running work so the human can steer you mid-task.',
+    inputSchema: z.object({
+      waitSeconds: z.number().int().min(0).max(25).default(20),
+      limit: z.number().int().min(1).max(100).default(20)
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
+  }, async ({ waitSeconds, limit }) => {
+    const deadline = Date.now() + waitSeconds * 1000;
+    for (;;) {
+      const messages = await repository.claimInboxMessages(`agent:${apiKey.id}`, limit);
+      if (messages.length || Date.now() >= deadline) return result({ messages, count: messages.length });
       await sleep(1000);
     }
   });

@@ -30,6 +30,8 @@ const BODY_LIMITS: Partial<Record<ProviderId, number>> = {
   'oppo-push': 200, 'vivo-push': 100, 'meizu-push': 100, pushsafer: 1000
 };
 const BODY_BYTE_LIMITS: Partial<Record<ProviderId, number>> = { wecom: 2600, webex: 6000, ntfy: 4096, pushover: 900, pushy: 3000 };
+/** Web Push 明文载荷上限：4096 字节请求体 - 103 字节 aes128gcm 头 - 16 字节 tag - 余量 */
+const PUSH_PAYLOAD_LIMIT = 3900;
 
 /** 按上限切分正文，优先在换行处断开 */
 export function splitBody(body: string, limit: number): string[] {
@@ -92,7 +94,7 @@ const signRs256 = async (value: string, pem: string): Promise<string> => {
   return Buffer.from(await globalThis.crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(value))).toString('base64url');
 };
 
-export function buildAliyunSmsRequest(config: Record<string, unknown>, message: ProviderMessage, nonce = randomUUID(), date = new Date()): { url: string; init: RequestInit } {
+export function buildAliyunSmsRequest(config: Record<string, unknown>, message: ProviderMessage, nonce: string = randomUUID(), date = new Date()): { url: string; init: RequestInit } {
   const params: Record<string, string> = {
     AccessKeyId: string(config, 'accessKeyId'), Action: 'SendSms', Format: 'JSON',
     PhoneNumbers: string(config, 'phoneNumbers'), RegionId: string(config, 'regionId') || 'cn-hangzhou',
@@ -126,7 +128,8 @@ export function buildTencentSmsRequest(config: Record<string, unknown>, message:
   return { url: `https://${host}/`, init: { method: 'POST', headers: { Authorization: authorization, 'Content-Type': 'application/json; charset=utf-8', 'X-TC-Action': 'SendSms', 'X-TC-Version': '2021-01-11', 'X-TC-Timestamp': String(timestamp), 'X-TC-Region': string(config, 'region') || 'ap-guangzhou' }, body: payload } };
 }
 
-export function buildAwsSnsRequest(config: Record<string, unknown>, message: ProviderMessage, date = new Date()): { url: string; init: RequestInit } {  const region = string(config, 'region') || 'us-east-1';
+export function buildAwsSnsRequest(config: Record<string, unknown>, message: ProviderMessage, date = new Date()): { url: string; init: RequestInit } {
+  const region = string(config, 'region') || 'us-east-1';
   const host = `sns.${region}.${region.startsWith('cn-') ? 'amazonaws.com.cn' : 'amazonaws.com'}`;
   const amzDate = date.toISOString().replace(/[-:]|\.\d{3}/g, '').replace(/Z$/, 'Z');
   const shortDate = amzDate.slice(0, 8);
@@ -426,7 +429,8 @@ export class ProviderDispatcher {
     return { value, projectId };
   }
 
-  private async buildRequest(provider: ProviderId, config: Record<string, unknown>, message: ProviderMessage): Promise<{ url: string; init: RequestInit }> {
+  /** 构造单条渠道请求。公开以便测试直接断言 URL/头/载荷，不必真的发出去。 */
+  async buildRequest(provider: ProviderId, config: Record<string, unknown>, message: ProviderMessage): Promise<{ url: string; init: RequestInit }> {
     const bodyText = text(message);
     switch (provider) {
       case 'walkie': {
@@ -645,18 +649,40 @@ export class ProviderDispatcher {
           unfurl_links: false
         };
         if (config.threadTs) payload.thread_ts = string(config, 'threadTs');
-        // ask_user 会话的选项渲染成内联按钮（Slack Block Kit）
+        // ask_user 会话的选项渲染成内联按钮（Slack Block Kit）；
+        // value 填 <conversationId>:<index>，由 POST /slack/interactive/<secret> 收回
         const options = Array.isArray(message.metadata.askOptions) ? message.metadata.askOptions.map(String) : [];
         if (options.length && typeof message.metadata.conversationId === 'string') {
           payload.blocks = [
             { type: 'section', text: { type: 'mrkdwn', text: `*${message.title}*\n${message.body}` } },
-            { type: 'actions', elements: options.slice(0, 5).map((option, index) => ({ type: 'button', text: { type: 'plain_text', text: option.slice(0, 75) }, action_id: `walkie_ask_${index}` })) }
+            { type: 'actions', elements: options.slice(0, 5).map((option, index) => ({
+              type: 'button',
+              text: { type: 'plain_text', text: option.slice(0, 75) },
+              action_id: `walkie_ask_${index}`,
+              value: `${message.metadata.conversationId}:${index}`
+            })) }
           ];
         }
         return { url: 'https://slack.com/api/chat.postMessage', init: this.json(payload, { Authorization: `Bearer ${string(config, 'botToken')}` }) };
       }
-      case 'discord-bot':
-        return { url: `https://discord.com/api/v10/channels/${encodeURIComponent(string(config, 'channelId'))}/messages`, init: this.json({ content: message.url ? `${message.title}\n${message.body}\n${message.url}` : `${message.title}\n${message.body}` }, { Authorization: `Bot ${string(config, 'botToken')}` }) };
+      case 'discord-bot': {
+        const payload: Record<string, unknown> = {
+          content: message.url ? `${message.title}\n${message.body}\n${message.url}` : `${message.title}\n${message.body}`
+        };
+        // ask_user 的选项渲染成按钮行；custom_id 填 <conversationId>:<index>，
+        // 由 POST /discord/interactions/<secret> 收回（一行最多 5 个按钮）
+        const options = Array.isArray(message.metadata.askOptions) ? message.metadata.askOptions.map(String) : [];
+        if (options.length && typeof message.metadata.conversationId === 'string') {
+          payload.components = [{
+            type: 1,
+            components: options.slice(0, 5).map((option, index) => ({
+              type: 2, style: 1, label: option.slice(0, 80),
+              custom_id: `${message.metadata.conversationId}:${index}`
+            }))
+          }];
+        }
+        return { url: `https://discord.com/api/v10/channels/${encodeURIComponent(string(config, 'channelId'))}/messages`, init: this.json(payload, { Authorization: `Bot ${string(config, 'botToken')}` }) };
+      }
       case 'feishu-app': {
         const token = await this.feishuToken(config);
         const receiveIdType = string(config, 'receiveIdType') || 'open_id';
@@ -946,14 +972,27 @@ export class ProviderDispatcher {
   /** Web Push：对本站所有订阅逐个加密投递（RFC 8291 每订阅单独 ECDH，不能复用密文） */
   private async sendWebPush(message: ProviderMessage): Promise<ProviderResult> {
     const { subscriptions, vapid } = await this.pushSubscriptions();
-    if (!subscriptions.length) throw new Error('还没有任何 Web Push 订阅；在「系统 → Web Push」页订阅本设备');
-    const payload = JSON.stringify({
+    if (!subscriptions.length) throw new Error('还没有任何 Web Push 订阅；在「系统 → Web Push」面板订阅本设备');
+    const build = (body: string, options: { dropUrl?: boolean } = {}) => JSON.stringify({
       title: message.title,
-      body: message.body,
+      body,
       severity: message.severity,
-      ...(message.url ? { url: message.url } : {}),
+      ...(!options.dropUrl && message.url ? { url: message.url } : {}),
       ...(typeof message.metadata.conversationId === 'string' ? { conversationId: message.metadata.conversationId } : {})
     });
+    // 推送服务普遍把整个请求体限制在 4096 字节，密文还要多带 103 字节头 + 16 字节 tag。
+    // 不截断的话，超长载荷会被 413 整条丢掉——先丢链接、再截正文，保通知本身能到达
+    let payload = build(message.body);
+    if (Buffer.byteLength(payload, 'utf8') > PUSH_PAYLOAD_LIMIT && message.url) {
+      payload = build(message.body, { dropUrl: true });
+    }
+    if (Buffer.byteLength(payload, 'utf8') > PUSH_PAYLOAD_LIMIT) {
+      const overflow = Buffer.byteLength(payload, 'utf8') - PUSH_PAYLOAD_LIMIT;
+      // 下限 64 字节：标题本身就吃满额度时仍留一段正文，也避免 splitBodyBytes 逐字符切
+      const body = message.body;
+      const room = Math.max(64, Buffer.byteLength(body, 'utf8') - overflow - 8);
+      payload = build(`${splitBodyBytes(body, room)[0] ?? ''}…`, { dropUrl: true });
+    }
     let delivered = 0;
     let lastError = '';
     const expired: string[] = [];
@@ -978,7 +1017,7 @@ export class ProviderDispatcher {
     }
     if (expired.length) this.onPushExpired?.(expired);
     if (!delivered) throw new Error(`Web Push 全部订阅失败${lastError ? `：${lastError}` : ''}`);
-    return { responseCode: 200, response: `delivered to ${subscriptions.length}` };
+    return { responseCode: 200, response: `delivered to ${delivered}/${subscriptions.length}` };
   }
 
   private async sendSmtp(config: Record<string, unknown>, message: ProviderMessage): Promise<ProviderResult> {

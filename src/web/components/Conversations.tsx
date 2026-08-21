@@ -1,18 +1,90 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { LoaderCircle, MessageCircleQuestion, RefreshCw, Send } from 'lucide-react';
-import type { Conversation } from '../../shared/types';
+import { Inbox, LoaderCircle, MessageCircleQuestion, RefreshCw, Send } from 'lucide-react';
+import type { Conversation, InboxMessage } from '../../shared/types';
 import { api } from '../api';
 import { Badge, Empty, IconButton, Notify, formatDate } from './ui';
 
 /* ────────────────────────────────────────────────────────────
  * 会话：Agent 通过 ask_user 提出的问题，管理员在此直接回复。
+ * 收件箱：反方向——人主动发给 Agent 的消息，Agent 用 MCP wait_for_inbox 取走。
  * 有待回复会话时自动轮询（Agent 正在阻塞等待，需要尽快看到）。
  * ──────────────────────────────────────────────────────────── */
 
 const statusOf = (conversation: Conversation): 'pending' | 'replied' | 'expired' =>
   conversation.repliedAt ? 'replied' : conversation.expiresAt <= new Date().toISOString() ? 'expired' : 'pending';
 
-const SOURCE_LABEL: Record<string, string> = { admin: '控制台', 'reply-link': '回复链接' };
+const SOURCE_LABEL: Record<string, string> = {
+  admin: '控制台', 'reply-link': '回复链接',
+  'telegram-callback': 'Telegram 按钮', 'telegram-message': 'Telegram 回复',
+  'slack-button': 'Slack 按钮', 'slack-message': 'Slack 回复', 'discord-button': 'Discord 按钮'
+};
+
+/** 收件箱：人主动找 Agent。Agent 调 wait_for_inbox 时取走，取走后标记已读 */
+function InboxBox({ notify }: { notify: Notify }) {
+  const [messages, setMessages] = useState<InboxMessage[]>();
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+
+  const load = useCallback(async (quiet = false) => {
+    try {
+      setMessages((await api.inbox()).messages);
+    } catch (error) {
+      if (!quiet) notify('error', error instanceof Error ? error.message : '加载收件箱失败');
+    }
+  }, [notify]);
+
+  useEffect(() => { void load(); }, [load]);
+  // 未读消息说明 Agent 还没来取，轮询看它什么时候读到
+  const hasUnread = messages?.some((item) => !item.claimedAt) ?? false;
+  useEffect(() => {
+    if (!hasUnread) return;
+    const timer = window.setInterval(() => void load(true), 8000);
+    return () => window.clearInterval(timer);
+  }, [hasUnread, load]);
+
+  const send = async (event: FormEvent) => {
+    event.preventDefault();
+    const text = draft.trim();
+    if (!text || sending) return;
+    setSending(true);
+    try {
+      await api.sendToAgent(text);
+      setDraft('');
+      notify('success', 'Agent 下次调用 wait_for_inbox 时会读到');
+      await load(true);
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : '发送失败');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <section className="panel inbox-panel">
+      <div className="section-head">
+        <h2>发消息给 Agent</h2>
+        <Inbox size={15} className="muted" />
+      </div>
+      <form className="conv-reply-form inbox-form" onSubmit={send}>
+        <input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="不用等 Agent 提问，直接说…" maxLength={4000} disabled={sending} />
+        <IconButton type="submit" label="发送给 Agent" icon={Send} spin={sending} disabled={sending || !draft.trim()} />
+      </form>
+      {messages && messages.length > 0 && (
+        <ul className="inbox-list">
+          {messages.slice(0, 20).map((item) => (
+            <li key={item.id} className={item.claimedAt ? 'claimed' : ''}>
+              <span className="inbox-body">{item.body}</span>
+              <small>{formatDate(item.createdAt)} · 来自 {item.source} · {item.claimedAt ? `已被 ${item.claimedBy} 读取` : '等待 Agent 读取'}</small>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="panel-note">
+        Agent 需带 <code>notifications:send</code> 权限并调用 MCP 工具 <code>wait_for_inbox</code>（长轮询）取走消息。已连接 Telegram 频道时，直接给机器人发消息也会进这里。
+      </p>
+    </section>
+  );
+}
 
 export function Conversations({ notify, onChanged }: { notify: Notify; onChanged: () => void }) {
   const [items, setItems] = useState<Conversation[]>();
@@ -77,6 +149,8 @@ export function Conversations({ notify, onChanged }: { notify: Notify; onChanged
           <button type="button" role="tab" aria-selected={pendingOnly} className={pendingOnly ? 'active' : ''} onClick={() => setPendingOnly(true)}>待回复</button>
         </div>
       </div>
+
+      <InboxBox notify={notify} />
 
       {items === undefined ? (
         <section className="panel"><div className="modal-loading"><LoaderCircle className="spin" /></div></section>

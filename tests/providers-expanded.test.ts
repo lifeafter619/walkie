@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from 'node:crypto';
+import type { MockFetch } from './helpers.js';
 import { readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -94,7 +95,7 @@ describe('expanded provider catalog', () => {
 
 describe('expanded provider request contracts', () => {
   it('builds WhatsApp, Signal and KOOK requests', async () => {
-    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(appConfig, fetcher);
     await dispatcher.send('whatsapp', { phoneNumberId: '123', accessToken: 'meta-token', to: '+8613800000000', graphVersion: 'v25.0', mode: 'text' }, message);
     await dispatcher.send('signal', { server: 'https://signal.example.com', number: '+1000', recipients: '+2000\n+3000' }, message);
@@ -114,7 +115,7 @@ describe('expanded provider request contracts', () => {
       if (target.includes('gettoken')) return new Response(JSON.stringify({ errcode: 0, access_token: 'wecom-token', expires_in: 7200 }), { status: 200 });
       if (target.includes('getAppAccessToken')) return new Response(JSON.stringify({ access_token: 'qq-token', expires_in: '7200' }), { status: 200 });
       return new Response(JSON.stringify(target.includes('qyapi.weixin.qq.com') ? { errcode: 0, msgid: 'wx-1' } : { id: 'qq-1' }), { status: 200 });
-    }) as unknown as typeof fetch;
+    }) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(appConfig, fetcher);
     const wecom = { corpId: 'corp', secret: 'secret', agentId: '1001', toUser: '@all' };
     const qq = { appId: 'app', clientSecret: 'secret', targetType: 'channel', targetId: 'channel' };
@@ -142,7 +143,7 @@ describe('expanded provider request contracts', () => {
         return new Response(JSON.stringify({ errcode: 0, access_token: 'wecom-token', expires_in: 7200 }), { status: 200 });
       }
       return new Response(JSON.stringify({ errcode: 0, msgid: 'wx-1' }), { status: 200 });
-    }) as unknown as typeof fetch;
+    }) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(appConfig, fetcher);
     const config = { corpId: 'corp', secret: 'secret', agentId: '1001', toUser: '@all' };
 
@@ -158,7 +159,7 @@ describe('expanded provider request contracts', () => {
     const fetcher = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       if (String(url).includes('oauth2.googleapis.com')) return new Response(JSON.stringify({ access_token: 'fcm-access', expires_in: 3600 }), { status: 200 });
       return new Response(JSON.stringify({ name: 'projects/project-1/messages/1' }), { status: 200 });
-    }) as unknown as typeof fetch;
+    }) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(appConfig, fetcher);
     await dispatcher.send('fcm', { serviceAccountJson, targetType: 'topic', target: '/topics/ops' }, message);
 
@@ -171,7 +172,7 @@ describe('expanded provider request contracts', () => {
   });
 
   it('builds Expo and OneSignal push requests and surfaces ticket failures', async () => {
-    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(appConfig, fetcher);
     await dispatcher.send('expo', { pushTokens: 'ExpoPushToken[token1]\nExponentPushToken[token2]', accessToken: 'expo-access' }, message);
     await dispatcher.send('onesignal', { appId: 'app-1', apiKey: 'rest-key', externalIds: 'user-1\nuser-2' }, message);
@@ -190,7 +191,7 @@ describe('expanded provider request contracts', () => {
     ['mailgun', { apiKey: 'mg', domain: 'mg.example.com', from: 'from@example.com', to: 'a@example.com', region: 'eu' }, 'api.eu.mailgun.net', null],
     ['brevo', { apiKey: 'br', from: 'from@example.com', to: 'a@example.com,b@example.com' }, 'api.brevo.com', null]
   ] as const)('builds the %s email API request', async (provider, config, host, authorization) => {
-    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: provider === 'sendgrid' ? 202 : 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: provider === 'sendgrid' ? 202 : 200 })) as unknown as MockFetch;
     await new ProviderDispatcher(appConfig, fetcher).send(provider, config, message);
     expect(String(fetcher.mock.calls[0][0])).toContain(host);
     if (authorization) expect(new Headers(fetcher.mock.calls[0][1]?.headers).get('authorization')).toBe(authorization);
@@ -208,7 +209,7 @@ describe('expanded provider request contracts', () => {
   });
 
   it('builds Home Assistant, Nextcloud Talk, Alertmanager and Jira requests', async () => {
-    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: String(url).includes('atlassian') || String(url).includes('nextcloud') ? 201 : 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: String(url).includes('atlassian') || String(url).includes('nextcloud') ? 201 : 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(appConfig, fetcher);
     await dispatcher.send('home-assistant', { server: 'https://home.example.com', accessToken: 'ha-token', service: 'mobile_app_phone' }, message);
     await dispatcher.send('nextcloud-talk', { server: 'https://nextcloud.example.com', username: 'bot', appPassword: 'pass', conversationToken: 'room' }, message);
@@ -236,7 +237,7 @@ describe('expanded provider request contracts', () => {
 
 describe('additional provider request contracts', () => {
   it('builds Join, IFTTT, Novu, Knock and Courier requests', async () => {
-    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(appConfig, fetcher);
     await dispatcher.send('join', { apiKey: 'join-key', deviceIds: 'device-1\ndevice-2' }, message);
     await dispatcher.send('ifttt', { key: 'ifttt-key', event: 'database_alert' }, message);
@@ -283,7 +284,7 @@ describe('additional provider request contracts', () => {
   });
 
   it('builds HONOR, OPPO, vivo, Meizu, Pushy, Pushsafer and Simplepush requests', async () => {
-    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(appConfig, fetcher);
     await dispatcher.send('honor-push', { appId: 'honor-app', clientId: 'honor-client', clientSecret: 'honor-secret', targets: 'honor-token-1\nhonor-token-2' }, message);
     await dispatcher.send('oppo-push', { appKey: 'oppo-key', masterSecret: 'oppo-secret', targetType: 'registrationId', targets: 'oppo-token' }, message);
@@ -354,7 +355,7 @@ describe('additional provider request contracts', () => {
   });
 
   it('builds Huawei, Xiaomi, JPush, Getui, Pusher Beams and Pushpad requests', async () => {
-    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(appConfig, fetcher);
     await dispatcher.send('huawei-push', { appId: 'hms-app', appSecret: 'hms-secret', targetType: 'token', targets: 'hms-token' }, message);
     await dispatcher.send('xiaomi-push', { appSecret: 'mi-secret', packageName: 'com.example', targetType: 'alias', target: 'user-1' }, message);
@@ -380,7 +381,7 @@ describe('additional provider request contracts', () => {
     expect(new Headers(aws.init.headers).get('authorization')).toBe('AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260817/us-east-1/sns/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=cb971f2b9c00fb63667ea62086a25c3a88c967339b19cc6d1d95ad2c9a991996');
     expect(new Headers(aws.init.headers).get('x-amz-date')).toBe('20260817T000000Z');
 
-    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: String(url).includes('api.bird.com') ? 202 : 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(JSON.stringify(responseFor(String(url))), { status: String(url).includes('api.bird.com') ? 202 : 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(appConfig, fetcher);
     await dispatcher.send('vonage-sms', { apiKey: 'vonage-key', apiSecret: 'vonage-secret', from: 'RelayDock', to: '15551234567' }, message);
     await dispatcher.send('plivo-sms', { authId: 'MA123', authToken: 'plivo-secret', from: '+15551234567', to: '+15559876543' }, message);

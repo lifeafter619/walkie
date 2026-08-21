@@ -13,7 +13,8 @@ const MOBILE_PUSH_PROVIDERS: ReadonlySet<string> = new Set([
 
 /** 返回静默结束时刻；不在静默期返回 undefined。quietHours 形如 "22:00-08:00"（服务器本地时间）
  *  或 "22:00-08:00@Asia/Shanghai"（显式 IANA 时区；Cloudflare Workers 本地时间恒为 UTC，务必带时区） */
-export function quietUntil(quietHours: string | undefined, severity: Severity, at = new Date()): Date | undefined {  if (!quietHours || severity === 'critical') return undefined;
+export function quietUntil(quietHours: string | undefined, severity: Severity, at = new Date()): Date | undefined {
+  if (!quietHours || severity === 'critical') return undefined;
   const match = /^(\d{2}):(\d{2})-(\d{2}):(\d{2})(?:@(.+))?$/.exec(quietHours);
   if (!match) return undefined;
   let minutes: number;

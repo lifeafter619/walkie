@@ -42,6 +42,10 @@ describe('walkie CLI', () => {
     const status = await cli(['status', 'd-42']);
     expect(JSON.parse(status.stdout)).toMatchObject({ id: 'd-42', status: 'delivered' });
 
+    // --idempotency-key 落在 args['idempotency-key']，读 camelCase 会静默丢掉整个去重键
+    await cli(['send', '--to', 'x', '--title', 't', '--body', 'b', '--idempotency-key', 'deploy-42']);
+    expect(received[1]!.body).toMatchObject({ idempotencyKey: 'deploy-42' });
+
     await expect(cli(['send', '--to', 'x', '--title', 't', '--body', 'b', '--severity', 'bogus'])).rejects.toMatchObject({ code: 1 });
     server.close();
   }, 20_000);

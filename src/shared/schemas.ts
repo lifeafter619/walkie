@@ -3,15 +3,17 @@ import { z } from 'zod';
 export const slugSchema = z.string().min(2).max(80).regex(/^[a-z0-9][a-z0-9-]*$/, '只允许小写字母、数字和连字符');
 
 /** 安全链接：z.url() 只做语法校验，javascript:/data: 等危险 scheme 会原样放行；
- *  通知 URL 会被渲染成管理面板里可点击的 <a href>，恶意 Agent 借此投毒即成存储型 XSS。 */
+ *  通知 URL 会被渲染成管理面板里可点击的 <a href>，恶意 Agent 借此投毒即成存储型 XSS。
+ *  2048 上限：合法 URL 不会更长，也防超长 URL 把 Web Push 载荷顶爆。 */
 export const safeLinkSchema = z.url().refine((value) => {
+  if (value.length > 2048) return false;
   try {
     const protocol = new URL(value).protocol;
     return protocol === 'https:' || protocol === 'http:';
   } catch {
     return false;
   }
-}, '链接只允许 HTTP 或 HTTPS');
+}, '链接只允许 HTTP 或 HTTPS，且不能超过 2048 个字符');
 export const quietHoursSchema = z.string()
   .regex(/^(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d(?:@[\w/+-]+)?$/, '格式应为 HH:MM-HH:MM，可选 @时区（如 @Asia/Shanghai）')
   .or(z.literal('')).nullish();

@@ -22,5 +22,12 @@
     "model-context-protocol",
     "ai-agents",
     "cli"
-  ]
+  ],
+  "files": [
+    "walkie-mcp.mjs",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

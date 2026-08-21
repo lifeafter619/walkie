@@ -10,6 +10,7 @@ import type {
   Delivery,
   DeliveryAttempt,
   Destination,
+  InboxMessage,
   MasterKeyStatus,
   PlatformUsageMetric,
   PlatformUsageRuntime,
@@ -25,6 +26,7 @@ import type {
 } from '../shared/types.js';
 import {
   adminTokenPrefix,
+  channelCallbackSecret,
   createApiSecret,
   decryptJson,
   encryptJson,
@@ -116,7 +118,8 @@ export class RelayRepository {
         provider TEXT NOT NULL, config_encrypted TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
         last_test_status TEXT NOT NULL DEFAULT 'untested', last_test_error TEXT, last_test_at TEXT,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-      );      CREATE TABLE IF NOT EXISTS routes (
+      );
+      CREATE TABLE IF NOT EXISTS routes (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
         strategy TEXT NOT NULL, channel_ids TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -174,6 +177,11 @@ export class RelayRepository {
         endpoint TEXT PRIMARY KEY, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
         user_agent TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS inbox_messages (
+        id TEXT PRIMARY KEY, body TEXT NOT NULL, source TEXT NOT NULL,
+        created_at TEXT NOT NULL, claimed_at TEXT, claimed_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS inbox_pending ON inbox_messages(claimed_at, created_at);
     `);
     const channelColumns = new Set((await this.db.all('PRAGMA table_info(channels)')).map((row) => String(row.name)));
     if (!channelColumns.has('rate_limit_per_min')) await this.db.exec('ALTER TABLE channels ADD COLUMN rate_limit_per_min INTEGER');
@@ -231,12 +239,27 @@ export class RelayRepository {
 
   private channelFrom(row: Row): Channel {
     const config = decryptJson(String(row.config_encrypted), this.encryptionKey());
+    const provider = row.provider as ProviderId;
+    // 双向回调端点：Telegram/Slack/Discord 的按钮与自由文本回复要靠它接回来。
+    // 由 botToken 派生，无需额外配置项；控制台「频道」页直接展示完整 URL 供粘贴。
+    // Slack 有两个入口（按钮 / 消息事件），额外给出 callbackPathAlt
+    const botToken = String(config.botToken ?? '');
+    const callbackPath = !botToken ? undefined
+      : provider === 'telegram' ? `/telegram/webhook/${channelCallbackSecret('tg', botToken)}`
+      : provider === 'slack-bot' ? `/slack/interactive/${channelCallbackSecret('slack', botToken)}`
+      : provider === 'discord-bot' ? `/discord/interactions/${channelCallbackSecret('discord', botToken)}`
+      : undefined;
+    const callbackPathAlt = botToken && provider === 'slack-bot'
+      ? `/slack/events/${channelCallbackSecret('slack', botToken)}`
+      : undefined;
     return {
-      id: String(row.id), name: String(row.name), slug: String(row.slug), provider: row.provider as ProviderId,
+      id: String(row.id), name: String(row.name), slug: String(row.slug), provider,
       enabled: Boolean(row.enabled), configKeys: Object.keys(config),
       rateLimitPerMin: row.rate_limit_per_min ? Number(row.rate_limit_per_min) : undefined,
       quietHours: row.quiet_hours ? String(row.quiet_hours) : undefined,
       maxAttempts: Number(row.max_attempts ?? 0),
+      callbackPath,
+      callbackPathAlt,
       lastTestStatus: row.last_test_status as Channel['lastTestStatus'],
       lastTestError: row.last_test_error ? String(row.last_test_error) : undefined,
       lastTestAt: row.last_test_at ? String(row.last_test_at) : undefined,
@@ -327,21 +350,45 @@ export class RelayRepository {
       [success ? 'success' : 'failed', error ?? null, timestamp, timestamp, id]);
   }
 
-  async deleteChannel(id: string, actor = 'admin'): Promise<void> {
+  /**
+   * 删除频道。默认保守：被路由引用或有投递历史时只软禁用，保住审计链。
+   * `purgeHistory` 用于确实要清掉的场景（测试残留、下线的渠道）——连同该频道的
+   * attempt 记录一并删除，只剩下的 delivery 会刷新终态。路由仍在引用时一律拒绝。
+   */
+  async deleteChannel(id: string, actor = 'admin', options: { purgeHistory?: boolean } = {}): Promise<{ removed: boolean; disabled: boolean; purgedAttempts: number }> {
     // 先解析真实 id：调用方可能传 slug，直接拿参数写 WHERE id=? 会静默 no-op 却返回成功
     const current = await this.getChannel(id);
-    if (!current) return;
+    if (!current) return { removed: false, disabled: false, purgedAttempts: 0 };
     const used = (await this.db.get("SELECT COUNT(*) count FROM attempts WHERE channel_id=?", [current.id])) as { count: number };
     const routed = (await this.db.get('SELECT COUNT(*) count FROM routes, json_each(routes.channel_ids) WHERE json_each.value=?', [current.id])) as { count: number };
-    if (used.count > 0 || routed.count > 0) {
+    if (routed.count > 0) {
+      // 路由还引用着：删掉会让 fallback 链断裂，先请调用方从路由里移除
+      if (options.purgeHistory) throw new Error('该频道仍被路由引用，请先从路由中移除');
+      await this.db.run('UPDATE channels SET enabled=0,updated_at=? WHERE id=?', [now(), current.id]);
+      await this.failAttemptsForDisabledChannel(current.id);
+      await this.audit(actor, 'channel.disable', 'channel', current.id, { provider: current.provider, reason: 'delete-deferred-route' });
+      return { removed: false, disabled: true, purgedAttempts: 0 };
+    }
+    if (used.count > 0 && !options.purgeHistory) {
       await this.db.run('UPDATE channels SET enabled=0,updated_at=? WHERE id=?', [now(), current.id]);
       // 软删除同样要终结未完结 attempt，否则投递永久停在 processing
       await this.failAttemptsForDisabledChannel(current.id);
-      await this.audit(actor, 'channel.disable', 'channel', current.id, { provider: current.provider, reason: 'delete-deferred-history-or-route' });
-      return;
+      await this.audit(actor, 'channel.disable', 'channel', current.id, { provider: current.provider, reason: 'delete-deferred-history' });
+      return { removed: false, disabled: true, purgedAttempts: 0 };
+    }
+    let purgedAttempts = 0;
+    if (used.count > 0) {
+      const affected = await this.db.all('SELECT DISTINCT delivery_id FROM attempts WHERE channel_id=?', [current.id]);
+      purgedAttempts = (await this.db.run('DELETE FROM attempts WHERE channel_id=?', [current.id])).changes;
+      // 只剩这一个频道的投递会变成 0 尝试；刷新一次终态，别留下永久 processing
+      for (const row of affected) await this.refreshDeliveryStatus(String(row.delivery_id));
+      // 已经没有任何 attempt 的投递是空壳，一并清掉
+      await this.db.run(`DELETE FROM deliveries WHERE id IN (${affected.map(() => '?').join(',') || "''"}) AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.delivery_id=deliveries.id)`,
+        affected.map((row) => String(row.delivery_id)));
     }
     await this.db.run('DELETE FROM channels WHERE id=?', [current.id]);
-    await this.audit(actor, 'channel.delete', 'channel', current.id, { provider: current.provider });
+    await this.audit(actor, 'channel.delete', 'channel', current.id, { provider: current.provider, purgedAttempts });
+    return { removed: true, disabled: false, purgedAttempts };
   }
 
   /** 频道被禁用/软删除后，其 pending/retrying/sending attempt 就地失败，并刷新受影响投递的终态 */
@@ -480,12 +527,15 @@ export class RelayRepository {
   }
 
   async revokeKey(id: string): Promise<void> {
-    await this.db.run('UPDATE api_keys SET revoked_at=? WHERE id=?', [now(), id]);
+    const result = await this.db.run('UPDATE api_keys SET revoked_at=? WHERE id=? AND revoked_at IS NULL', [now(), id]);
+    // 不存在的 id 静默返回成功会让调用方以为吊销生效了；明确报错
+    if (!result.changes && !(await this.getKey(id))) throw new Error('Key not found');
     await this.audit('admin', 'api_key.revoke', 'api_key', id, {});
   }
 
   /** 重新启用已吊销的密钥：清空 revoked_at，恢复鉴权 */
   async restoreKey(id: string): Promise<void> {
+    if (!(await this.getKey(id))) throw new Error('Key not found');
     await this.db.run('UPDATE api_keys SET revoked_at=NULL WHERE id=?', [id]);
     await this.audit('admin', 'api_key.restore', 'api_key', id, {});
   }
@@ -506,7 +556,8 @@ export class RelayRepository {
 
   /** 彻底删除密钥记录（不可恢复）。删除前应先吊销，确保缓存/会话立即失效 */
   async deleteKey(id: string): Promise<void> {
-    await this.db.run('DELETE FROM api_keys WHERE id=?', [id]);
+    const result = await this.db.run('DELETE FROM api_keys WHERE id=?', [id]);
+    if (!result.changes) throw new Error('Key not found');
     await this.audit('admin', 'api_key.delete', 'api_key', id, {});
   }
 
@@ -869,6 +920,54 @@ export class RelayRepository {
       ? await this.db.all('SELECT * FROM conversations WHERE replied_at IS NULL AND expires_at>? ORDER BY created_at DESC LIMIT ?', [now(), limit])
       : await this.db.all('SELECT * FROM conversations ORDER BY created_at DESC LIMIT ?', [limit]);
     return rows.map((row) => this.conversationFrom(row));
+  }
+
+  /** 该频道上最新一个还在等回复的会话；聊天渠道的自由文本回复据此归位（目的地是路由时同样命中） */
+  async findPendingConversationForChannel(channelId: string): Promise<Conversation | undefined> {
+    const row = await this.db.get(`SELECT c.* FROM conversations c
+      JOIN attempts a ON a.delivery_id=c.delivery_id
+      WHERE c.replied_at IS NULL AND c.expires_at>? AND a.channel_id=?
+      ORDER BY c.created_at DESC LIMIT 1`, [now(), channelId]);
+    return row ? this.conversationFrom(row) : undefined;
+  }
+
+  /* ────────────────────────────────────────────────────────────
+   * 收件箱：人主动发给 Agent 的消息（控制台或聊天渠道），由 MCP wait_for_inbox 取走
+   * ──────────────────────────────────────────────────────────── */
+
+  async pushInboxMessage(body: string, source: string): Promise<{ id: string }> {
+    const id = randomUUID();
+    await this.db.run('INSERT INTO inbox_messages (id,body,source,created_at) VALUES (?,?,?,?)',
+      [id, body.slice(0, 4000), source.slice(0, 100), now()]);
+    return { id };
+  }
+
+  /** 原子取走未读消息：每行带 claimed_at IS NULL 守卫，多个 Agent 并发拉取不会重复消费 */
+  async claimInboxMessages(claimedBy: string, limit = 20): Promise<InboxMessage[]> {
+    const rows = await this.db.all('SELECT * FROM inbox_messages WHERE claimed_at IS NULL ORDER BY created_at LIMIT ?', [clampLimit(limit, 20, 100)]);
+    const claimed: InboxMessage[] = [];
+    for (const row of rows) {
+      const stamp = now();
+      const result = await this.db.run('UPDATE inbox_messages SET claimed_at=?,claimed_by=? WHERE id=? AND claimed_at IS NULL', [stamp, claimedBy, row.id]);
+      if (result.changes) claimed.push(this.inboxFrom({ ...row, claimed_at: stamp, claimed_by: claimedBy }));
+    }
+    return claimed;
+  }
+
+  async listInboxMessages(options: { limit?: number; pendingOnly?: boolean } = {}): Promise<InboxMessage[]> {
+    const limit = clampLimit(options.limit, 50, 200);
+    const rows = options.pendingOnly
+      ? await this.db.all('SELECT * FROM inbox_messages WHERE claimed_at IS NULL ORDER BY created_at DESC LIMIT ?', [limit])
+      : await this.db.all('SELECT * FROM inbox_messages ORDER BY created_at DESC LIMIT ?', [limit]);
+    return rows.map((row) => this.inboxFrom(row));
+  }
+
+  private inboxFrom(row: Row): InboxMessage {
+    return {
+      id: String(row.id), body: String(row.body), source: String(row.source), createdAt: String(row.created_at),
+      claimedAt: row.claimed_at ? String(row.claimed_at) : undefined,
+      claimedBy: row.claimed_by ? String(row.claimed_by) : undefined
+    };
   }
 
   /** 限流/静默推迟：回到待发送状态。
@@ -1243,14 +1342,20 @@ export class RelayRepository {
     let conversations = 0;
     let auditEvents = 0;
     if (retention.deliveriesDays > 0) {
-      // 保留窗口按 created_at 判定：超窗的 queued/processing 必是死数据（正常重试链分钟级完结）
-      const result = await this.db.run('DELETE FROM deliveries WHERE created_at<?', [cutoff(retention.deliveriesDays)]);
+      // 保留窗口按 created_at 判定：超窗的 queued/processing 必是死数据（正常重试链分钟级完结）。
+      // attempts 显式先删：ON DELETE CASCADE 只在 foreign_keys=ON 时生效，libSQL/Turso 上默认关闭，
+      // 依赖它会在远程库里留下一堆无主 attempt 行
+      const staleDeliveries = cutoff(retention.deliveriesDays);
+      await this.db.run('DELETE FROM attempts WHERE delivery_id IN (SELECT id FROM deliveries WHERE created_at<?)', [staleDeliveries]);
+      const result = await this.db.run('DELETE FROM deliveries WHERE created_at<?', [staleDeliveries]);
       deliveries = result.changes;
     }
     if (retention.conversationsDays > 0) {
       // 已回复/已过期的会话才可清理；pending 的留着等 Agent 轮询结果
       const result = await this.db.run(`DELETE FROM conversations WHERE created_at<? AND (replied_at IS NOT NULL OR expires_at<=?)`, [cutoff(retention.conversationsDays), now()]);
       conversations = result.changes;
+      // 收件箱与会话同一条保留线：已被 Agent 取走的旧消息随之清理，未读的留着
+      await this.db.run('DELETE FROM inbox_messages WHERE created_at<? AND claimed_at IS NOT NULL', [cutoff(retention.conversationsDays)]);
     }
     if (retention.auditDays > 0) {
       const result = await this.db.run('DELETE FROM audit_events WHERE created_at<?', [cutoff(retention.auditDays)]);

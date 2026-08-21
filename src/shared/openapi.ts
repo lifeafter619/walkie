@@ -1,6 +1,8 @@
 /** REST API 的 OpenAPI 3.1 描述（#14）。MCP 与兼容端点不在此列——它们各有自己的发现机制（tools/list 与 /api/meta） */
 export function openApiSpec(publicUrl: string): Record<string, unknown> {
   const security = [{ bearerAuth: [] }];
+  const admin = [{ adminAuth: [] }];
+  const idParam = [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }];
   return {
     openapi: '3.1.0',
     info: {
@@ -10,7 +12,10 @@ export function openApiSpec(publicUrl: string): Record<string, unknown> {
     },
     servers: [{ url: publicUrl }],
     components: {
-      securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer', description: 'Agent API Key (rdk_… or custom)' } },
+      securitySchemes: {
+        bearerAuth: { type: 'http', scheme: 'bearer', description: 'Agent API Key (rdk_… or custom)' },
+        adminAuth: { type: 'http', scheme: 'bearer', description: 'Admin password (also accepted as the X-Admin-Token header)' }
+      },
       schemas: {
         Severity: { type: 'string', enum: ['info', 'success', 'warning', 'critical'] },
         Notification: {
@@ -102,7 +107,52 @@ export function openApiSpec(publicUrl: string): Record<string, unknown> {
           responses: { 200: { description: 'Cancelled' }, 404: { description: 'Not found or not owned' } }
         }
       },
-      '/reply/{id}/{token}': { get: { summary: 'One-time reply form (no auth; token in URL)', security: [], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }, { name: 'token', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Reply form HTML' }, 410: { description: 'Already replied or expired' } } } }
+      '/reply/{id}/{token}': { get: { summary: 'One-time reply form (no auth; token in URL)', security: [], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }, { name: 'token', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Reply form HTML' }, 410: { description: 'Already replied or expired' } } } },
+
+      // ---- 管理面（控制台用；鉴权是管理密码，不是 Agent Key）----
+      '/api/admin/channels': {
+        get: { summary: 'List channels', tags: ['admin'], security: admin, responses: { 200: { description: 'Channels; credentials are never returned, only configKeys' } } },
+        post: { summary: 'Create a channel', tags: ['admin'], security: admin, responses: { 201: { description: 'Created' }, 400: { description: 'Missing required provider fields' } } }
+      },
+      '/api/admin/channels/{id}': {
+        patch: { summary: 'Update a channel (config merges over stored values)', tags: ['admin'], security: admin, parameters: idParam, responses: { 200: { description: 'Updated' }, 404: { description: 'Not found' } } },
+        delete: {
+          summary: 'Delete a channel',
+          description: 'Soft-disables instead when the channel has delivery history or is referenced by a route. Pass ?purge=1 to delete it together with its attempt history.',
+          tags: ['admin'], security: admin,
+          parameters: [...idParam, { name: 'purge', in: 'query', schema: { type: 'string', enum: ['1'] }, description: 'Also delete this channel\'s delivery history' }],
+          responses: { 200: { description: '{ removed, disabled, purgedAttempts }' } }
+        }
+      },
+      '/api/admin/channels/{id}/test': { post: { summary: 'Send a test notification through a channel', tags: ['admin'], security: admin, parameters: idParam, responses: { 200: { description: 'Delivered' }, 502: { description: 'Provider rejected it; body carries the error' } } } },
+      '/api/admin/routes': {
+        get: { summary: 'List routes', tags: ['admin'], security: admin, responses: { 200: { description: 'Routes' } } },
+        post: { summary: 'Create a route (fanout or fallback)', tags: ['admin'], security: admin, responses: { 201: { description: 'Created' } } }
+      },
+      '/api/admin/keys': {
+        get: { summary: 'List Agent Keys', tags: ['admin'], security: admin, responses: { 200: { description: 'Keys' } } },
+        post: { summary: 'Create an Agent Key (custom secret allowed)', tags: ['admin'], security: admin, responses: { 201: { description: 'Key; the plaintext secret is returned here' } } }
+      },
+      '/api/admin/deliveries': { get: { summary: 'List deliveries (status filter, full-text q, cursor paging via before)', tags: ['admin'], security: admin, responses: { 200: { description: 'Deliveries' } } } },
+      '/api/admin/conversations': { get: { summary: 'List ask_user conversations', tags: ['admin'], security: admin, responses: { 200: { description: 'Conversations' } } } },
+      '/api/admin/conversations/{id}/reply': { post: { summary: 'Answer a pending conversation from the console', tags: ['admin'], security: admin, parameters: idParam, responses: { 200: { description: 'Recorded' }, 409: { description: 'Already replied or expired' } } } },
+      '/api/admin/inbox': {
+        get: { summary: 'List messages sent to the agent (pending=1 for unclaimed only)', tags: ['admin'], security: admin, responses: { 200: { description: 'Inbox messages' } } },
+        post: { summary: 'Send a message to the agent; collected by the MCP wait_for_inbox tool', tags: ['admin'], security: admin, responses: { 201: { description: 'Queued' } } }
+      },
+      '/api/admin/webpush': { get: { summary: 'VAPID public key and current subscriptions (key is generated on first call)', tags: ['admin'], security: admin, responses: { 200: { description: 'Web Push state' } } } },
+      '/api/admin/webpush/subscribe': {
+        post: { summary: 'Register a browser push subscription', tags: ['admin'], security: admin, responses: { 201: { description: 'Stored' }, 400: { description: 'endpoint must be HTTPS and keys must be present' } } },
+        delete: { summary: 'Remove a subscription by ?endpoint=', tags: ['admin'], security: admin, responses: { 200: { description: 'Removed' }, 404: { description: 'Unknown endpoint' } } }
+      },
+      '/api/admin/retention': { get: { summary: 'Read retention policy', tags: ['admin'], security: admin, responses: { 200: { description: 'Days per table; 0 = keep forever' } } }, put: { summary: 'Update retention policy', tags: ['admin'], security: admin, responses: { 200: { description: 'Saved' } } } },
+      '/api/admin/audit': { get: { summary: 'Audit log (actor/action prefix filters)', tags: ['admin'], security: admin, responses: { 200: { description: 'Events' } } } },
+
+      // ---- 平台回调（鉴权是各平台自己的签名/密钥，不用 Walkie 的凭据）----
+      '/telegram/webhook/{secret}': { post: { summary: 'Telegram Bot webhook: button callbacks, free-text replies and inbox', description: 'Secret is derived from the bot token and shown on the channel edit form; also send it as X-Telegram-Bot-Api-Secret-Token.', security: [], parameters: [{ name: 'secret', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Handled' }, 401: { description: 'Unknown secret' } } } },
+      '/slack/interactive/{secret}': { post: { summary: 'Slack Block Kit button callbacks', description: 'Verified with X-Slack-Signature when the channel has a signing secret; otherwise the URL secret is the credential.', security: [], parameters: [{ name: 'secret', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Handled' }, 401: { description: 'Bad signature' } } } },
+      '/slack/events/{secret}': { post: { summary: 'Slack Events API: free-text replies and inbox', security: [], parameters: [{ name: 'secret', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Handled or url_verification challenge' }, 401: { description: 'Bad signature' } } } },
+      '/discord/interactions/{secret}': { post: { summary: 'Discord Interactions: button callbacks', description: 'Always verified with Ed25519 against the application public key — Discord probes with a bad signature before saving the endpoint.', security: [], parameters: [{ name: 'secret', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'PONG or interaction response' }, 401: { description: 'Bad signature' } } } }
     }
   };
 }

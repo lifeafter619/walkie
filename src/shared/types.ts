@@ -126,6 +126,10 @@ export interface Channel {
   quietHours?: string;
   /** 每频道重试上限；0 = 继承全局 MAX_DELIVERY_ATTEMPTS */
   maxAttempts?: number;
+  /** 双向回调端点路径（Telegram/Slack/Discord Bot）；拼上实例地址即为 setWebhook / Request URL */
+  callbackPath?: string;
+  /** 第二个回调端点（Slack 的消息事件订阅；按钮走 callbackPath） */
+  callbackPathAlt?: string;
   lastTestStatus: 'untested' | 'success' | 'failed';
   lastTestError?: string;
   lastTestAt?: string;
@@ -250,6 +254,18 @@ export interface Conversation {
   repliedAt?: string;
   expiresAt: string;
   createdAt: string;
+}
+
+/** 收件箱消息：人主动发给 Agent 的内容（控制台或聊天渠道），MCP `wait_for_inbox` 取走 */
+export interface InboxMessage {
+  id: string;
+  body: string;
+  /** 来源标记，如 `admin` 或 `telegram:<slug>` */
+  source: string;
+  createdAt: string;
+  /** 被 Agent 取走的时间；未读为空 */
+  claimedAt?: string;
+  claimedBy?: string;
 }
 
 export interface DashboardStats {

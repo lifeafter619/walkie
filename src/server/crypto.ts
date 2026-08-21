@@ -88,3 +88,11 @@ export function adminTokenPrefix(token: string): string {
 export function keyFingerprint(key: Buffer): string {
   return createHash('sha256').update(key).digest('hex').slice(0, 8);
 }
+
+/**
+ * 渠道双向回调 URL 里的路径秘密，由渠道自己的 bot token 派生：不引入额外配置项，
+ * 换了 token 旧回调地址自动失效。Telegram 另外用同一个值填 secret_token 头。
+ */
+export function channelCallbackSecret(kind: 'tg' | 'slack' | 'discord', token: string): string {
+  return createHash('sha256').update(`walkie:${kind}:${token}`).digest('base64url');
+}

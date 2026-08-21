@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { MockFetch } from './helpers.js';
 import type { AppConfig } from '../src/server/config.js';
 import { ProviderDispatcher, splitBody, splitBodyBytes } from '../src/server/providers/dispatcher.js';
 import { assertSafeUrl } from '../src/server/providers/network.js';
@@ -11,7 +12,7 @@ vi.mock('nodemailer', () => ({ default: { createTransport: vi.fn(() => transport
 
 describe('provider dispatcher', () => {
   it('builds a Telegram Bot API request', async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(config, fetcher);
     await dispatcher.send('telegram', { botToken: 'token123', chatId: '-1001' }, { title: 'Deploy', body: 'Done', severity: 'success', metadata: {} });
     expect(fetcher).toHaveBeenCalledOnce();
@@ -21,7 +22,7 @@ describe('provider dispatcher', () => {
   });
 
   it('renders generic webhook variables as valid JSON text', async () => {
-    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(config, fetcher);
     await dispatcher.send('webhook', { url: 'https://hooks.example.com/incoming', method: 'POST', bodyTemplate: '{"subject":"{{title}}","text":"{{body}}","env":"{{environment}}"}' }, { title: 'A "quoted" title', body: 'line 1\nline 2', severity: 'info', metadata: { environment: 'prod' } });
     const init = vi.mocked(fetcher).mock.calls[0][1];
@@ -29,7 +30,7 @@ describe('provider dispatcher', () => {
   });
 
   it('forwards notifications to another Walkie instance with loop and retry protection', async () => {
-    const fetcher = vi.fn(async () => new Response('{}', { status: 202 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async () => new Response('{}', { status: 202 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(config, fetcher);
     const message = { title: 'Deploy', body: 'Done', severity: 'success' as const, metadata: { walkieDeliveryId: 'delivery-1', walkieTrace: ['https://first.example.com'] } };
     await dispatcher.send('walkie', { server: 'https://second.example.com/', agentKey: 'rdk_remote', destination: 'ops' }, message);
@@ -44,7 +45,7 @@ describe('provider dispatcher', () => {
   });
 
   it('routes serverchan sendkeys to Turbo or Server酱³ endpoints', async () => {
-    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(config, fetcher);
     await dispatcher.send('serverchan', { sendKey: 'SCT1234abc' }, { title: 'T', body: 'B', severity: 'info', metadata: {} });
     expect(String(vi.mocked(fetcher).mock.calls[0][0])).toContain('https://sctapi.ftqq.com/SCT1234abc.send');
@@ -55,7 +56,7 @@ describe('provider dispatcher', () => {
   });
 
   it('builds a WxPusher request and rejects empty targets', async () => {
-    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(config, fetcher);
     await dispatcher.send('wxpusher', { appToken: 'AT_x', uids: 'UID_a\nUID_b' }, { title: 'T', body: 'B', severity: 'info', metadata: {} });
     const body = JSON.parse(String(vi.mocked(fetcher).mock.calls[0][1]?.body));
@@ -67,7 +68,7 @@ describe('provider dispatcher', () => {
     const fetcher = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       if (String(url).includes('/notify/saved')) return new Response('{}', { status: 200 });
       return new Response(JSON.stringify({ status: 'failed', retcode: 1404, message: 'not found' }), { status: 200 });
-    }) as unknown as typeof fetch;
+    }) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(config, fetcher);
     await dispatcher.send('apprise', { server: 'https://apprise.example.com', configKey: 'saved' }, { title: 'T', body: 'B', severity: 'info', metadata: {} });
     expect(String(vi.mocked(fetcher).mock.calls[0][0])).toBe('https://apprise.example.com/notify/saved');
@@ -77,7 +78,7 @@ describe('provider dispatcher', () => {
   it('detects non-HTTP failure responses from Synology Chat and Pushover', async () => {
     const fetcher = vi.fn(async (url: RequestInfo | URL) => new Response(String(url).includes('pushover')
       ? JSON.stringify({ status: 0, errors: ['invalid token'] })
-      : JSON.stringify({ success: false, error: 'invalid token' }), { status: 200 })) as unknown as typeof fetch;
+      : JSON.stringify({ success: false, error: 'invalid token' }), { status: 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(config, fetcher);
     await expect(dispatcher.send('synology-chat', { webhookUrl: 'https://synology.example.com/hook' }, { title: 'T', body: 'B', severity: 'info', metadata: {} })).rejects.toThrow('invalid token');
     await expect(dispatcher.send('pushover', { apiToken: 'a', userKey: 'u' }, { title: 'T', body: 'B', severity: 'info', metadata: {} })).rejects.toThrow('invalid token');
@@ -106,7 +107,7 @@ describe('long message chunking', () => {
   });
 
   it('sends numbered parts for over-limit Telegram messages, url only on last', async () => {
-    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(config, fetcher);
     await dispatcher.send('telegram', { botToken: 't', chatId: '1' }, { title: 'Report', body: 'x'.repeat(8000), severity: 'info', url: 'https://example.com/r', metadata: {} });
     const bodies = vi.mocked(fetcher).mock.calls.map((call) => JSON.parse(String(call[1]?.body)).text as string);
@@ -117,7 +118,7 @@ describe('long message chunking', () => {
   });
 
   it('splits ntfy messages at the documented 4096-byte limit', async () => {
-    const fetcher = vi.fn(async () => new Response('', { status: 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async () => new Response('', { status: 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(config, fetcher);
     const body = '告警😀'.repeat(1500);
     await dispatcher.send('ntfy', { server: 'https://ntfy.sh', topic: 'ops' }, { title: 'T', body, severity: 'critical', metadata: {} });
@@ -130,7 +131,7 @@ describe('long message chunking', () => {
 
 describe('new providers', () => {
   it('builds OneBot group message and PagerDuty event', async () => {
-    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher({ allowPrivateWebhooks: true, allowInsecureHttp: true } as AppConfig, fetcher);
     await dispatcher.send('onebot', { server: 'http://127.0.0.1:3000', groupId: '12345', accessToken: 'tok' }, { title: 'T', body: 'B', severity: 'info', metadata: {} });
     const [url, init] = vi.mocked(fetcher).mock.calls[0];
@@ -145,7 +146,7 @@ describe('new providers', () => {
   });
 
   it('maps severity to Bark critical level and feishu header color', async () => {
-    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
+    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as MockFetch;
     const dispatcher = new ProviderDispatcher(config, fetcher);
     await dispatcher.send('bark', { server: 'https://api.day.app', deviceKey: 'k', callOnCritical: true, criticalVolume: 8 }, { title: 'T', body: 'B', severity: 'critical', metadata: {} });
     expect(JSON.parse(String(vi.mocked(fetcher).mock.calls[0][1]?.body))).toMatchObject({ level: 'critical', call: '1', volume: 8 });
