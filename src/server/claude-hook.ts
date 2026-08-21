@@ -104,6 +104,10 @@ export async function handleClaudeHook(
   const input = (body && typeof body === 'object' ? body : {}) as HookInput;
   const mapped = claudeHookToNotification(input);
   if (!mapped) return { statusCode: 200, body: { ok: true, ignored: true, event: input.hook_event_name ?? null } };
+  // 先验 key：无效/缺失走 401（与 requireAgent 语义一致；Node 端由中间件前置，DO 端这里补）
+  if (!token || !(await repository.authenticateKey(token))) {
+    return { statusCode: 401, body: { ok: false, error: '无效或已吊销的 Agent API Key' } };
+  }
   try {
     const delivery = await sendWithAgentKey(repository, notifications, token, { destination, ...mapped, metadata: { via: 'claude-hook' } }, 'claude-hook');
     drain();
