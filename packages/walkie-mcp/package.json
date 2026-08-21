@@ -1,6 +1,6 @@
 {
   "name": "walkie-mcp",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "stdio MCP wrapper for Walkie — forwards newline-delimited JSON-RPC from stdin to a remote Walkie /mcp (Streamable HTTP) endpoint.",
   "license": "MIT",
   "type": "module",

@@ -1,0 +1,44 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the problem. If applicable, add screenshots.
+      placeholder: |
+        Sent a notification via Telegram and it stayed "processing" forever.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Create a channel (provider: telegram, botToken/chatId set)
+        2. Send with curl POST /api/v1/notify ...
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Cloudflare Workers
+        - Vercel
+        - Node / Docker (self-hosted)
+        - Local dev
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version (`/health` shows it)
+      placeholder: 0.3.0
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Paste any error from the console, `wrangler tail` or the deliveries page. Redact tokens first.
+      render: shell

@@ -1,0 +1,17 @@
+name: Feature request
+description: A new channel, MCP capability or console improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the underlying need, not just the solution.
+      placeholder: I want alerts to reach my on-call phone even when my laptop is closed.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: What would you like to see?
+      placeholder: A new provider integration for …
