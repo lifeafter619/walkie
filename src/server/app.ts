@@ -25,6 +25,7 @@ import { appriseSeverity, discordText, parseAlertmanager, prioritySeverity, safe
 import { handleTelegramWebhook } from './telegram-webhook.js';
 import { handleSlackEvent, handleSlackInteractive } from './slack-interactive.js';
 import { handleDiscordInteraction } from './discord-interactions.js';
+import { handleClaudeHook } from './claude-hook.js';
 import { generateVapidKeys } from './providers/webpush.js';
 import { parseMultipart } from '../shared/multipart.js';
 import { openApiSpec } from '../shared/openapi.js';
@@ -360,6 +361,13 @@ export function createApp(deps: AppDependencies) {
     const delivery = await notifications.send({ ...input, ...(trace.length ? { metadata: { ...input.metadata, walkieTrace: trace } } : {}) }, `agent:${req.agentKey!.id}`, req.agentKey);
     void worker.drainOnce().catch(() => undefined);
     res.status(202).json({ deliveryId: delivery.id, scheduleId: delivery.scheduleId, status: delivery.status, scheduledAt: delivery.scheduledAt, createdAt: delivery.createdAt });
+  }));
+  // Claude Code HTTP hook：事件 JSON 直接 POST，翻译成带 severity 的通知。
+  // key 绑多个目的地时用 ?destination=<slug> 指定；无行动价值的事件收下不转发
+  app.post('/api/v1/hooks/claude', requireAgent, asyncRoute(async (req, res) => {
+    const destination = typeof req.query.destination === 'string' ? req.query.destination : undefined;
+    const result = await handleClaudeHook(repository, notifications, req.body, bearer(req) ?? '', destination, () => void worker.drainOnce().catch(() => undefined));
+    res.status(result.statusCode).json(result.body);
   }));
   app.get('/api/v1/schedules', requireAgent, asyncRoute(async (req, res) => {
     if (!req.agentKey!.scopes.includes('notifications:send')) return res.status(403).json({ error: 'API Key 缺少 notifications:send 权限' });

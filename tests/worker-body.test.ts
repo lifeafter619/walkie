@@ -62,6 +62,7 @@ describe('worker entry routing', () => {
   it('still routes app, compat and bark paths to the Durable Object', () => {
     for (const path of [
       '/health', '/openapi.json', '/mcp', '/api/admin/inbox', '/api/webhooks/123/key',
+      '/api/v1/hooks/claude',
       '/reply/abc/def', '/alertmanager', '/1/messages.json', '/notify/KEY',
       '/services/T/B/KEY', '/telegram/webhook/secret', '/slack/interactive/secret', '/slack/events/secret', '/discord/interactions/secret',
       '/mykey.send', '/send/mykey.send', '/deviceKey', '/deviceKey/title/body'

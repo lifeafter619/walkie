@@ -107,6 +107,16 @@ export function openApiSpec(publicUrl: string): Record<string, unknown> {
           responses: { 200: { description: 'Cancelled' }, 404: { description: 'Not found or not owned' } }
         }
       },
+      '/api/v1/hooks/claude': {
+        post: {
+          summary: 'Claude Code HTTP hook receiver',
+          description: 'POST Claude Code hook event JSON here (type:"http" hooks). Events are translated into notifications with severity mapping: permission_prompt/agent_needs_input/elicitation_* and StopFailure → critical, Stop/agent_completed → success, idle_prompt/SubagentStop → info; no-op events (SessionEnd, PreToolUse…) are acknowledged with ignored:true. The key must target exactly one destination, or pass ?destination=<slug>.',
+          security,
+          parameters: [{ name: 'destination', in: 'query', required: false, schema: { type: 'string' }, description: 'Destination slug, required when the key has multiple destinations' }],
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['hook_event_name'], properties: { hook_event_name: { type: 'string', description: 'Notification | Stop | StopFailure | SubagentStop | …' }, message: { type: 'string' }, notification_type: { type: 'string' }, last_assistant_message: { type: 'string' }, cwd: { type: 'string' } } } } } },
+          responses: { 200: { description: '{ ok, deliveryId? , ignored? }' }, 400: { description: 'Key has multiple destinations and none was specified' }, 401: { description: 'Invalid agent key' } }
+        }
+      },
       '/reply/{id}/{token}': { get: { summary: 'One-time reply form (no auth; token in URL)', security: [], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }, { name: 'token', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Reply form HTML' }, 410: { description: 'Already replied or expired' } } } },
 
       // ---- 管理面（控制台用；鉴权是管理密码，不是 Agent Key）----

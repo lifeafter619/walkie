@@ -337,6 +337,58 @@ curl "https://api.telegram.org/bot<BotToken>/setWebhook" \
 
 长任务跑到一半也能改方向。在控制台「会话 → 发消息给 Agent」输入，或在没有待回复问题时直接给 Telegram 机器人发消息；Agent 下一次调用 `wait_for_inbox` 就会读到，每条消息只被取走一次。这是最可靠的推送路径：绝大多数 MCP 客户端会丢弃服务端主动下发的 notification，但没有客户端会丢弃 tool 结果。
 
+### 盯住 Claude Code / Cursor 会话（hooks）
+
+编码 Agent 干完了、失败了、在等你授权——都推到你手机上，不用守着终端。建一个只绑单个目的地的 Agent Key，把工具的 hook 指到 `POST /api/v1/hooks/claude`，事件 JSON 会按下表翻译成通知：
+
+| 事件 | 级别 |
+| --- | --- |
+| `Notification` `permission_prompt` / `agent_needs_input` / `elicitation_*`——在等你 | critical |
+| `StopFailure`——回合因 API 错误中断 | critical |
+| `Stop` / `agent_completed`——任务完成 | success |
+| `idle_prompt` / `SubagentStop` | info |
+| `SessionEnd`、`PreToolUse` 等高频事件 | 收下但不发（防轰炸） |
+
+**Claude Code（v2.1+，零脚本）。** hook 原生支持 `type: "http"`，`~/.claude/settings.json` 里直接配：
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      { "matcher": "permission_prompt|idle_prompt|agent_needs_input|agent_completed", "hooks": [
+        { "type": "http", "url": "https://你的域名/api/v1/hooks/claude",
+          "headers": { "Authorization": "Bearer $WALKIE_TOKEN" }, "allowedEnvVars": ["WALKIE_TOKEN"] }
+      ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "http", "url": "https://你的域名/api/v1/hooks/claude",
+          "headers": { "Authorization": "Bearer $WALKIE_TOKEN" }, "allowedEnvVars": ["WALKIE_TOKEN"] } ] }
+    ],
+    "StopFailure": [
+      { "hooks": [ { "type": "http", "url": "https://你的域名/api/v1/hooks/claude",
+          "headers": { "Authorization": "Bearer $WALKIE_TOKEN" }, "allowedEnvVars": ["WALKIE_TOKEN"] } ] }
+    ]
+  }
+}
+```
+
+`WALKIE_TOKEN` 从环境变量读取，密钥不会落进配置文件。key 绑了多个目的地时，在 URL 后面加 `?destination=<slug>`。
+
+**Cursor。** Cursor 的 hook 只有 command 类型；用仓库里的转发脚本 [`scripts/cursor-hook-notify.sh`](scripts/cursor-hook-notify.sh)（把事件 JSON POST 到同一个端点，永远 exit 0，绝不阻塞工作流）：
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "stop": [ { "command": "./scripts/cursor-hook-notify.sh", "timeout": 15 } ],
+    "postToolUseFailure": [ { "command": "./scripts/cursor-hook-notify.sh", "timeout": 15 } ],
+    "sessionEnd": [ { "command": "./scripts/cursor-hook-notify.sh", "timeout": 5 } ]
+  }
+}
+```
+
+环境变量设 `WALKIE_URL` 和 `WALKIE_TOKEN`（可选 `WALKIE_DESTINATION`）；没配置的机器保持静默，所以 hooks 文件可以随仓库分发。
+
 ### Web Push——不依赖任何第三方账号
 
 「系统 → Web Push → 订阅本设备」把当前浏览器（桌面或手机）注册到实例自己生成的 VAPID 密钥对上。再新建一个 `Web Push（本站订阅）` 频道并设为目的地即可；载荷按 RFC 8291 端到端加密。需要 HTTPS；iOS 上要先把站点「添加到主屏幕」。

@@ -322,6 +322,58 @@ Only the chat/channel configured on the Walkie channel is accepted, so a strange
 
 Long-running agents can be steered mid-task. Type into **Conversations → Send to agent** in the console, or just message your Telegram bot when nothing is pending; the agent picks it up on its next `wait_for_inbox` call and each message is claimed exactly once. This is the reliable push path: most MCP clients drop server-initiated notifications, but every client surfaces a tool result.
 
+### Keep an eye on Claude Code / Cursor sessions (hooks)
+
+Get pinged when a coding agent finishes, fails, or is waiting for your approval — no babysitting. Create a Walkie Agent Key bound to a single destination, then point the tool's hooks at `POST /api/v1/hooks/claude`. Event JSON is translated into notifications with sensible severity:
+
+| Event | Severity |
+| --- | --- |
+| `Notification` `permission_prompt` / `agent_needs_input` / `elicitation_*` — waiting on you | critical |
+| `StopFailure` — the turn died on an API error | critical |
+| `Stop` / `agent_completed` — task finished | success |
+| `idle_prompt` / `SubagentStop` | info |
+| `SessionEnd`, `PreToolUse` and other high-frequency events | acknowledged, not sent |
+
+**Claude Code (v2.1+, zero scripts).** Hooks support `type: "http"` natively. In `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      { "matcher": "permission_prompt|idle_prompt|agent_needs_input|agent_completed", "hooks": [
+        { "type": "http", "url": "https://your-domain/api/v1/hooks/claude",
+          "headers": { "Authorization": "Bearer $WALKIE_TOKEN" }, "allowedEnvVars": ["WALKIE_TOKEN"] }
+      ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "http", "url": "https://your-domain/api/v1/hooks/claude",
+          "headers": { "Authorization": "Bearer $WALKIE_TOKEN" }, "allowedEnvVars": ["WALKIE_TOKEN"] } ] }
+    ],
+    "StopFailure": [
+      { "hooks": [ { "type": "http", "url": "https://your-domain/api/v1/hooks/claude",
+          "headers": { "Authorization": "Bearer $WALKIE_TOKEN" }, "allowedEnvVars": ["WALKIE_TOKEN"] } ] }
+    ]
+  }
+}
+```
+
+`WALKIE_TOKEN` is read from your environment, so the secret never lands in the settings file. If the key targets multiple destinations, append `?destination=<slug>` to the URL.
+
+**Cursor.** Cursor hooks are command-based; use the forwarding script at [`scripts/cursor-hook-notify.sh`](scripts/cursor-hook-notify.sh) in this repo (it POSTs the event JSON to the same endpoint and always exits 0 so it can never block your workflow):
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "stop": [ { "command": "./scripts/cursor-hook-notify.sh", "timeout": 15 } ],
+    "postToolUseFailure": [ { "command": "./scripts/cursor-hook-notify.sh", "timeout": 15 } ],
+    "sessionEnd": [ { "command": "./scripts/cursor-hook-notify.sh", "timeout": 5 } ]
+  }
+}
+```
+
+Set `WALKIE_URL` and `WALKIE_TOKEN` in your environment (optionally `WALKIE_DESTINATION`); unconfigured machines stay silent, so the hooks file can travel with the repo.
+
 ### Web Push — notifications without any third-party account
 
 **System → Web Push → Subscribe this device** registers the browser (desktop or mobile) against a VAPID key pair generated on your instance. Add a `Web Push (this site)` channel and route to it; payloads are encrypted per RFC 8291 end-to-end. Needs HTTPS; on iOS, add the site to the Home Screen first.
