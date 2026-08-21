@@ -23,6 +23,16 @@ First public release.
 
 - Drop-in endpoints for Bark, ServerChan, Gotify, PushPlus, ntfy, Slack/Discord webhooks, Alertmanager, Pushover and Apprise — point existing tools at Walkie without changing anything.
 
+### Coding-agent hooks
+
+- `POST /api/v1/hooks/claude` receives Claude Code (v2.1+) native HTTP hook events — zero scripts. Severity mapping: permission waits and API failures → critical, task completion → success; high-frequency no-op events are acknowledged silently.
+- Cursor support via a forwarding script (`scripts/cursor-hook-notify.sh`) that POSTs command-hook events to the same endpoint and never blocks the workflow.
+
+### Rich notifications
+
+- Notifications with a URL now render a tappable **View details** button on Telegram, Slack and Discord (alongside `ask_user` option buttons), instead of a bare link.
+- Web Push severity tiers: RFC 8030 `urgency` mapping (critical/warning → high, info → low), shortened TTL for critical pushes, and `requireInteraction` + distinct vibration patterns in the service worker so critical alerts stay on screen.
+
 ### Reliability
 
 - Fanout / fallback routing, exponential backoff, idempotency keys, delivery callbacks, server-side search & cursor paging.
