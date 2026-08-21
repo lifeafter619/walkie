@@ -324,55 +324,27 @@ Long-running agents can be steered mid-task. Type into **Conversations → Send 
 
 ### Keep an eye on Claude Code / Cursor sessions (hooks)
 
-Get pinged when a coding agent finishes, fails, or is waiting for your approval — no babysitting. Create a Walkie Agent Key bound to a single destination, then point the tool's hooks at `POST /api/v1/hooks/claude`. Event JSON is translated into notifications with sensible severity:
+Get pinged when a coding agent finishes, fails, or is waiting for your approval — no babysitting. One command installs the hooks for both tools:
+
+```bash
+npx walkie-notify hook --url https://your-domain --token rdk_xxx
+```
+
+The command first sends a real test notification (so a bad key or destination fails loudly, before anything is written), then merges the hooks into `~/.claude/settings.json` and `~/.cursor/hooks.json` — your existing hooks and settings are preserved, re-running is idempotent, and `npx walkie-notify hook --uninstall` removes exactly what was added. Finally export `WALKIE_URL` and `WALKIE_TOKEN` in your shell profile: the stored config references `$WALKIE_TOKEN`, so the secret never lands in a config file. Keys targeting multiple destinations need `--destination <slug>`.
+
+What you get, per event:
 
 | Event | Severity |
 | --- | --- |
 | `Notification` `permission_prompt` / `agent_needs_input` / `elicitation_*` — waiting on you | critical |
-| `StopFailure` — the turn died on an API error | critical |
+| `StopFailure` — the turn died on an API error; Cursor `stop` with `status: error` / `sessionEnd` with `reason: error` | critical |
 | `Stop` / `agent_completed` — task finished | success |
 | `idle_prompt` / `SubagentStop` | info |
 | `SessionEnd`, `PreToolUse` and other high-frequency events | acknowledged, not sent |
 
-**Claude Code (v2.1+, zero scripts).** Hooks support `type: "http"` natively. In `~/.claude/settings.json`:
+**Claude Code (v2.1+)** hooks are native `type: "http"` handlers — no scripts. **Cursor** hooks are command-based; the installer drops a small forwarding script at `~/.cursor/hooks/walkie-notify.sh` (it always exits 0, so it can never block your workflow, and stays silent on machines without `WALKIE_URL` set — so the config can travel with the repo via `--scope project`).
 
-```json
-{
-  "hooks": {
-    "Notification": [
-      { "matcher": "permission_prompt|idle_prompt|agent_needs_input|agent_completed", "hooks": [
-        { "type": "http", "url": "https://your-domain/api/v1/hooks/claude",
-          "headers": { "Authorization": "Bearer $WALKIE_TOKEN" }, "allowedEnvVars": ["WALKIE_TOKEN"] }
-      ] }
-    ],
-    "Stop": [
-      { "hooks": [ { "type": "http", "url": "https://your-domain/api/v1/hooks/claude",
-          "headers": { "Authorization": "Bearer $WALKIE_TOKEN" }, "allowedEnvVars": ["WALKIE_TOKEN"] } ] }
-    ],
-    "StopFailure": [
-      { "hooks": [ { "type": "http", "url": "https://your-domain/api/v1/hooks/claude",
-          "headers": { "Authorization": "Bearer $WALKIE_TOKEN" }, "allowedEnvVars": ["WALKIE_TOKEN"] } ] }
-    ]
-  }
-}
-```
-
-`WALKIE_TOKEN` is read from your environment, so the secret never lands in the settings file. If the key targets multiple destinations, append `?destination=<slug>` to the URL.
-
-**Cursor.** Cursor hooks are command-based; use the forwarding script at [`scripts/cursor-hook-notify.sh`](scripts/cursor-hook-notify.sh) in this repo (it POSTs the event JSON to the same endpoint and always exits 0 so it can never block your workflow):
-
-```json
-{
-  "version": 1,
-  "hooks": {
-    "stop": [ { "command": "./scripts/cursor-hook-notify.sh", "timeout": 15 } ],
-    "postToolUseFailure": [ { "command": "./scripts/cursor-hook-notify.sh", "timeout": 15 } ],
-    "sessionEnd": [ { "command": "./scripts/cursor-hook-notify.sh", "timeout": 5 } ]
-  }
-}
-```
-
-Set `WALKIE_URL` and `WALKIE_TOKEN` in your environment (optionally `WALKIE_DESTINATION`); unconfigured machines stay silent, so the hooks file can travel with the repo.
+Prefer manual setup? The endpoint is `POST /api/v1/hooks/claude` with the event JSON as the body — see `docs/` and `/openapi.json` on your instance.
 
 ### Web Push — notifications without any third-party account
 

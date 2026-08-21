@@ -50,6 +50,26 @@ describe('claude hook event → notification mapping', () => {
     const mapped = claudeHookToNotification({ hook_event_name: 'Stop', cwd: '/Users/someone/very/deeply/nested/project-x' });
     expect(mapped!.title).toContain('nested/project-x');
   });
+
+  it('normalizes Cursor camelCase event names and maps stop.status / sessionEnd reason=error', () => {
+    // Cursor: stop 带 status 字段（小驼峰事件名）
+    const done = claudeHookToNotification({ hook_event_name: 'stop', status: 'completed', cwd: CWD });
+    expect(done!.severity).toBe('success');
+    const errored = claudeHookToNotification({ hook_event_name: 'stop', status: 'error', last_assistant_message: 'ENOSPC', cwd: CWD });
+    expect(errored).toMatchObject({ severity: 'critical' });
+    expect(errored!.body).toContain('ENOSPC');
+    // 用户主动打断不打扰
+    expect(claudeHookToNotification({ hook_event_name: 'stop', status: 'aborted' })).toBeUndefined();
+
+    // Cursor: sessionEnd reason=error → critical；正常退出仍忽略
+    const crash = claudeHookToNotification({ hook_event_name: 'sessionEnd', reason: 'error', message: 'OOM', cwd: CWD });
+    expect(crash).toMatchObject({ severity: 'critical' });
+    expect(claudeHookToNotification({ hook_event_name: 'sessionEnd', reason: 'clear' })).toBeUndefined();
+
+    // PostToolUseFailure 只在 Cursor 载荷（带 cursor_version）时告警；Claude Code 的太吵
+    expect(claudeHookToNotification({ hook_event_name: 'PostToolUseFailure', tool_name: 'Bash' })).toBeUndefined();
+    expect(claudeHookToNotification({ hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', cursor_version: '1.0', message: 'exit 1' })!.severity).toBe('warning');
+  });
 });
 
 describe('POST /api/v1/hooks/claude', () => {

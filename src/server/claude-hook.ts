@@ -32,10 +32,12 @@ interface HookInput {
   error?: string;
   error_details?: string;
   reason?: string;
+  status?: string;
   cwd?: string;
   last_assistant_message?: string;
   agent_type?: string;
   tool_name?: string;
+  cursor_version?: string;
 }
 
 /** cwd 取末两段做「哪个项目」的标识：完整路径又长又可能泄漏目录结构 */
@@ -43,6 +45,18 @@ function projectTag(cwd: string | undefined): string {
   if (!cwd) return '';
   const parts = cwd.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean);
   return parts.length ? parts.slice(-2).join('/') : cwd;
+}
+
+/**
+ * 事件名归一化：Cursor 的 hook 事件是小驼峰（stop / postToolUseFailure / sessionEnd），
+ * Claude Code 是大驼峰（Stop / StopFailure / SessionEnd）。转发脚本按原样 POST，
+ * 这里统一成大驼峰再走映射——一套翻译管两家。
+ */
+function normalizeEvent(name: string | undefined): string {
+  if (!name) return '';
+  const head = name.slice(0, 1).toUpperCase() + name.slice(1);
+  // Cursor 的 sessionEnd 也带 reason；stop 的 status completed|error|aborted 映射到语义
+  return head;
 }
 
 /** 事件 → 通知的映射；返回 undefined 表示「收下但不发通知」 */
@@ -54,7 +68,7 @@ export function claudeHookToNotification(input: HookInput): {
 } | undefined {
   const project = projectTag(input.cwd);
   const where = project ? `（${project}）` : '';
-  const event = input.hook_event_name ?? '';
+  const event = normalizeEvent(input.hook_event_name);
 
   if (event === 'Notification') {
     const type = input.notification_type ?? '';
@@ -72,9 +86,21 @@ export function claudeHookToNotification(input: HookInput): {
   }
 
   if (event === 'Stop') {
-    const summary = (input.last_assistant_message ?? '').trim();
+    // Cursor 的 stop 事件带 status（completed|error|aborted）；错误回合要按 critical 告警
+    if (input.status === 'error') {
+      return { title: `Cursor 回合失败${where}`, body: (input.last_assistant_message || input.message || '回合以错误结束').slice(0, 2000), severity: 'critical', tags: 'cursor|error' };
+    }
+    if (input.status === 'aborted') return undefined; // 用户主动打断，无行动价值
+    const summary = (input.last_assistant_message ?? input.message ?? '').trim();
     // 摘要截前 600 字符：通知里够读就行，完整内容在会话里
     return { title: `Claude 完成了任务${where}`, body: summary ? summary.slice(0, 600) : '回合结束，等待下一步指令。', severity: 'success', tags: 'claude-code|stop' };
+  }
+
+  if (event === 'PostToolUseFailure') {
+    // Claude Code 也有此事件但每次工具失败都触发，太吵——只在 Cursor 转发（带 cursor_version）
+    // 时按 warning 告警一次；Cursor 侧由 CLI 只挂 stop/sessionEnd，这里是兜底
+    if (!input.cursor_version) return undefined;
+    return { title: `工具调用失败${where}`, body: `${input.tool_name ?? 'tool'}${input.message ? `：${input.message}` : ''}`.slice(0, 2000) || '工具调用失败', severity: 'warning', tags: 'cursor|tool-failure' };
   }
 
   if (event === 'StopFailure') {
@@ -87,6 +113,15 @@ export function claudeHookToNotification(input: HookInput): {
 
   if (event === 'SubagentStop') {
     return { title: `子代理完成（${input.agent_type ?? 'agent'}）${where}`, body: (input.last_assistant_message ?? '').trim().slice(0, 400) || '子代理回合结束。', severity: 'info', tags: 'claude-code|subagent' };
+  }
+
+  if (event === 'SessionEnd') {
+    // Claude Code 的 SessionEnd（clear/logout 等）无行动价值；Cursor 的 sessionEnd
+    // 带 reason=error + error_message——会话死于错误要按 critical 告警
+    if (input.reason === 'error') {
+      return { title: `会话异常终止${where}`, body: (input.last_assistant_message || input.message || '会话以错误结束').slice(0, 2000), severity: 'critical', tags: 'cursor|error' };
+    }
+    return undefined;
   }
 
   return undefined;
