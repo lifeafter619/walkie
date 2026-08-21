@@ -27,6 +27,49 @@ describe('telegram inline buttons + webhook (#11)', () => {
     ]);
   });
 
+  it('appends a view-url button next to ask options (and alone when there are none)', async () => {
+    const dispatcher = new ProviderDispatcher({ allowPrivateWebhooks: false, allowInsecureHttp: false }, vi.fn(async () => new Response('{}', { status: 200 })) as unknown as MockFetch);
+    const message = (overrides: Partial<ProviderMessage> = {}): ProviderMessage => ({
+      title: '部署完成', body: 'v1.2.3 已上线', severity: 'success',
+      url: 'https://ci.example.com/run/42', metadata: {}, ...overrides
+    });
+
+    // 纯通知（无 ask 选项）：url 渲染成单个「查看详情」按钮
+    const plain = JSON.parse(String((await dispatcher.buildRequest('telegram', { botToken: 't', chatId: '1' }, message())).init.body));
+    expect(plain.reply_markup.inline_keyboard).toEqual([[{ text: '查看详情 ↗', url: 'https://ci.example.com/run/42' }]]);
+
+    // Slack：无选项时 blocks 只含链接按钮；有选项时链接按钮排在选项后
+    const slackPlain = JSON.parse(String((await dispatcher.buildRequest('slack-bot', { botToken: 'x', channel: 'C1' }, message())).init.body));
+    expect(slackPlain.blocks[1].elements).toEqual([
+      { type: 'button', text: { type: 'plain_text', text: '查看详情 ↗' }, action_id: 'walkie_view', url: 'https://ci.example.com/run/42' }
+    ]);
+    const slackAsk = JSON.parse(String((await dispatcher.buildRequest('slack-bot', { botToken: 'x', channel: 'C1' }, message({
+      metadata: { askOptions: ['回滚', '继续', '忽略'], conversationId: '11111111-2222-3333-4444-555555555555' }
+    }))).init.body));
+    const slackButtons = slackAsk.blocks[1].elements;
+    expect(slackButtons).toHaveLength(4); // 3 个选项 + 1 个链接按钮，actions 块 5 个上限内
+    expect(slackButtons.at(-1)).toMatchObject({ action_id: 'walkie_view', url: 'https://ci.example.com/run/42' });
+
+    // Discord：link 按钮 style 5；无选项时也渲染按钮行
+    const discordPlain = JSON.parse(String((await dispatcher.buildRequest('discord-bot', { botToken: 'b', channelId: '9' }, message())).init.body));
+    expect(discordPlain.components[0].components).toEqual([
+      { type: 2, style: 5, label: '查看详情', url: 'https://ci.example.com/run/42' }
+    ]);
+    const discordAsk = JSON.parse(String((await dispatcher.buildRequest('discord-bot', { botToken: 'b', channelId: '9' }, message({
+      metadata: { askOptions: ['合并', '再看看'], conversationId: '11111111-2222-3333-4444-555555555555' }
+    }))).init.body));
+    expect(discordAsk.components[0].components).toHaveLength(3); // 2 选项 + 链接按钮
+    expect(discordAsk.components[0].components.at(-1)).toMatchObject({ style: 5, url: 'https://ci.example.com/run/42' });
+
+    // Telegram：选项 + 链接按钮共 4 个，一行放得下
+    const tgAsk = JSON.parse(String((await dispatcher.buildRequest('telegram', { botToken: 't', chatId: '1' }, message({
+      metadata: { askOptions: ['回滚', '继续', '忽略'], conversationId: '11111111-2222-3333-4444-555555555555' }
+    }))).init.body));
+    const tgRow = tgAsk.reply_markup.inline_keyboard[0];
+    expect(tgRow).toHaveLength(4);
+    expect(tgRow.at(-1)).toEqual({ text: '查看详情 ↗', url: 'https://ci.example.com/run/42' });
+  });
+
   it('accepts callback_query via the webhook and records the reply once', async () => {
     const repository = await createNodeRepository(':memory:', randomBytes(32));
     repositories.push(repository);

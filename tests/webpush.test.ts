@@ -130,4 +130,24 @@ describe('webpush RFC 8291/8292', () => {
     expect(decrypted).toContain('"title"');
     expect(decrypted).not.toContain('https://example.com/');
   });
+
+  it('maps severity to RFC 8030 urgency and shortens TTL for critical pushes', async () => {
+    const subscription = await browserSubscription();
+    const headersOf: Array<Record<string, string>> = [];
+    const captured = vi.fn(async (_url: unknown, init: RequestInit) => {
+      headersOf.push(Object.fromEntries(new Headers(init.headers as HeadersInit).entries()));
+      return new Response('', { status: 201 });
+    });
+    const dispatcher = new ProviderDispatcher({ allowPrivateWebhooks: false, allowInsecureHttp: false },
+      captured as unknown as MockFetch, async () => ['142.250.0.1']);
+    dispatcher.pushSubscriptions = async () => ({ subscriptions: [subscription], vapid: await generateVapidKeys() });
+
+    await dispatcher.send('webpush', {}, { title: '炸了', body: '数据库连接耗尽', severity: 'critical', metadata: {} });
+    await dispatcher.send('webpush', {}, { title: '提示', body: '日常构建完成', severity: 'info', metadata: {} });
+
+    // critical：urgency=high + 短 TTL（1 小时后过期，别在用户睡醒后还堆着旧告警）
+    expect(headersOf[0]).toMatchObject({ urgency: 'high', ttl: '3600' });
+    // info：urgency=low，推送服务可攒批省电；TTL 拉满一天
+    expect(headersOf[1]).toMatchObject({ urgency: 'low', ttl: '86400' });
+  });
 });

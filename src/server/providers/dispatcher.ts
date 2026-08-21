@@ -650,36 +650,50 @@ export class ProviderDispatcher {
         };
         if (config.threadTs) payload.thread_ts = string(config, 'threadTs');
         // ask_user 会话的选项渲染成内联按钮（Slack Block Kit）；
-        // value 填 <conversationId>:<index>，由 POST /slack/interactive/<secret> 收回
+        // value 填 <conversationId>:<index>，由 POST /slack/interactive/<secret> 收回。
+        // 带 url 的通知同样给一个「查看详情」按钮——比裸链接好点（ntfy-me-mcp 的主打体验）
         const options = Array.isArray(message.metadata.askOptions) ? message.metadata.askOptions.map(String) : [];
-        if (options.length && typeof message.metadata.conversationId === 'string') {
-          payload.blocks = [
-            { type: 'section', text: { type: 'mrkdwn', text: `*${message.title}*\n${message.body}` } },
-            { type: 'actions', elements: options.slice(0, 5).map((option, index) => ({
+        if ((options.length && typeof message.metadata.conversationId === 'string') || message.url) {
+          const buttons: Array<Record<string, unknown>> = options
+            .filter(() => typeof message.metadata.conversationId === 'string')
+            .slice(0, options.length ? 4 : 0) // 留一个位置给链接按钮（actions 块上限 5 个元素）
+            .map((option, index) => ({
               type: 'button',
               text: { type: 'plain_text', text: option.slice(0, 75) },
               action_id: `walkie_ask_${index}`,
               value: `${message.metadata.conversationId}:${index}`
-            })) }
+            }));
+          if (message.url && buttons.length < 5) {
+            buttons.push({ type: 'button', text: { type: 'plain_text', text: '查看详情 ↗' }, action_id: 'walkie_view', url: message.url });
+          }
+          payload.blocks = [
+            { type: 'section', text: { type: 'mrkdwn', text: `*${message.title}*\n${message.body}` } },
+            { type: 'actions', elements: buttons.slice(0, 5) }
           ];
         }
         return { url: 'https://slack.com/api/chat.postMessage', init: this.json(payload, { Authorization: `Bearer ${string(config, 'botToken')}` }) };
       }
       case 'discord-bot': {
+        // 链接按钮（style 5）不占 interaction 回调，ask_user 按钮占位后仍可共存（一行 5 个上限）
+        const linkButton = message.url
+          ? { type: 2, style: 5, label: '查看详情', url: message.url }
+          : undefined;
         const payload: Record<string, unknown> = {
-          content: message.url ? `${message.title}\n${message.body}\n${message.url}` : `${message.title}\n${message.body}`
+          content: message.url ? `${message.title}\n${message.body}` : `${message.title}\n${message.body}`
         };
         // ask_user 的选项渲染成按钮行；custom_id 填 <conversationId>:<index>，
-        // 由 POST /discord/interactions/<secret> 收回（一行最多 5 个按钮）
+        // 由 POST /discord/interactions/<secret> 收回
         const options = Array.isArray(message.metadata.askOptions) ? message.metadata.askOptions.map(String) : [];
         if (options.length && typeof message.metadata.conversationId === 'string') {
           payload.components = [{
             type: 1,
-            components: options.slice(0, 5).map((option, index) => ({
+            components: [...options.slice(0, linkButton ? 4 : 5).map((option, index) => ({
               type: 2, style: 1, label: option.slice(0, 80),
               custom_id: `${message.metadata.conversationId}:${index}`
-            }))
+            })), ...(linkButton ? [linkButton] : [])]
           }];
+        } else if (linkButton) {
+          payload.components = [{ type: 1, components: [linkButton] }];
         }
         return { url: `https://discord.com/api/v10/channels/${encodeURIComponent(string(config, 'channelId'))}/messages`, init: this.json(payload, { Authorization: `Bot ${string(config, 'botToken')}` }) };
       }
@@ -703,17 +717,20 @@ export class ProviderDispatcher {
           ...(config.messageThreadId ? { message_thread_id: Number(config.messageThreadId) } : {})
         };
         // ask_user 的选项渲染成 inline_keyboard：点一下即回，不用打开一次性链接。
-        // callback_data 填 <conversationId>:<index>，由 POST /telegram/webhook/<secret> 收回
+        // callback_data 填 <conversationId>:<index>，由 POST /telegram/webhook/<secret> 收回；
+        // 带 url 的通知追加一个「查看详情」url 按钮（url 按钮不产生回调，与选项共存）
         const askOptions = Array.isArray(message.metadata.askOptions) ? message.metadata.askOptions.map(String) : [];
-        if (askOptions.length && typeof message.metadata.conversationId === 'string') {
-          payload.reply_markup = {
-            inline_keyboard: [
-              askOptions.slice(0, 12).map((option, index) => ({
-                text: option.slice(0, 60),
-                callback_data: `${message.metadata.conversationId}:${index}`
-              }))
-            ]
-          };
+        if ((askOptions.length && typeof message.metadata.conversationId === 'string') || message.url) {
+          const buttons: Array<Record<string, unknown>> = (askOptions.length && typeof message.metadata.conversationId === 'string')
+            ? askOptions.slice(0, message.url ? 3 : 4).map((option, index) => ({
+              text: option.slice(0, 60),
+              callback_data: `${message.metadata.conversationId}:${index}`
+            }))
+            : [];
+          if (message.url) buttons.push({ text: '查看详情 ↗', url: message.url });
+          // Telegram inline_keyboard 每行 8 个按钮上限；按钮文字宽，一行 >4 个会挤爆，换两行
+          const rows = buttons.length > 4 ? [buttons.slice(0, Math.ceil(buttons.length / 2)), buttons.slice(Math.ceil(buttons.length / 2))] : [buttons];
+          payload.reply_markup = { inline_keyboard: rows };
         }
         return { url: `https://api.telegram.org/bot${string(config, 'botToken')}/sendMessage`, init: this.json(payload) };
       }
@@ -1004,7 +1021,14 @@ export class ProviderDispatcher {
         const authorization = await vapidHeader(vapid, endpoint.origin);
         const response = await safeFetch(subscription.endpoint, {
           method: 'POST',
-          headers: { 'content-type': 'application/octet-stream', 'content-length': String(body.length), ttl: '86400', urgency: message.severity === 'critical' ? 'high' : 'normal', authorization },
+          headers: {
+            'content-type': 'application/octet-stream', 'content-length': String(body.length),
+            ttl: message.severity === 'critical' ? '3600' : '86400',
+            // RFC 8030 urgency：推送服务据此决定省电策略——critical 必须立刻唤醒设备，
+            // info 可以攒批；high/very-low 之间没有合适的中间档，warning 及以上都用 high
+            urgency: ({ critical: 'high', warning: 'high', success: 'normal', info: 'low' } as const)[message.severity],
+            authorization
+          },
           body: new Uint8Array(body)
         }, this.appConfig, this.fetcher, this.resolveHost);
         // 404/410 = 订阅已失效（浏览器清了权限/换设备），删掉避免每次投递都白打
