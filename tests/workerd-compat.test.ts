@@ -32,7 +32,9 @@ const TOKEN_BODIES: Array<[RegExp, string]> = [
   [/api\.push\.oppomobile\.com\/server\/v1\/auth/, '{"code":0,"data":{"auth_token":"t"}}'],
   [/api-push\.vivo\.com\.cn\/message\/auth/, '{"result":0,"authToken":"t"}'],
   [/restapi\.getui\.com\/v2\/[^/]+\/auth/, `{"code":0,"data":{"token":"t","expire_time":${Date.now() + 3_600_000}}}`],
-  [/oauth2\.googleapis\.com\/token/, '{"access_token":"t","expires_in":3600}']
+  [/oauth2\.googleapis\.com\/token/, '{"access_token":"t","expires_in":3600}'],
+  [/open\.feishu\.cn\/open-apis\/auth\/v3\/tenant_access_token\/internal/, '{"code":0,"msg":"ok","tenant_access_token":"t-feishu","expire":7200}'],
+  [/oapi\.dingtalk\.com\/gettoken/, '{"errcode":0,"errmsg":"ok","access_token":"t-ding"}']
 ];
 
 // assertProviderResponse 里逐渠道的成功判定所需的最小响应体；缺省 '{}' 即可通过通用校验
@@ -76,7 +78,11 @@ const SUCCESS_BODIES: Partial<Record<ProviderId, string>> = {
   onebot: '{"status":"ok","retcode":0}',
   'synology-chat': '{"success":true}',
   pushover: '{"status":1}',
-  rocketchat: '{"success":true}'
+  rocketchat: '{"success":true}',
+  'slack-bot': '{"ok":true,"ts":"1234.5"}',
+  'feishu-app': '{"code":0,"data":{"message_id":"om_1"}}',
+  'dingtalk-work': '{"errcode":0,"task_id":1}',
+  'discord-bot': '{"id":"1"}'
 };
 
 // 每个渠道能走到 fetch 的最小配置（跳过 catalog 的表单校验，专注传输层兼容）
@@ -158,8 +164,14 @@ const MINIMAL_CONFIGS: Record<ProviderId, Record<string, unknown>> = {
   'meizu-push': { appId: '1', appSecret: 'as', targets: 'p1' },
   'honor-push': { appId: 'app', clientId: 'cid', clientSecret: 'cs', targets: 'tok1' },
   jpush: { appKey: 'ak', masterSecret: 'ms', targets: 'reg1' },
-  getui: { appId: 'app', appKey: 'ak', masterSecret: 'ms', target: 'cid1' }
-};
+  getui: { appId: 'app', appKey: 'ak', masterSecret: 'ms', target: 'cid1' },
+  'slack-bot': { botToken: 'xoxb-test', channel: 'C123' },
+  'discord-bot': { botToken: 'bot-token', channelId: '123456' },
+  'feishu-app': { appId: 'cli_app', appSecret: 'sec', receiveIdType: 'open_id', receiveId: 'ou_1' },
+  'dingtalk-work': { appKey: 'ak', appSecret: 'as', agentId: '123', userIdList: 'u1' },
+  'aws-ses': { accessKeyId: 'ak', secretAccessKey: 'sk', region: 'us-east-1', from: 'a@e.com', to: 'b@e.com' },
+  webpush: {}
+} as Record<string, Record<string, unknown>>;
 
 const message = { title: '兼容性验证', body: 'workerd 渠道矩阵测试', severity: 'info', url: 'https://example.com/r', metadata: {} };
 
@@ -175,7 +187,7 @@ function makeWorkerdFetch(provider: ProviderId, calls: Array<{ url: string; init
 }
 
 describe('workerd 渠道兼容矩阵', () => {
-  it('全部 77 个渠道的发送请求都能通过 workerd 的 fetch 参数校验', async () => {
+  it('全部渠道的发送请求都能通过 workerd 的 fetch 参数校验', async () => {
     const failures: string[] = [];
     expect(Object.keys(MINIMAL_CONFIGS).length).toBe(PROVIDERS.length);
     for (const provider of PROVIDERS) {
@@ -183,6 +195,14 @@ describe('workerd 渠道兼容矩阵', () => {
       if (!configForProvider) { failures.push(`${provider.id}: 测试矩阵缺少最小配置`); continue; }
       const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
       const dispatcher = new ProviderDispatcher(config, makeWorkerdFetch(provider.id, calls) as unknown as typeof fetch);
+      if (provider.id === 'webpush') {
+        // Web Push 需要真实订阅与 VAPID；用一对测试密钥 + 合法 P-256 订阅（65 字节 raw 公钥）
+        const { generateVapidKeys } = await import('../src/server/providers/webpush.js');
+        const vapid = await generateVapidKeys();
+        const pair = await globalThis.crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+        const p256dh = Buffer.from(await globalThis.crypto.subtle.exportKey('raw', pair.publicKey)).toString('base64');
+        dispatcher.pushSubscriptions = async () => ({ subscriptions: [{ endpoint: 'https://fcm.example.com/send/x', p256dh, auth: Buffer.from('authsecret16byte').toString('base64') }], vapid });
+      }
       try {
         await dispatcher.send(provider.id, configForProvider, message);
         if (provider.id !== 'smtp' && !calls.length) failures.push(`${provider.id}: 没有发出任何 fetch 请求`);

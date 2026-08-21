@@ -9,6 +9,7 @@ import { DeliveryWorker } from './queue.js';
 const config = loadConfig();
 const repository = await createNodeRepository(config.databasePath, config.masterKey);
 const dispatcher = new ProviderDispatcher(config);
+dispatcher.bindPushStore(repository);
 let workerRef: DeliveryWorker;
 const notifications = new NotificationService(repository, () => void workerRef.drainOnce().catch(() => undefined));
 const worker = new DeliveryWorker(repository, dispatcher, config);

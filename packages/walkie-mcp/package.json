@@ -1,0 +1,26 @@
+{
+  "name": "walkie-mcp",
+  "version": "0.1.0",
+  "description": "stdio MCP wrapper for Walkie — forwards newline-delimited JSON-RPC from stdin to a remote Walkie /mcp (Streamable HTTP) endpoint.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "walkie-mcp": "./walkie-mcp.mjs"
+  },
+  "main": "./walkie-mcp.mjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lifeafter619/walkie.git",
+    "directory": "packages/walkie-mcp"
+  },
+  "keywords": [
+    "notifications",
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "cli"
+  ]
+}

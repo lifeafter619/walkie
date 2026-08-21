@@ -22,7 +22,10 @@ import { applyUpdate, checkUpdate } from './update.js';
 import { assertKeyDestinations, validateChannelCreate, validateChannelUpdate, validateRouteChannelIds } from './validation.js';
 import { barkFailure, barkSuccess, registerResponse, resolveBarkDestination, sendBark } from './bark-compat.js';
 import { appriseSeverity, discordText, parseAlertmanager, prioritySeverity, safeCompatUrl, sendWithAgentKey, slackText } from './compat.js';
+import { handleTelegramWebhook } from './telegram-webhook.js';
+import { generateVapidKeys } from './providers/webpush.js';
 import { parseMultipart } from '../shared/multipart.js';
+import { openApiSpec } from '../shared/openapi.js';
 import type { PlatformUsageMonitor } from './platform-usage.js';
 import { parseWalkieTrace } from '../shared/instance-link.js';
 
@@ -101,6 +104,7 @@ export function createApp(deps: AppDependencies) {
   });
 
   app.get('/health', (_req, res) => res.json({ status: 'ok', version: VERSION, queue: 'running' }));
+  app.get('/openapi.json', (_req, res) => res.json(openApiSpec(publicUrl())));
   app.get('/api/meta', asyncRoute(async (req, res) => {
     const publicUrl = (config.publicUrl ?? `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
     const hasDatabaseToken = (await repository.listAdminTokens()).some((token) => !token.revokedAt);
@@ -270,6 +274,41 @@ export function createApp(deps: AppDependencies) {
     if (!accepted) return res.status(409).json({ error: '会话已回复或已过期' });
     res.json({ success: true });
   }));
+
+  // Web Push 订阅管理（#6）：控制台登录后订阅本设备；VAPID 密钥对惰性生成存 settings
+  admin.get('/webpush', asyncRoute(async (_req, res) => {
+    let vapid = await repository.getPushVapidKeys();
+    if (!vapid) {
+      const keys = await generateVapidKeys();
+      await repository.setPushVapidKeys(keys);
+      vapid = keys;
+    }
+    const subscriptions = await repository.listPushSubscriptions();
+    res.json({ vapidPublicKey: vapid.publicKey, subscriptions: subscriptions.map((item) => ({ endpoint: item.endpoint, createdAt: item.createdAt })) });
+  }));
+  admin.post('/webpush/subscribe', asyncRoute(async (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const endpoint = String(body.endpoint ?? '').trim();
+    const keys = body.keys && typeof body.keys === 'object' ? body.keys as Record<string, unknown> : {};
+    const p256dh = String(keys.p256dh ?? '').trim();
+    const auth = String(keys.auth ?? '').trim();
+    try {
+      const url = new URL(endpoint);
+      if (url.protocol !== 'https:') throw new Error('只支持 https push endpoint');
+    } catch {
+      return res.status(400).json({ error: 'endpoint 不是合法的 HTTPS URL' });
+    }
+    if (!p256dh || !auth) return res.status(400).json({ error: '缺少 keys.p256dh / keys.auth' });
+    await repository.savePushSubscription({ endpoint, p256dh, auth, userAgent: req.header('user-agent') ?? undefined });
+    res.status(201).json({ success: true });
+  }));
+  admin.delete('/webpush/subscribe', asyncRoute(async (req, res) => {
+    const endpoint = String(req.query.endpoint ?? req.body?.endpoint ?? '');
+    const removed = await repository.deletePushSubscription(endpoint);
+    if (!removed) return res.status(404).json({ error: '订阅不存在' });
+    res.json({ success: true });
+  }));
+
   app.use('/api/admin', admin);
 
   app.post('/api/v1/notify', requireAgent, asyncRoute(async (req, res) => {
@@ -406,6 +445,18 @@ export function createApp(deps: AppDependencies) {
       void worker.drainOnce().catch(() => undefined);
       res.json({ id: delivery.id, time: Math.floor(Date.now() / 1000), event: 'message', topic: String(req.params[0]), message });
     } catch (error) { res.status(400).json({ code: 400, error: error instanceof Error ? error.message : '推送失败' }); }
+  }));
+
+  // Telegram Bot webhook：inline_keyboard 按钮点按回调（ask_user 选项即点即回）
+  app.post('/telegram/webhook/:secret', asyncRoute(async (req, res) => {
+    try {
+      const result = await handleTelegramWebhook(repository, (url, init) => dispatcher.rawPost(url, init), req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {}, req.header('x-telegram-bot-api-secret-token'));
+      res.status(result.statusCode).json(result.body);
+    } catch (error) {
+      // Telegram 对非 2xx 会无限重试；处理不了的更新重试也没用，记日志后按收讫处理
+      res.status(200).json({ ok: true });
+      console.error(JSON.stringify({ event: 'telegram.webhook.failed', message: error instanceof Error ? error.message : String(error) }));
+    }
   }));
 
   // ---- 以下五个兼容端点都必须注册在 barkLegacy 正则之前：那个模式吃掉任何 1–4 段路径 ----

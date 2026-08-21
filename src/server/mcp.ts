@@ -81,6 +81,18 @@ export function createRelayMcpServer(repository: RelayRepository, notifications:
     annotations: { destructiveHint: true, openWorldHint: true }
   }, async ({ scheduleId }) => result({ schedule: await repository.cancelSchedule(scheduleId, `agent:${apiKey.id}`, `agent:${apiKey.id}`) }));
 
+  if (apiKey.scopes.includes('notifications:send')) server.registerTool('report_idle', {
+    title: 'Report human idle time',
+    description: 'Report how long the human has been away from the keyboard (seconds). While idle < 120s (at keyboard), mobile push channels are deferred for non-critical notifications — desktop/webpush still fires. Reports expire after 5 minutes; re-report periodically if the human is present.',
+    inputSchema: z.object({
+      idleSeconds: z.number().int().min(0).max(86_400).describe('Seconds since the human last interacted; 0 = actively at the keyboard')
+    }),
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ idleSeconds }) => {
+    await repository.reportIdle(idleSeconds, `agent:${apiKey.id}`);
+    return result({ reported: true, idleSeconds });
+  });
+
   if (apiKey.scopes.includes('notifications:send')) server.registerTool('ask_user', {
     title: 'Ask the human a question',
     description: 'Push a question to the human through an allowed destination and get a conversationId. The human replies from any device via a one-time link; poll check_reply to collect the answer.',

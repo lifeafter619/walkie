@@ -4,7 +4,7 @@
 
 调研时间：2026-08-20。平台策略会变，动手前建议复核标注了「以官方页面为准」的条目。
 
-> **进度（2026-08-20）**：第一梯队 1–5（Slack / Discord / Alertmanager / Pushover / Apprise 兼容端点）与 #16（英文 README）已实现——双端注册（`app.ts` + `worker/index.ts`）、`COMPATIBILITY_ENDPOINTS` 登记、multipart 解析缺口一并修复；顺带修复审计发现的 DO alarm 250ms 死循环与 MCP `send_notification` 的 URL scheme 校验缺口。
+> **进度（2026-08-21）**：全部条目已实现——第一梯队 1–5（Slack / Discord / Alertmanager / Pushover / Apprise 兼容端点）、#16（英文 README）、#6 Web Push（VAPID ES256 + RFC 8291，含订阅管理与 Service Worker）、#7 Slack/Discord Bot、#8 飞书应用 + 钉钉工作通知、#9 AWS SES v2、#11 Telegram 内联按钮 + webhook 回调、#12 stdio 包装（`packages/walkie-mcp`）、#13 idle gating（MCP `report_idle`）、#14 `/openapi.json`、#15 CLI 与 GitHub Action（`packages/walkie-cli` + `.github/workflows/notify.yml`）。顺带修复审计发现的 DO alarm 250ms 死循环与 MCP URL scheme 校验缺口。Opsgenie 按考证拒绝（见 #10 位置的说明）。
 
 ---
 

@@ -4,6 +4,7 @@ import type { ProviderId, Severity } from '../../shared/types.js';
 import { appendWalkieTrace } from '../../shared/instance-link.js';
 import type { AppConfig } from '../config.js';
 import { assertSafeHost, safeFetch, type ResolveHost } from './network.js';
+import { encryptPushPayload, generateVapidKeys, vapidHeader, type PushSubscription, type VapidKeys } from './webpush.js';
 
 export interface ProviderMessage {
   title: string;
@@ -125,8 +126,7 @@ export function buildTencentSmsRequest(config: Record<string, unknown>, message:
   return { url: `https://${host}/`, init: { method: 'POST', headers: { Authorization: authorization, 'Content-Type': 'application/json; charset=utf-8', 'X-TC-Action': 'SendSms', 'X-TC-Version': '2021-01-11', 'X-TC-Timestamp': String(timestamp), 'X-TC-Region': string(config, 'region') || 'ap-guangzhou' }, body: payload } };
 }
 
-export function buildAwsSnsRequest(config: Record<string, unknown>, message: ProviderMessage, date = new Date()): { url: string; init: RequestInit } {
-  const region = string(config, 'region') || 'us-east-1';
+export function buildAwsSnsRequest(config: Record<string, unknown>, message: ProviderMessage, date = new Date()): { url: string; init: RequestInit } {  const region = string(config, 'region') || 'us-east-1';
   const host = `sns.${region}.${region.startsWith('cn-') ? 'amazonaws.com.cn' : 'amazonaws.com'}`;
   const amzDate = date.toISOString().replace(/[-:]|\.\d{3}/g, '').replace(/Z$/, 'Z');
   const shortDate = amzDate.slice(0, 8);
@@ -173,9 +173,85 @@ export function buildAwsSnsRequest(config: Record<string, unknown>, message: Pro
   };
 }
 
+/** AWS SigV4 泛化签名：SNS 用 form、SES v2 用 JSON，canonical request 的差异由参数传入 */
+function signAwsV4(options: {
+  method: string; host: string; path: string; region: string; service: string;
+  headers: Record<string, string>; body: string;
+  accessKeyId: string; secretAccessKey: string; sessionToken?: string; date?: Date;
+}): { authorization: string; amzDate: string } {
+  const date = options.date ?? new Date();
+  const amzDate = date.toISOString().replace(/[-:]|\.\d{3}/g, '').replace(/Z$/, 'Z');
+  const shortDate = amzDate.slice(0, 8);
+  const scope = `${shortDate}/${options.region}/${options.service}/aws4_request`;
+  const payloadHash = sha256(options.body);
+  const headerEntries = Object.entries({ ...options.headers, host: options.host, 'x-amz-date': amzDate, ...(options.sessionToken ? { 'x-amz-security-token': options.sessionToken } : {}) }).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+  const canonicalHeaders = headerEntries.map(([key, value]) => `${key}:${value}\n`).join('');
+  const signedHeaders = headerEntries.map(([key]) => key).join(';');
+  const canonicalRequest = `${options.method}\n${options.path}\n\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
+  const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${sha256(canonicalRequest)}`;
+  const dateKey = hmac('sha256', `AWS4${options.secretAccessKey}`, shortDate) as Buffer;
+  const regionKey = hmac('sha256', dateKey, options.region) as Buffer;
+  const serviceKey = hmac('sha256', regionKey, options.service) as Buffer;
+  const signingKey = hmac('sha256', serviceKey, 'aws4_request') as Buffer;
+  const signature = hmac('sha256', signingKey, stringToSign, 'hex') as string;
+  return { authorization: `AWS4-HMAC-SHA256 Credential=${options.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`, amzDate };
+}
+
+export function buildAwsSesRequest(config: Record<string, unknown>, message: ProviderMessage, date = new Date()): { url: string; init: RequestInit } {
+  const region = string(config, 'region') || 'us-east-1';
+  const host = `email.${region}.${region.startsWith('cn-') ? 'amazonaws.com.cn' : 'amazonaws.com'}`;
+  const payload = JSON.stringify({
+    FromEmailAddress: string(config, 'from'),
+    Destination: { ToAddresses: lines(config.to) },
+    Content: { Simple: { Subject: { Data: message.title }, Body: { Text: { Data: text(message) } } } }
+  });
+  const contentType = 'application/json';
+  const { authorization, amzDate } = signAwsV4({
+    method: 'POST', host, path: '/v2/email/outbound-emails', region, service: 'ses',
+    headers: { 'content-type': contentType }, body: payload,
+    accessKeyId: string(config, 'accessKeyId'), secretAccessKey: string(config, 'secretAccessKey'),
+    sessionToken: string(config, 'sessionToken') || undefined, date
+  });
+  return {
+    url: `https://${host}/v2/email/outbound-emails`,
+    init: {
+      method: 'POST',
+      headers: { 'Content-Type': contentType, 'X-Amz-Date': amzDate, ...(config.sessionToken ? { 'X-Amz-Security-Token': string(config, 'sessionToken') } : {}), Authorization: authorization },
+      body: payload
+    }
+  };
+}
+
 export class ProviderDispatcher {
   private readonly tokenCache = new Map<string, { value: string; expiresAt: number }>();
   private readonly tokenInflight = new Map<string, Promise<string>>();
+  /** Web Push 渠道的订阅与 VAPID 来源；由组装根（server/worker/vercel 入口）注入 */
+  pushSubscriptions: () => Promise<{ subscriptions: PushSubscription[]; vapid: VapidKeys }> = async () => {
+    throw new Error('Web Push 未配置：缺少订阅存储');
+  };
+
+  /** 订阅失效回调（404/410 清理）；组装根注入 */
+  onPushExpired?: (endpoints: string[]) => void;
+
+  /** 组装根一键接线：订阅存储 + VAPID 密钥（无则惰性生成）。与 RelayRepository 解耦成鸭子类型，保持 dispatcher 可独立实例化 */
+  bindPushStore(store: {
+    listPushSubscriptions: () => Promise<Array<{ endpoint: string; p256dh: string; auth: string }>>;
+    deletePushSubscription: (endpoint: string) => Promise<boolean>;
+    getPushVapidKeys: () => Promise<{ publicKey: string; privateKey: string } | undefined>;
+    setPushVapidKeys: (keys: { publicKey: string; privateKey: string }) => Promise<void>;
+  }): void {
+    this.pushSubscriptions = async () => {
+      let vapid = await store.getPushVapidKeys();
+      if (!vapid) {
+        vapid = await generateVapidKeys();
+        await store.setPushVapidKeys(vapid);
+      }
+      return { subscriptions: await store.listPushSubscriptions(), vapid };
+    };
+    this.onPushExpired = (endpoints) => {
+      for (const endpoint of endpoints) void store.deletePushSubscription(endpoint).catch(() => undefined);
+    };
+  }
   constructor(
     private readonly appConfig: Pick<AppConfig, 'allowPrivateWebhooks' | 'allowInsecureHttp'>,
     private readonly fetcher: typeof fetch = fetch,
@@ -184,6 +260,7 @@ export class ProviderDispatcher {
 
   async send(provider: ProviderId, config: Record<string, unknown>, message: ProviderMessage): Promise<ProviderResult> {
     if (provider === 'smtp') return this.sendSmtp(config, message);
+    if (provider === 'webpush') return this.sendWebPush(message);
     const limit = BODY_LIMITS[provider];
     const byteLimit = BODY_BYTE_LIMITS[provider];
     const chunks = byteLimit ? splitBodyBytes(message.body, byteLimit) : limit ? splitBody(message.body, limit) : [message.body];
@@ -207,6 +284,11 @@ export class ProviderDispatcher {
   /** 投递终态回调，走同一套 SSRF 校验 */
   async postCallback(url: string, payload: unknown): Promise<void> {
     await safeFetch(url, this.json(payload), this.appConfig, this.fetcher, this.resolveHost);
+  }
+
+  /** 任意 JSON POST（Telegram answerCallbackQuery 等），走同一套 SSRF 校验 */
+  async rawPost(url: string, init: RequestInit): Promise<void> {
+    await safeFetch(url, init, this.appConfig, this.fetcher, this.resolveHost);
   }
 
   private json(body: unknown, headers: Record<string, string> = {}): RequestInit {
@@ -243,6 +325,27 @@ export class ProviderDispatcher {
       const result = await safeFetch('https://api.bot.qq.com/app/getAppAccessToken', this.json({ appId: string(config, 'appId'), clientSecret: string(config, 'clientSecret') }), this.appConfig, this.fetcher, this.resolveHost);
       const body = JSON.parse(result.body) as Record<string, unknown>;
       return { value: String(body.access_token ?? ''), expiresIn: Number(body.expires_in ?? 7200) };
+    });
+  }
+
+  private async feishuToken(config: Record<string, unknown>): Promise<string> {
+    const key = `feishu:${sha256(`${string(config, 'appId')}:${string(config, 'appSecret')}`)}`;
+    return this.cachedToken(key, async () => {
+      const result = await safeFetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', this.json({ app_id: string(config, 'appId'), app_secret: string(config, 'appSecret') }), this.appConfig, this.fetcher, this.resolveHost);
+      const body = JSON.parse(result.body) as Record<string, unknown>;
+      if (Number(body.code) !== 0) throw new Error(String(body.msg ?? `飞书获取 tenant_access_token 失败（${body.code}）`));
+      return { value: String(body.tenant_access_token ?? ''), expiresIn: Number(body.expire ?? 7200) };
+    });
+  }
+
+  private async dingtalkWorkToken(config: Record<string, unknown>): Promise<string> {
+    const key = `dingtalk-work:${sha256(`${string(config, 'appKey')}:${string(config, 'appSecret')}`)}`;
+    return this.cachedToken(key, async () => {
+      const query = new URLSearchParams({ appkey: string(config, 'appKey'), appsecret: string(config, 'appSecret') });
+      const result = await safeFetch(`https://oapi.dingtalk.com/gettoken?${query}`, { method: 'GET' }, this.appConfig, this.fetcher, this.resolveHost);
+      const body = JSON.parse(result.body) as Record<string, unknown>;
+      if (Number(body.errcode) !== 0) throw new Error(String(body.errmsg ?? `钉钉获取 access_token 失败（${body.errcode}）`));
+      return { value: String(body.access_token ?? ''), expiresIn: 7200 };
     });
   }
 
@@ -535,14 +638,59 @@ export class ProviderDispatcher {
         const endsAt = new Date(startsAt.getTime() + 5 * 60_000);
         return { url: `${string(config, 'server').replace(/\/$/, '')}/api/v2/alerts`, init: this.json([{ labels: { alertname: message.title.slice(0, 128), severity: message.severity, source: string(config, 'source') || 'walkie' }, annotations: { summary: message.title, description: message.body }, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), ...(message.url ? { generatorURL: message.url } : {}) }], config.bearerToken ? { Authorization: `Bearer ${string(config, 'bearerToken')}` } : {}) };
       }
+      case 'slack-bot': {
+        const payload: Record<string, unknown> = {
+          channel: string(config, 'channel'),
+          text: `${message.title}\n${message.body}${message.url ? `\n${message.url}` : ''}`,
+          unfurl_links: false
+        };
+        if (config.threadTs) payload.thread_ts = string(config, 'threadTs');
+        // ask_user 会话的选项渲染成内联按钮（Slack Block Kit）
+        const options = Array.isArray(message.metadata.askOptions) ? message.metadata.askOptions.map(String) : [];
+        if (options.length && typeof message.metadata.conversationId === 'string') {
+          payload.blocks = [
+            { type: 'section', text: { type: 'mrkdwn', text: `*${message.title}*\n${message.body}` } },
+            { type: 'actions', elements: options.slice(0, 5).map((option, index) => ({ type: 'button', text: { type: 'plain_text', text: option.slice(0, 75) }, action_id: `walkie_ask_${index}` })) }
+          ];
+        }
+        return { url: 'https://slack.com/api/chat.postMessage', init: this.json(payload, { Authorization: `Bearer ${string(config, 'botToken')}` }) };
+      }
+      case 'discord-bot':
+        return { url: `https://discord.com/api/v10/channels/${encodeURIComponent(string(config, 'channelId'))}/messages`, init: this.json({ content: message.url ? `${message.title}\n${message.body}\n${message.url}` : `${message.title}\n${message.body}` }, { Authorization: `Bot ${string(config, 'botToken')}` }) };
+      case 'feishu-app': {
+        const token = await this.feishuToken(config);
+        const receiveIdType = string(config, 'receiveIdType') || 'open_id';
+        return { url: 'https://open.feishu.cn/open-apis/im/v1/messages', init: this.json({ receive_id_type: receiveIdType, receive_id: string(config, 'receiveId'), msg_type: 'text', content: JSON.stringify({ text: text(message) }) }, { Authorization: `Bearer ${token}` }) };
+      }
+      case 'dingtalk-work': {
+        const token = await this.dingtalkWorkToken(config);
+        return { url: `https://oapi.dingtalk.com/topapi/message/corpconversation/asyncsend_v2?access_token=${encodeURIComponent(token)}`, init: this.json({ agent_id: Number(string(config, 'agentId')), userid_list: string(config, 'userIdList') || undefined, to_all_user: string(config, 'userIdList') ? false : true, msg: { msgtype: 'text', text: { content: text(message) } } }) };
+      }
+      case 'aws-ses':
+        return buildAwsSesRequest(config, message);
       case 'jira-service-management':
         return { url: `${string(config, 'site').replace(/\/$/, '')}/rest/servicedeskapi/request`, init: this.json({ serviceDeskId: string(config, 'serviceDeskId'), requestTypeId: string(config, 'requestTypeId'), requestFieldValues: { summary: message.title, description: bodyText } }, { Accept: 'application/json', Authorization: `Basic ${Buffer.from(`${string(config, 'email')}:${string(config, 'apiToken')}`).toString('base64')}` }) };
-      case 'telegram':
-        return { url: `https://api.telegram.org/bot${string(config, 'botToken')}/sendMessage`, init: this.json({
+      case 'telegram': {
+        const payload: Record<string, unknown> = {
           chat_id: string(config, 'chatId'), text: bodyText, disable_notification: Boolean(config.disableNotification),
           ...(config.parseMode ? { parse_mode: string(config, 'parseMode') } : {}),
           ...(config.messageThreadId ? { message_thread_id: Number(config.messageThreadId) } : {})
-        }) };
+        };
+        // ask_user 的选项渲染成 inline_keyboard：点一下即回，不用打开一次性链接。
+        // callback_data 填 <conversationId>:<index>，由 POST /telegram/webhook/<secret> 收回
+        const askOptions = Array.isArray(message.metadata.askOptions) ? message.metadata.askOptions.map(String) : [];
+        if (askOptions.length && typeof message.metadata.conversationId === 'string') {
+          payload.reply_markup = {
+            inline_keyboard: [
+              askOptions.slice(0, 12).map((option, index) => ({
+                text: option.slice(0, 60),
+                callback_data: `${message.metadata.conversationId}:${index}`
+              }))
+            ]
+          };
+        }
+        return { url: `https://api.telegram.org/bot${string(config, 'botToken')}/sendMessage`, init: this.json(payload) };
+      }
       case 'wecom':
         return { url: `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${encodeURIComponent(string(config, 'key'))}`, init: this.json({ msgtype: 'markdown', markdown: { content: markdown(message) } }) };
       case 'feishu': {
@@ -757,6 +905,9 @@ export class ProviderDispatcher {
     if (provider === 'wecom-app' && Number(parsed.errcode) !== 0) throw new Error(String(parsed.errmsg ?? `企业微信返回错误码 ${parsed.errcode}`));
     if (provider === 'qq-bot' && !parsed.id) throw new Error(String(parsed.message ?? 'QQ 机器人未返回消息 ID'));
     if (provider === 'kook' && Number(parsed.code) !== 0) throw new Error(String(parsed.message ?? `KOOK 返回错误码 ${parsed.code}`));
+    if (provider === 'slack-bot' && parsed.ok !== true) throw new Error(String(parsed.error ?? 'Slack API 调用失败'));
+    if (provider === 'feishu-app' && parsed.code !== undefined && Number(parsed.code) !== 0) throw new Error(String(parsed.msg ?? `飞书返回错误码 ${parsed.code}`));
+    if (provider === 'dingtalk-work' && parsed.errcode !== undefined && Number(parsed.errcode) !== 0) throw new Error(String(parsed.errmsg ?? `钉钉返回错误码 ${parsed.errcode}`));
     if (provider === 'fcm' && !parsed.name) throw new Error('FCM 未返回消息 ID');
     if (provider === 'resend' && !parsed.id) throw new Error(String(parsed.message ?? 'Resend 未返回邮件 ID'));
     if (provider === 'mailgun' && !parsed.id) throw new Error(String(parsed.message ?? 'Mailgun 未返回邮件 ID'));
@@ -790,6 +941,44 @@ export class ProviderDispatcher {
     if (provider === 'synology-chat' && parsed.success === false) throw new Error(String(parsed.error ?? 'Synology Chat 拒绝了消息'));
     if (provider === 'pushover' && parsed.status !== undefined && Number(parsed.status) !== 1) throw new Error(String((parsed.errors as string[] | undefined)?.join('; ') ?? 'Pushover 拒绝了消息'));
     if (provider === 'rocketchat' && parsed.success === false) throw new Error(String(parsed.error ?? 'Rocket.Chat 拒绝了消息'));
+  }
+
+  /** Web Push：对本站所有订阅逐个加密投递（RFC 8291 每订阅单独 ECDH，不能复用密文） */
+  private async sendWebPush(message: ProviderMessage): Promise<ProviderResult> {
+    const { subscriptions, vapid } = await this.pushSubscriptions();
+    if (!subscriptions.length) throw new Error('还没有任何 Web Push 订阅；在「系统 → Web Push」页订阅本设备');
+    const payload = JSON.stringify({
+      title: message.title,
+      body: message.body,
+      severity: message.severity,
+      ...(message.url ? { url: message.url } : {}),
+      ...(typeof message.metadata.conversationId === 'string' ? { conversationId: message.metadata.conversationId } : {})
+    });
+    let delivered = 0;
+    let lastError = '';
+    const expired: string[] = [];
+    for (const subscription of subscriptions) {
+      try {
+        const endpoint = new URL(subscription.endpoint);
+        if (endpoint.protocol !== 'https:') throw new Error('push endpoint 不是 HTTPS');
+        const body = await encryptPushPayload(payload, subscription);
+        const authorization = await vapidHeader(vapid, endpoint.origin);
+        const response = await safeFetch(subscription.endpoint, {
+          method: 'POST',
+          headers: { 'content-type': 'application/octet-stream', 'content-length': String(body.length), ttl: '86400', urgency: message.severity === 'critical' ? 'high' : 'normal', authorization },
+          body: new Uint8Array(body)
+        }, this.appConfig, this.fetcher, this.resolveHost);
+        // 404/410 = 订阅已失效（浏览器清了权限/换设备），删掉避免每次投递都白打
+        if (response.status === 404 || response.status === 410) expired.push(subscription.endpoint);
+        else if (response.status < 300) delivered += 1;
+        else lastError = `HTTP ${response.status}: ${response.body.slice(0, 200)}`;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    if (expired.length) this.onPushExpired?.(expired);
+    if (!delivered) throw new Error(`Web Push 全部订阅失败${lastError ? `：${lastError}` : ''}`);
+    return { responseCode: 200, response: `delivered to ${subscriptions.length}` };
   }
 
   private async sendSmtp(config: Record<string, unknown>, message: ProviderMessage): Promise<ProviderResult> {

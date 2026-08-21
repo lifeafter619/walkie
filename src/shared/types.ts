@@ -76,7 +76,13 @@ export type ProviderId =
   | 'zulip'
   | 'webex'
   | 'apprise'
-  | 'webhook';
+  | 'webhook'
+  | 'slack-bot'
+  | 'discord-bot'
+  | 'feishu-app'
+  | 'dingtalk-work'
+  | 'aws-ses'
+  | 'webpush';
 
 export type DeliveryStatus = 'queued' | 'processing' | 'delivered' | 'partial' | 'failed';
 export type AttemptStatus = 'pending' | 'sending' | 'delivered' | 'retrying' | 'failed' | 'skipped';

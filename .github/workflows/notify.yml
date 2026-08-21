@@ -1,0 +1,69 @@
+name: Notify (Walkie)
+
+# 可复用通知 workflow（#15）：在 CI 结束/失败时通过 Walkie 推送。
+# 用法：
+#   jobs:
+#     notify:
+#       uses: lifeafter619/walkie/.github/workflows/notify.yml@main
+#       secrets:
+#         WALKIE_URL: https://walkie.example.com
+#         WALKIE_API_KEY: ${{ secrets.WALKIE_API_KEY }}
+#       with:
+#         destination: prod-alerts
+#         title: "Deploy finished"
+#         body: "v2.4.0 deployed by ${{ github.actor }}"
+
+on:
+  workflow_call:
+    inputs:
+      destination:
+        description: 'Walkie 目的地（频道/路由 ID 或 slug）'
+        required: true
+        type: string
+      title:
+        description: '通知标题'
+        required: true
+        type: string
+      body:
+        description: '通知正文'
+        required: true
+        type: string
+      severity:
+        description: 'info | success | warning | critical'
+        required: false
+        default: info
+        type: string
+      link:
+        description: '通知链接（如 workflow run 页面）'
+        required: false
+        default: ''
+        type: string
+    secrets:
+      WALKIE_URL:
+        description: 'Walkie 站点地址（如 https://walkie.example.com）'
+        required: true
+      WALKIE_API_KEY:
+        description: 'Agent API Key'
+        required: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Walkie notification
+        run: |
+          npx -y walkie@latest send \
+            --url "$WALKIE_URL" \
+            --token "$WALKIE_API_KEY" \
+            --to "$DESTINATION" \
+            --title "$TITLE" \
+            --body "$BODY" \
+            --severity "$SEVERITY" \
+            ${{ inputs.link && format('--link "{0}"', inputs.link) || '' }}
+        env:
+          WALKIE_URL: ${{ secrets.WALKIE_URL }}
+          WALKIE_API_KEY: ${{ secrets.WALKIE_API_KEY }}
+          DESTINATION: ${{ inputs.destination }}
+          TITLE: ${{ inputs.title }}
+          BODY: ${{ inputs.body }}
+          SEVERITY: ${{ inputs.severity }}

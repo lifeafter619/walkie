@@ -55,7 +55,12 @@ const responseFor = (url: string) => {
 describe('expanded provider catalog', () => {
   it('ships a local image asset for every provider', () => {
     const files = new Set(readdirSync(resolve(process.cwd(), 'src/web/assets/providers')).map((file) => file.replace(/\.(svg|png|ico)$/, '')));
-    for (const provider of PROVIDERS) expect(files.has(provider.id === 'synology-chat' ? 'synology' : provider.id), provider.id).toBe(true);
+    // 与 ProviderIcon 的 SLUG_OVERRIDES 同步：复用同品牌图的衍生渠道
+    const overrides: Partial<Record<string, string>> = {
+      'synology-chat': 'synology', 'slack-bot': 'slack', 'discord-bot': 'discord',
+      'feishu-app': 'feishu', 'dingtalk-work': 'dingtalk', 'aws-ses': 'aws-sns', webpush: 'walkie'
+    };
+    for (const provider of PROVIDERS) expect(files.has(overrides[provider.id] ?? provider.id), provider.id).toBe(true);
   });
 
   it('publishes every new provider with a maintained documentation URL and support level', () => {

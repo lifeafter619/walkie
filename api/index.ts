@@ -32,6 +32,7 @@ async function relayApp() {
   const config = loadConfig({ host: '0.0.0.0' });
   const repository = await createLibsqlRepository(process.env.TURSO_DATABASE_URL!, process.env.TURSO_AUTH_TOKEN, config.masterKey);
   const dispatcher = new ProviderDispatcher(config);
+  dispatcher.bindPushStore(repository);
   let workerRef: DeliveryWorker;
   const notifications = new NotificationService(repository, () => void workerRef.drainAll().catch(() => undefined));
   const worker = new DeliveryWorker(repository, dispatcher, config);

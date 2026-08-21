@@ -18,6 +18,9 @@ import { DeliveryWorker } from '../server/queue.js';
 import { assertKeyDestinations, validateChannelCreate, validateChannelUpdate, validateRouteChannelIds } from '../server/validation.js';
 import { barkFailure, barkSuccess, registerResponse, resolveBarkDestination, sendBark } from '../server/bark-compat.js';
 import { appriseSeverity, discordText, parseAlertmanager, prioritySeverity, safeCompatUrl, sendWithAgentKey, slackText } from '../server/compat.js';
+import { handleTelegramWebhook } from '../server/telegram-webhook.js';
+import { generateVapidKeys } from '../server/providers/webpush.js';
+import { openApiSpec } from '../shared/openapi.js';
 import { BodyTooLargeError, readBody, readTextBody } from './body.js';
 import { DurableRelayDatabase } from './database.js';
 import { PlatformUsageMonitor } from '../server/platform-usage.js';
@@ -80,6 +83,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       allowPrivateWebhooks: enabled(env.ALLOW_PRIVATE_WEBHOOKS),
       allowInsecureHttp: enabled(env.ALLOW_INSECURE_HTTP)
     }, fetch, resolveHost);
+    this.dispatcher.bindPushStore(this.repository);
     this.worker = new DeliveryWorker(this.repository, this.dispatcher, {
       deliveryWorkers: integer(env.DELIVERY_WORKERS, 2, 1, 16),
       maxDeliveryAttempts: integer(env.MAX_DELIVERY_ATTEMPTS, 4, 1, 10),
@@ -148,6 +152,7 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       const url = new URL(request.url);
       const path = url.pathname;
       if (path === '/health' && request.method === 'GET') return json({ status: 'ok', version: VERSION, runtime: 'cloudflare-workers', queue: 'alarm' });
+      if (path === '/openapi.json' && request.method === 'GET') return json(openApiSpec(url.origin));
       if (path === '/api/meta' && request.method === 'GET') {
         const hasDatabaseToken = (await this.repository.listAdminTokens()).some((token) => !token.revokedAt);
         return json({
@@ -209,6 +214,18 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       }
 
       // ---- 以下五个兼容端点必须在 legacyBark 正则之前匹配：那个模式吃掉任何 1–4 段路径 ----
+
+      // Telegram Bot webhook：inline_keyboard 按钮点按回调（ask_user 选项即点即回）
+      const telegramWebhook = /^\/telegram\/webhook\/([^/]+)$/.exec(path);
+      if (telegramWebhook && request.method === 'POST') {
+        try {
+          const result = await handleTelegramWebhook(this.repository, (url, init) => this.dispatcher.rawPost(url, init), await readBody(request), request.headers.get('x-telegram-bot-api-secret-token') ?? undefined);
+          return json(result.body, result.statusCode);
+        } catch (error) {
+          console.error(JSON.stringify({ event: 'telegram.webhook.failed', message: error instanceof Error ? error.message : String(error) }));
+          return json({ ok: true });
+        }
+      }
 
       // Slack Incoming Webhook：POST /services/<T>/<B>/<xxx>，末段为 Agent Key，成功返回纯文本 ok
       const slack = /^\/services\/([A-Za-z0-9_\-]+)\/([A-Za-z0-9_\-]+)\/([A-Za-z0-9_\-]+)$/.exec(path);
@@ -591,6 +608,36 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       const accepted = await this.repository.replyConversation(adminReply[1], text, 'admin');
       return accepted ? json({ success: true }) : json({ error: '会话已回复或已过期' }, 409);
     }
+    // Web Push 订阅管理（与 Node 版行为一致）
+    if (path === '/api/admin/webpush' && request.method === 'GET') {
+      let vapid = await this.repository.getPushVapidKeys();
+      if (!vapid) {
+        const keys = await generateVapidKeys();
+        await this.repository.setPushVapidKeys(keys);
+        vapid = keys;
+      }
+      const subscriptions = await this.repository.listPushSubscriptions();
+      return json({ vapidPublicKey: vapid.publicKey, subscriptions: subscriptions.map((item) => ({ endpoint: item.endpoint, createdAt: item.createdAt })) });
+    }
+    if (path === '/api/admin/webpush/subscribe' && request.method === 'POST') {
+      const body = await readBody(request);
+      const endpoint = String(body.endpoint ?? '').trim();
+      const keys = body.keys && typeof body.keys === 'object' ? body.keys as Record<string, unknown> : {};
+      const p256dh = String(keys.p256dh ?? '').trim();
+      const auth = String(keys.auth ?? '').trim();
+      try {
+        const parsed = new URL(endpoint);
+        if (parsed.protocol !== 'https:') throw new Error('https only');
+      } catch { return json({ error: 'endpoint 不是合法的 HTTPS URL' }, 400); }
+      if (!p256dh || !auth) return json({ error: '缺少 keys.p256dh / keys.auth' }, 400);
+      await this.repository.savePushSubscription({ endpoint, p256dh, auth, userAgent: request.headers.get('user-agent') ?? undefined });
+      return json({ success: true }, 201);
+    }
+    if (path === '/api/admin/webpush/subscribe' && request.method === 'DELETE') {
+      const endpoint = url.searchParams.get('endpoint') ?? '';
+      const removed = await this.repository.deletePushSubscription(endpoint);
+      return removed ? json({ success: true }) : json({ error: '订阅不存在' }, 404);
+    }
     return json({ error: 'Not found' }, 404);
   }
 
@@ -670,7 +717,7 @@ export default {
     if (!env.MASTER_KEY) return setupRequired('还没有配置 MASTER_KEY，实例暂时无法启动。');
     if (Buffer.from(env.MASTER_KEY, 'base64').length !== 32) return setupRequired('MASTER_KEY 不是 base64 编码的 32 字节密钥。');
     const path = new URL(request.url).pathname;
-    if (path === '/health' || path === '/push' || path === '/ping' || path === '/healthz' || path === '/info' || path === '/register' || path.startsWith('/register/') || path === '/mcp' || path.startsWith('/api/') || path.startsWith('/reply/') || /^\/(?:send\/)?[^/]+\.send$/.test(path) || /^\/(?!assets(?:\/|$))[^/]+(?:\/[^/]+){0,3}$/.test(path)) {
+    if (path === '/health' || path === '/openapi.json' || path === '/push' || path === '/ping' || path === '/healthz' || path === '/info' || path === '/register' || path.startsWith('/register/') || path === '/mcp' || path.startsWith('/api/') || path.startsWith('/reply/') || /^\/(?:send\/)?[^/]+\.send$/.test(path) || /^\/(?!assets(?:\/|$))[^/]+(?:\/[^/]+){0,3}$/.test(path)) {
       return env.WALKIE.getByName('default').fetch(request);
     }
     return env.ASSETS.fetch(request);

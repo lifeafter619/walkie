@@ -114,7 +114,8 @@ export class NotificationService {
       body: `${input.question}${input.options?.length ? `\n\n选项：${input.options.join(' / ')}` : ''}\n\n打开链接回复（${Math.round(timeoutSeconds / 60)} 分钟内有效）：\n${replyUrl}`,
       severity: input.severity ?? 'warning',
       url: replyUrl,
-      metadata: { via: 'ask_user', conversationId: conversation.id }
+      // askOptions + conversationId：telegram/discord-bot 等渠道据此渲染内联按钮（点按即回）
+      metadata: { via: 'ask_user', conversationId: conversation.id, ...(input.options?.length ? { askOptions: input.options } : {}) }
     }, source, apiKey);
     await this.repository.attachConversationDelivery(conversation.id, delivery.id);
     return { conversation, replyUrl, deliveryId: delivery.id };

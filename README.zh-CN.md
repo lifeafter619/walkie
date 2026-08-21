@@ -206,8 +206,9 @@ bearer_token_env_var = "WALKIE_API_KEY"
 | `list_destinations` | 列出该 Key 可用的频道与路由 |
 | `send_notification` | 发送通知，返回 deliveryId |
 | `get_delivery` | 查询投递的总体与分频道状态 |
-| `ask_user` | 向人类提问，推送一次性回复链接 |
+| `ask_user` | 向人类提问，推送一次性回复链接（Telegram 渠道渲染内联按钮，点按即回） |
 | `check_reply` | 长轮询等待人类回复 |
+| `report_idle` | 上报人类离开键盘秒数；idle < 120s 时非 critical 的手机推送延后，桌面照推 |
 | `list_routes` | 列出可用路由 |
 | `list_channel_types` / `list_channels` | 渠道类型字段定义 / 渠道列表（`config:write`） |
 | `create_channel` / `update_channel` / `delete_channel` | 渠道管理（`config:write`） |
@@ -235,7 +236,27 @@ curl -X POST https://你的域名/api/v1/notify \
 
 跨实例投递会自动携带本地投递 ID 作为远端幂等键，并在 `X-Walkie-Trace` 中记录已访问实例。再次进入相同实例或超过 8 跳时会终止转发，避免路由配置错误形成通知回环。多个域名指向同一实例时仍以 8 跳上限兜底。
 
-`POST /api/v1/ask` 提问、`GET /api/v1/conversations/:id` 取回复、`GET /api/v1/deliveries/:id` 查投递。
+`POST /api/v1/ask` 提问、`GET /api/v1/conversations/:id` 取回复、`GET /api/v1/deliveries/:id` 查投递。完整机器可读契约见 `GET /openapi.json`（OpenAPI 3.1）。
+
+### stdio MCP 包装 — 本地零部署
+
+只支持 stdio 的 MCP 客户端可通过 [`packages/walkie-mcp`](packages/walkie-mcp) 直连已部署实例：
+
+```jsonc
+// Claude Code — .mcp.json
+{ "mcpServers": { "walkie": {
+  "command": "npx", "args": ["-y", "walkie-mcp@latest", "--url", "https://你的域名", "--token", "rdk_..."]
+} } }
+```
+
+### CLI 与 GitHub Action — `npx walkie send`
+
+```bash
+npx walkie send --url https://你的域名 --token rdk_... --to prod-alerts \
+  --title "部署失败" --body "已执行回滚" --severity critical
+```
+
+可复用 workflow：`uses: lifeafter619/walkie/.github/workflows/notify.yml@main`，详见 [`packages/walkie-cli`](packages/walkie-cli)。
 
 ### Server酱兼容
 

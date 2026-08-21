@@ -170,6 +170,10 @@ export class RelayRepository {
         enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS schedules_due ON schedules(enabled, next_run_at);
+      CREATE TABLE IF NOT EXISTS push_subscriptions (
+        endpoint TEXT PRIMARY KEY, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
+        user_agent TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
     `);
     const channelColumns = new Set((await this.db.all('PRAGMA table_info(channels)')).map((row) => String(row.name)));
     if (!channelColumns.has('rate_limit_per_min')) await this.db.exec('ALTER TABLE channels ADD COLUMN rate_limit_per_min INTEGER');
@@ -1203,10 +1207,32 @@ export class RelayRepository {
 
   async setRetention(input: Partial<RetentionSettings>): Promise<RetentionSettings> {
     const merged = { ...(await this.getRetention()), ...input };
-    await this.db.run("INSERT INTO settings (key,value,updated_at) VALUES ('retention',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+    await this.db.run("INSERT INTO settings (key,value,updated_at) VALUES ('retention',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
       [JSON.stringify(merged), now()]);
     await this.audit('admin', 'retention.update', 'settings', 'retention', merged as Record<string, unknown>);
     return merged;
+  }
+
+  // ---- idle gating（#13）----
+
+  /** Agent 上报的人离键盘秒数；freshForSec 内有效（过期视为不再键盘前） */
+  async reportIdle(seconds: number, reporter: string): Promise<void> {
+    await this.db.run("INSERT INTO settings (key,value,updated_at) VALUES ('idle_report',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+      [JSON.stringify({ seconds: Math.max(0, Math.min(86_400, Math.floor(seconds))), reporter, at: now() }), now()]);
+  }
+
+  /** 最近一次 idle 上报；超过 maxAgeSeconds 视为无数据 */
+  async getIdleReport(maxAgeSeconds = 300): Promise<{ seconds: number; at: string } | undefined> {
+    const row = await this.db.get("SELECT value FROM settings WHERE key='idle_report'");
+    if (!row) return undefined;
+    try {
+      const parsed = JSON.parse(String(row.value)) as { seconds?: number; at?: string };
+      if (typeof parsed.seconds !== 'number' || typeof parsed.at !== 'string') return undefined;
+      if (Date.now() - new Date(parsed.at).getTime() > maxAgeSeconds * 1000) return undefined;
+      return { seconds: parsed.seconds, at: parsed.at };
+    } catch {
+      return undefined;
+    }
   }
 
   /** 删除超过保留窗口的行；0 天 = 永久保留（跳过）。返回各表清理行数。 */
@@ -1231,5 +1257,37 @@ export class RelayRepository {
       auditEvents = result.changes;
     }
     return { deliveries, conversations, auditEvents };
+  }
+
+  // ---- Web Push 订阅与 VAPID 密钥 ----
+
+  async savePushSubscription(input: { endpoint: string; p256dh: string; auth: string; userAgent?: string }): Promise<void> {
+    const timestamp = now();
+    await this.db.run(
+      `INSERT INTO push_subscriptions (endpoint,p256dh,auth,user_agent,created_at,updated_at) VALUES (?,?,?,?,?,?)
+       ON CONFLICT(endpoint) DO UPDATE SET p256dh=excluded.p256dh, auth=excluded.auth, updated_at=excluded.updated_at`,
+      [input.endpoint, input.p256dh, input.auth, input.userAgent ?? null, timestamp, timestamp]
+    );
+  }
+
+  async listPushSubscriptions(): Promise<Array<{ endpoint: string; p256dh: string; auth: string; createdAt: string }>> {
+    const rows = await this.db.all('SELECT endpoint,p256dh,auth,created_at FROM push_subscriptions');
+    return rows.map((row) => ({ endpoint: String(row.endpoint), p256dh: String(row.p256dh), auth: String(row.auth), createdAt: String(row.created_at) }));
+  }
+
+  async deletePushSubscription(endpoint: string): Promise<boolean> {
+    const result = await this.db.run('DELETE FROM push_subscriptions WHERE endpoint=?', [endpoint]);
+    return result.changes > 0;
+  }
+
+  /** VAPID 密钥对存 settings（非凭据，不需要 DEK；公开钥本来就要发给浏览器） */
+  async getPushVapidKeys(): Promise<{ publicKey: string; privateKey: string } | undefined> {
+    const row = await this.db.get("SELECT value FROM settings WHERE key='webpush_vapid'");
+    if (!row) return undefined;
+    try { return JSON.parse(String(row.value)) as { publicKey: string; privateKey: string }; } catch { return undefined; }
+  }
+
+  async setPushVapidKeys(keys: { publicKey: string; privateKey: string }): Promise<void> {
+    await this.db.run("INSERT INTO settings (key,value,updated_at) VALUES ('webpush_vapid',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at", [JSON.stringify(keys), now()]);
   }
 }

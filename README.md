@@ -207,8 +207,9 @@ bearer_token_env_var = "WALKIE_API_KEY"
 | `list_destinations` | List channels and routes this key may use |
 | `send_notification` | Send a notification, returns a deliveryId |
 | `get_delivery` | Query a delivery's overall and per-channel status |
-| `ask_user` | Ask the human a question, pushes a one-time reply link |
+| `ask_user` | Ask the human a question, pushes a one-time reply link (Telegram channels render inline buttons — tap to reply) |
 | `check_reply` | Long-poll for the human's reply |
+| `report_idle` | Report seconds since the human was last at the keyboard; while idle < 120s non-critical mobile pushes are deferred, desktop still fires |
 | `list_routes` | List usable routes |
 | `list_channel_types` / `list_channels` | Channel type field definitions / channel list (`config:write`) |
 | `create_channel` / `update_channel` / `delete_channel` | Channel management (`config:write`) |
@@ -230,7 +231,27 @@ curl -X POST https://your-domain/api/v1/notify \
   -d '{"destination":"prod-alerts","title":"Deploy done","body":"v2.4.0 is live","severity":"success"}'
 ```
 
-`POST /api/v1/ask` asks a question, `GET /api/v1/conversations/:id` fetches the reply, `GET /api/v1/deliveries/:id` checks a delivery.
+`POST /api/v1/ask` asks a question, `GET /api/v1/conversations/:id` fetches the reply, `GET /api/v1/deliveries/:id` checks a delivery. Full machine-readable contract: [`GET /openapi.json`](#) (OpenAPI 3.1).
+
+### stdio MCP wrapper — zero local deploy
+
+Stdio-only MCP clients can reach a deployed Walkie through [`packages/walkie-mcp`](packages/walkie-mcp):
+
+```jsonc
+// Claude Code — .mcp.json
+{ "mcpServers": { "walkie": {
+  "command": "npx", "args": ["-y", "walkie-mcp@latest", "--url", "https://your-domain", "--token", "rdk_..."]
+} } }
+```
+
+### CLI & GitHub Action — `npx walkie send`
+
+```bash
+npx walkie send --url https://your-domain --token rdk_... --to prod-alerts \
+  --title "Deploy failed" --body "rollback executed" --severity critical
+```
+
+Reusable workflow: `uses: lifeafter619/walkie/.github/workflows/notify.yml@main` — see [`packages/walkie-cli`](packages/walkie-cli).
 
 ### Connect other Walkie instances
 

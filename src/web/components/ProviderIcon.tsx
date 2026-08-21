@@ -8,7 +8,13 @@ import { Bell } from 'lucide-react';
 
 /** 文件名与 ProviderId 不一致的情况 */
 const SLUG_OVERRIDES: Partial<Record<ProviderId, string>> = {
-  'synology-chat': 'synology'
+  'synology-chat': 'synology',
+  'slack-bot': 'slack',
+  'discord-bot': 'discord',
+  'feishu-app': 'feishu',
+  'dingtalk-work': 'dingtalk',
+  'aws-ses': 'aws-sns',
+  webpush: 'walkie'
 };
 
 const assetModules = {
@@ -113,7 +119,13 @@ const BRAND_HEX: Record<ProviderId, string> = {
   'synology-chat': 'B5B5B6',
   pagerduty: '06AC38',
   line: '00C300',
-  webhook: '6B7280'
+  webhook: '6B7280',
+  'slack-bot': '4A154B',
+  'discord-bot': '5865F2',
+  'feishu-app': '3370FF',
+  'dingtalk-work': '0089FF',
+  'aws-ses': 'DD344C',
+  webpush: '267365'
 };
 
 export function providerBrand(provider: ProviderId): { hex: string } {

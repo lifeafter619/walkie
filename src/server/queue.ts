@@ -3,10 +3,17 @@ import type { RelayRepository } from './database.js';
 import type { ProviderDispatcher } from './providers/dispatcher.js';
 import type { Channel, DeliveryAttempt, Severity } from '../shared/types.js';
 
+/** idle gating 阈值下延后投递的"手机推送类"渠道；桌面（webpush）与聊天渠道不拦 */
+const MOBILE_PUSH_PROVIDERS: ReadonlySet<string> = new Set([
+  'bark', 'ntfy', 'gotify', 'pushover', 'pushbullet', 'pushdeer', 'chanify', 'pushme',
+  'xizhi', 'qmsg', 'serverchan', 'pushplus', 'wxpusher', 'pushsafer', 'simplepush',
+  'pushy', 'fcm', 'expo', 'onesignal', 'pusher-beams', 'pushpad', 'join',
+  'huawei-push', 'xiaomi-push', 'oppo-push', 'vivo-push', 'meizu-push', 'honor-push', 'jpush', 'getui'
+]);
+
 /** 返回静默结束时刻；不在静默期返回 undefined。quietHours 形如 "22:00-08:00"（服务器本地时间）
  *  或 "22:00-08:00@Asia/Shanghai"（显式 IANA 时区；Cloudflare Workers 本地时间恒为 UTC，务必带时区） */
-export function quietUntil(quietHours: string | undefined, severity: Severity, at = new Date()): Date | undefined {
-  if (!quietHours || severity === 'critical') return undefined;
+export function quietUntil(quietHours: string | undefined, severity: Severity, at = new Date()): Date | undefined {  if (!quietHours || severity === 'critical') return undefined;
   const match = /^(\d{2}):(\d{2})-(\d{2}):(\d{2})(?:@(.+))?$/.exec(quietHours);
   if (!match) return undefined;
   let minutes: number;
@@ -185,6 +192,13 @@ export class DeliveryWorker {
         const quiet = quietUntil(channel.quietHours, delivery.severity);
         if (quiet) {
           await this.repository.deferAttempt(attempt.id, quiet.toISOString());
+          return;
+        }
+        // idle gating（#13）：Agent 报告人在键盘前（idle < 120s）时，手机推送类渠道延后，
+        // 桌面（webpush）与 critical 照发。上报 5 分钟后过期，不会永久卡住通知
+        const idle = await this.repository.getIdleReport();
+        if (idle && idle.seconds < 120 && delivery.severity !== 'critical' && MOBILE_PUSH_PROVIDERS.has(channel.provider)) {
+          await this.repository.deferAttempt(attempt.id, new Date(Date.now() + 5 * 60_000).toISOString());
           return;
         }
         if (this.throttled(channel)) {

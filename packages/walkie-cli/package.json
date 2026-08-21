@@ -1,0 +1,26 @@
+{
+  "name": "walkie",
+  "version": "0.1.0",
+  "description": "CLI for Walkie notifications — send and check notifications from CI (GitHub Actions) or the terminal.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "walkie": "./walkie.mjs"
+  },
+  "main": "./walkie.mjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lifeafter619/walkie.git",
+    "directory": "packages/walkie-cli"
+  },
+  "keywords": [
+    "notifications",
+    "walkie",
+    "cli",
+    "github-actions",
+    "ci"
+  ]
+}
