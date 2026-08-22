@@ -62,7 +62,11 @@ export async function safeFetch(
   // 由下方 !response.ok 统一按失败处理，SSRF 防重定向语义在 Node 与 workerd 上一致
   const response = await fetcher(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(12_000) });
   const body = (await response.text()).slice(0, 4096);
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${body || response.statusText}`);
+  if (!response.ok) {
+    const error = new Error(`HTTP ${response.status}: ${body || response.statusText}`) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);

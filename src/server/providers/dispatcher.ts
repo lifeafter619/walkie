@@ -1031,12 +1031,15 @@ export class ProviderDispatcher {
           },
           body: new Uint8Array(body)
         }, this.appConfig, this.fetcher, this.resolveHost);
-        // 404/410 = 订阅已失效（浏览器清了权限/换设备），删掉避免每次投递都白打
         if (response.status === 404 || response.status === 410) expired.push(subscription.endpoint);
         else if (response.status < 300) delivered += 1;
         else lastError = `HTTP ${response.status}: ${response.body.slice(0, 200)}`;
       } catch (error) {
-        lastError = error instanceof Error ? error.message : String(error);
+        // safeFetch 对非 2xx 直接抛错（带的 status 见 network.ts），404/410 = 订阅已失效
+        // （浏览器清了权限/换设备），删掉避免每次投递都白打。不能只看返回值——那段判断永远走不到
+        const status = (error as { status?: number }).status;
+        if (status === 404 || status === 410) expired.push(subscription.endpoint);
+        else lastError = error instanceof Error ? error.message : String(error);
       }
     }
     if (expired.length) this.onPushExpired?.(expired);

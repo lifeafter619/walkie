@@ -214,8 +214,23 @@ if (command === 'status') {
 const WALKIE_HOOK_MARKER = 'installed-by-walkie';
 const HOOK_ENDPOINT = '/api/v1/hooks/agent';
 
+/** 读 JSON 配置。文件不存在 → undefined（正常新建）；存在但解析失败 → 抛错。
+ *  必须区分这两种情况：把损坏文件当空对象写回，用户手写/手改的配置会被整份清掉 */
 function readJson(file) {
-  try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
+  let text;
+  try { text = readFileSync(file, 'utf8'); } catch { return undefined; }
+  try { return JSON.parse(text); } catch {
+    // UTF-8 BOM：记事本「UTF-8 带 BOM」存出的文件 JSON.parse 必炸，但内容是好的——剥掉再试一次
+    if (text.charCodeAt(0) === 0xfeff) {
+      try { return JSON.parse(text.slice(1)); } catch { /* 真坏了，落到下面的报错 */ }
+    }
+    throw new Error(`${file} 不是有效的 JSON（手改过或被截断？）。请先修复该文件再重试，walkie 不会覆盖它。`);
+  }
+}
+
+/** 探测/卸载等只读或尽力而为的路径用：损坏文件按「读不到」处理，不让整个命令崩 */
+function safeRead(file) {
+  try { return readJson(file); } catch { return null; }
 }
 
 function writeJson(file, value) {
@@ -484,7 +499,7 @@ if (command === 'hook') {
     const installed = scope === 'user' && Array.isArray(tool.bin) ? onPath(tool.bin) : false;
     let hooked = false;
     if (tool.shape === 'plugin') hooked = existsSync(configFile(name));
-    else hooked = JSON.stringify(readJson(configFile(name)) ?? {}).includes('/api/v1/hooks/') || hasScript(name);
+    else hooked = JSON.stringify(safeRead(configFile(name)) ?? {}).includes('/api/v1/hooks/') || hasScript(name);
     return { name, label: tool.label, configured, installed, hooked, detected: configured || installed };
   }
 
@@ -562,7 +577,7 @@ if (command === 'hook') {
       const file = configFile(name);
       let removed = 0;
       if (tool.shape === 'nested') {
-        const config = readJson(file);
+        const config = safeRead(file);
         if (config && typeof config === 'object') {
           let next = atPath(config, tool.container, (events) => stripHookGroups(events));
           removed = stripHookGroups.removed;
@@ -579,7 +594,7 @@ if (command === 'hook') {
         }
         if (removeScript(name)) removed++;
       } else if (tool.shape === 'flat') {
-        const config = readJson(file);
+        const config = safeRead(file);
         if (config?.hooks) {
           for (const event of Object.keys(config.hooks)) {
             if (!Array.isArray(config.hooks[event])) continue;
@@ -634,6 +649,13 @@ if (command === 'hook') {
   for (const name of targets) {
     const tool = TOOLS[name];
     const file = configFile(name);
+    // 配置文件存在但不是有效 JSON（手改坏/被截断/编辑器存了怪编码）：跳过而不是当空对象覆盖——
+    // 那会把用户已有的全部设置清掉。readJson 的报错信息里带了修复指引
+    let parsed;
+    try { parsed = readJson(file); } catch (error) {
+      process.stderr.write(`✗ ${tool.label}：${error instanceof Error ? error.message : String(error)}\n`);
+      continue;
+    }
     if (tool.shape === 'nested') {
       const handler = tool.handler === 'http'
         ? {
@@ -644,13 +666,13 @@ if (command === 'hook') {
           }
         : { type: 'command', command: runCommand(installScript(name)), timeout: tool.timeout };
       const hookConfig = Object.fromEntries(tool.events.map((event) => [event, { hooks: [handler] }]));
-      let config = atPath(readJson(file) ?? {}, tool.container, (events) => mergeHookGroups(events, hookConfig));
+      let config = atPath(parsed ?? {}, tool.container, (events) => mergeHookGroups(events, hookConfig));
       // ZCode 的 hooks 默认不启用，walkie 依赖它必须打开
       if (tool.enable) config = { ...config, hooks: { ...config.hooks, enabled: true } };
       writeJson(file, config);
     } else if (tool.shape === 'flat') {
       const scriptFile = installScript(name);
-      const config = readJson(file) ?? {};
+      const config = parsed ?? {};
       config.version = config.version ?? 1;
       config.hooks = config.hooks ?? {};
       for (const [event, timeout] of Object.entries(tool.events)) {

@@ -150,4 +150,23 @@ describe('webpush RFC 8291/8292', () => {
     // info：urgency=low，推送服务可攒批省电；TTL 拉满一天
     expect(headersOf[1]).toMatchObject({ urgency: 'low', ttl: '86400' });
   });
+
+  it('reports 404/410 subscriptions as expired via onPushExpired (safeFetch throws on non-2xx)', async () => {
+    // 回归：safeFetch 对非 2xx 直接抛错，早期版本的 404/410 判断写在返回值分支里永远走不到，
+    // 失效订阅既不清理、也把整条投递拖成失败。现在必须从错误里读 status
+    const alive = await browserSubscription();
+    const dead = await browserSubscription();
+    dead.endpoint = 'https://fcm.googleapis.com/fcm/send/gone-subscription';
+    let expired: string[] = [];
+    const captured = vi.fn(async (url: string | URL | Request) =>
+      String(url).includes('gone-subscription') ? new Response('Gone', { status: 410 }) : new Response('', { status: 201 }));
+    const dispatcher = new ProviderDispatcher({ allowPrivateWebhooks: false, allowInsecureHttp: false },
+      captured as unknown as MockFetch, async () => ['142.250.0.1']);
+    dispatcher.pushSubscriptions = async () => ({ subscriptions: [alive, dead], vapid: await generateVapidKeys() });
+    dispatcher.onPushExpired = (endpoints) => { expired = endpoints; };
+
+    const result = await dispatcher.send('webpush', {}, { title: '部署', body: 'v1 完成', severity: 'info', metadata: {} });
+    expect(result.response).toBe('delivered to 1/2'); // 活着的订阅照常送达
+    expect(expired).toEqual([dead.endpoint]); // 失效的进清理列表，下轮不再白打
+  });
 });

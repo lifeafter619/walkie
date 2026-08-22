@@ -284,6 +284,49 @@ describe('walkie CLI', () => {
     server.close();
   }, 60_000);
 
+  // 配置文件存在但 JSON 损坏（手改坏/被截断/记事本存了 BOM 编码变体）：绝不能当空对象整份覆盖。
+  // 回归场景：旧版 readJson 把解析失败吞成 null → ?? {} → 用户 settings.json 只剩 walkie hooks
+  it('refuses to touch a config file with broken JSON and keeps it byte-identical', async () => {
+    const server = http.createServer((_req, res) => { res.statusCode = 200; res.end(JSON.stringify({ ok: true })); });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const home = mkdtempSync(join(tmpdir(), 'walkie-hook-broken-'));
+    mkdirSync(join(home, '.claude'), { recursive: true });
+    const broken = `{\n  "model": "sonnet",\n  "hooks": {,}\n  // 手写注释\n`; // 截断 + 注释，JSON.parse 必炸
+    writeFileSync(join(home, '.claude', 'settings.json'), broken);
+
+    const runResult = await run('node', ['packages/walkie-cli/walkie.mjs', 'hook', '--tools', 'claude'], {
+      env: { ...process.env, WALKIE_HOME: home, WALKIE_URL: `http://127.0.0.1:${port}`, WALKIE_API_KEY: 'tok' }
+    });
+    expect(runResult.stderr).toContain('不是有效的 JSON');
+    // 文件一个字节都没动
+    expect(readFileSync(join(home, '.claude', 'settings.json'), 'utf8')).toBe(broken);
+
+    rmSync(home, { recursive: true, force: true });
+    server.close();
+  }, 30_000);
+
+  // 记事本「UTF-8 带 BOM」存出的配置：内容本身有效，剥 BOM 后照常安装（不能当成损坏拒之门外）
+  it('installs into a BOM-prefixed config file by stripping the BOM', async () => {
+    const server = http.createServer((_req, res) => { res.statusCode = 200; res.end(JSON.stringify({ ok: true })); });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const home = mkdtempSync(join(tmpdir(), 'walkie-hook-bom-'));
+    mkdirSync(join(home, '.claude'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'settings.json'), `\ufeff${JSON.stringify({ model: 'opus' }, null, 2)}`);
+
+    const runResult = await run('node', ['packages/walkie-cli/walkie.mjs', 'hook', '--tools', 'claude'], {
+      env: { ...process.env, WALKIE_HOME: home, WALKIE_URL: `http://127.0.0.1:${port}`, WALKIE_API_KEY: 'tok' }
+    });
+    expect(runResult.stdout).toContain('已写入');
+    const settings = JSON.parse(readFileSync(join(home, '.claude', 'settings.json'), 'utf8'));
+    expect(settings.model).toBe('opus'); // BOM 文件里的用户设置保留
+    expect(settings.hooks.Stop).toBeTruthy(); // walkie hooks 正常写入
+
+    rmSync(home, { recursive: true, force: true });
+    server.close();
+  }, 30_000);
+
   it('installs the opencode plugin and removes it again', async () => {
     const server = http.createServer((_req, res) => { res.statusCode = 200; res.end(JSON.stringify({ ok: true })); });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));

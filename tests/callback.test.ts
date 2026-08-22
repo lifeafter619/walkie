@@ -49,7 +49,7 @@ describe('delivery callback and global rate limit', () => {
     await repository.close();
   });
 
-  it('retries a failed callback on the next drain', async () => {
+  it('retries a failed callback after the backoff window (no more every-drain hammering)', async () => {
     const repository = await createNodeRepository(':memory:', randomBytes(32));
     const channel = await repository.createChannel({ name: 'Hook', slug: 'hook-retry', provider: 'webhook', config: { url: 'https://hooks.example.com/retry', method: 'POST', bodyTemplate: '{}' } });
     let callbackAttempts = 0;
@@ -58,13 +58,43 @@ describe('delivery callback and global rate limit', () => {
       return new Response('{}', { status: 200 });
     }) as unknown as MockFetch;
     const worker = new DeliveryWorker(repository, new ProviderDispatcher(config, fetcher), { deliveryWorkers: 2, maxDeliveryAttempts: 1, retryBaseMs: 1 });
-    await new NotificationService(repository).send({ destination: channel.id, title: 'x', body: 'y', callbackUrl: 'https://agent.example.com/retry' }, 'test');
+    const delivery = await new NotificationService(repository).send({ destination: channel.id, title: 'x', body: 'y', callbackUrl: 'https://agent.example.com/retry' }, 'test');
 
+    await worker.drainOnce(); // 首次投递 + 首次回调失败（500）
     await worker.drainOnce();
-    await worker.drainOnce();
+    await worker.drainOnce(); // 退避期内：不再每轮 drain 重打回调端点
+    let calls = vi.mocked(fetcher).mock.calls.filter((call) => String(call[0]).includes('agent.example.com'));
+    expect(calls).toHaveLength(1);
 
-    const calls = vi.mocked(fetcher).mock.calls.filter((call) => String(call[0]).includes('agent.example.com'));
+    // 退避窗口已过（把失败时间戳拨回 2 分钟前）：重试并成功，callbackSent 落定
+    await repository.db.run(`UPDATE deliveries SET metadata=json_set(metadata,'$.callbackFailedAt',?) WHERE id=?`, [new Date(Date.now() - 2 * 60_000).toISOString(), delivery.id]);
+    await worker.drainOnce();
+    calls = vi.mocked(fetcher).mock.calls.filter((call) => String(call[0]).includes('agent.example.com'));
     expect(calls).toHaveLength(2);
+    const settled = await repository.getDelivery(delivery.id);
+    expect(settled?.metadata.callbackSent).toBe(1);
+    await worker.drainOnce();
+    calls = vi.mocked(fetcher).mock.calls.filter((call) => String(call[0]).includes('agent.example.com'));
+    expect(calls).toHaveLength(2); // 成功后不再重发
+    await repository.close();
+  });
+
+  it('abandons a callback after 24h of failures instead of retrying forever', async () => {
+    const repository = await createNodeRepository(':memory:', randomBytes(32));
+    const channel = await repository.createChannel({ name: 'Hook', slug: 'hook-giveup', provider: 'webhook', config: { url: 'https://hooks.example.com/giveup', method: 'POST', bodyTemplate: '{}' } });
+    const fetcher = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as MockFetch;
+    const worker = new DeliveryWorker(repository, new ProviderDispatcher(config, fetcher), { deliveryWorkers: 2, maxDeliveryAttempts: 1, retryBaseMs: 1 });
+    const delivery = await new NotificationService(repository).send({ destination: channel.id, title: 'x', body: 'y', callbackUrl: 'https://agent.example.com/gone' }, 'test');
+    await worker.drainOnce(); // 投递成功、回调成功——先手动改成「回调一直失败且已超 24h」的状态
+    await repository.db.run(`UPDATE deliveries SET metadata=json_set(metadata,'$.callbackSent',null,'$.callbackFailedAt',?,'$.callbackFails',20) WHERE id=?`, [new Date(Date.now() - 25 * 3_600_000).toISOString(), delivery.id]);
+
+    await worker.drainOnce(); // 24h+：放弃而非再打
+    const calls = vi.mocked(fetcher).mock.calls.filter((call) => String(call[0]).includes('agent.example.com'));
+    expect(calls).toHaveLength(1); // 只有首轮那次，放弃路径没有新请求
+    const settled = await repository.getDelivery(delivery.id);
+    expect(settled?.metadata.callbackSent).toBe(1);
+    expect(settled?.metadata.callbackAbandoned).toBe(1);
+    expect((await repository.listPendingCallbacks())).toHaveLength(0); // 不再滞留在待回调列表
     await repository.close();
   });
 

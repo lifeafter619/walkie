@@ -843,6 +843,18 @@ export class RelayRepository {
   async claimCallback(deliveryId: string): Promise<boolean> {
     const timestamp = now();
     const stale = new Date(Date.now() - 5 * 60_000).toISOString();
+    // 失败退避：不退避的话回调端点一挂，每轮 drain（750ms）都会重打一次，永不停止
+    const meta = await this.db.get("SELECT json_extract(metadata,'$.callbackFailedAt') AS failedAt, json_extract(metadata,'$.callbackFails') AS fails FROM deliveries WHERE id=?", [deliveryId]);
+    if (meta?.failedAt) {
+      const elapsed = Date.now() - Date.parse(String(meta.failedAt));
+      if (elapsed > 24 * 3_600_000) {
+        // 回调端点挂了一整天还没成功：放弃并记账，不让该投递永久滞留在待回调列表里
+        await this.db.run(`UPDATE deliveries SET metadata=json_set(metadata,'$.callbackSent',1,'$.callbackAbandoned',1) WHERE id=?`, [deliveryId]);
+        return false;
+      }
+      const waitMs = Math.min(60_000 * 2 ** Math.min(Number(meta.fails ?? 0), 6), 3_600_000); // 1min 起步指数退避，封顶 1h
+      if (elapsed < waitMs) return false;
+    }
     const result = await this.db.run(`UPDATE deliveries SET metadata=json_set(metadata,'$.callbackClaimedAt',?)
       WHERE id=? AND status IN ('delivered','partial','failed')
         AND json_extract(metadata,'$.callbackSent') IS NULL
@@ -851,10 +863,12 @@ export class RelayRepository {
   }
 
   async completeCallback(deliveryId: string, success: boolean): Promise<void> {
-    const metadata = success
-      ? "json_remove(json_set(metadata,'$.callbackSent',1),'$.callbackClaimedAt')"
-      : "json_remove(metadata,'$.callbackClaimedAt')";
-    await this.db.run(`UPDATE deliveries SET metadata=${metadata} WHERE id=?`, [deliveryId]);
+    if (success) {
+      await this.db.run(`UPDATE deliveries SET metadata=json_remove(json_set(metadata,'$.callbackSent',1),'$.callbackClaimedAt','$.callbackFailedAt','$.callbackFails') WHERE id=?`, [deliveryId]);
+      return;
+    }
+    const row = await this.db.get("SELECT json_extract(metadata,'$.callbackFails') AS fails FROM deliveries WHERE id=?", [deliveryId]);
+    await this.db.run(`UPDATE deliveries SET metadata=json_set(json_set(json_remove(metadata,'$.callbackClaimedAt'),'$.callbackFailedAt',?),'$.callbackFails',?) WHERE id=?`, [now(), Number(row?.fails ?? 0) + 1, deliveryId]);
   }
 
   /** 已到达终态但回调还没发出去的投递（callbackUrl 存在且未置 callbackSent）。
