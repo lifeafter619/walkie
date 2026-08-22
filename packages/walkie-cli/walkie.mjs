@@ -19,7 +19,8 @@ const USAGE = `walkie-notify — CLI for Walkie notifications
 Usage:
   walkie-notify send [options]              Send a notification via POST /api/v1/notify
   walkie-notify status <deliveryId> [options]   Fetch delivery status via GET /api/v1/deliveries/<id>
-  walkie-notify hook [options]              Install Claude Code / Cursor hooks in one command
+  walkie-notify hook [options]              Detect installed coding agents and install their hooks
+  walkie-notify hook --detect               Only report what is installed on this machine
   walkie-notify hook --uninstall            Remove the hooks this command installed
   walkie-notify --help | --version
 
@@ -51,13 +52,20 @@ Options for hook:
   --scope user         Install for the current user (default): config files
                        under the home directory. --scope project installs
                        into .claude/ .cursor/ ... in the current directory
-  --tools a,b,...      Limit tools: claude | cursor | codex | zcode | gemini
-                       (default: auto-detect installed ones)
+  --tools a,b,...      Limit tools: claude | cursor | codex | qwen | gemini |
+                       droid | zcode | opencode
+                       (default: probe the machine and ask which to install)
+  --detect             Report detected agents and exit; writes nothing, no token needed
+  --yes                Skip the prompt and install every detected agent
   --uninstall          Remove previously installed walkie hooks (same --scope)
 
-Supported tools: Claude Code (native HTTP hooks), Cursor, Codex, ZCode and
-Gemini CLI (command hooks + forwarding script). Desktop apps that ship the
-same engines (Claude Desktop, Cursor desktop) share the config files.
+Detection looks at each tool's config directory and at its executable on PATH,
+so an agent that is installed but never launched is still found and offered.
+
+Supported tools: Claude Code (native HTTP hooks), Codex, Qwen Code, Gemini CLI,
+Droid (Factory), ZCode, Cursor (command hooks + forwarding script) and opencode
+(generated plugin). Desktop apps that ship the same engines (Claude Desktop,
+Cursor desktop, ZCode desktop) share the same config files.
 
 Hook auth: the config references $WALKIE_TOKEN — set WALKIE_URL and
 WALKIE_TOKEN in your shell profile. Command-hook tools read the same
@@ -71,7 +79,7 @@ Example:
     --to prod-alerts --title "Deploy failed" --body "v2.4.0 rollback executed" --severity critical
 `;
 
-const BOOLEAN_FLAGS = new Set(['help', 'h', 'version', 'v', 'json', 'uninstall']);
+const BOOLEAN_FLAGS = new Set(['help', 'h', 'version', 'v', 'json', 'uninstall', 'detect', 'yes', 'y']);
 
 function parseArgs(argv) {
   const out = { _: [] };
@@ -116,9 +124,11 @@ const token = String(args.token ?? process.env.WALKIE_API_KEY ?? '').trim();
 const severity = String(args.severity ?? 'info').toLowerCase();
 const SEVERITIES = ['info', 'success', 'warning', 'critical'];
 
-if (!command) usageError('missing command (send | status)');
-if (!baseUrl) usageError('missing --url (or set WALKIE_URL)');
-if (!token) usageError('missing --token (or set WALKIE_API_KEY)');
+if (!command) usageError('missing command (send | status | hook)');
+// hook --detect / --uninstall 只动本地文件，不需要凭据
+const needsCredentials = !(command === 'hook' && (args.detect || args.uninstall));
+if (needsCredentials && !baseUrl) usageError('missing --url (or set WALKIE_URL)');
+if (needsCredentials && !token) usageError('missing --token (or set WALKIE_API_KEY)');
 
 async function api(path, init) {
   let response;
@@ -183,12 +193,22 @@ if (command === 'status') {
 }
 
 /* ────────────────────────────────────────────────────────────
- * hook install / uninstall — 五家编码 Agent 工具一键接入
- *   claude  ~/.claude/settings.json       原生 type:"http" hook
- *   cursor  ~/.cursor/hooks.json          command hook + 转发脚本
- *   codex   ~/.codex/hooks.json           同 Cursor（事件同构）
- *   zcode   ~/.zcode/cli/config.json      hooks.events（需 enabled:true）
- *   gemini  ~/.gemini/settings.json       hooks.<Event>（command，stdin JSON）
+ * hook install / uninstall — 八家编码 Agent 工具一键接入
+ *
+ * 两种 schema，一套写入器：
+ *   A. Claude 式嵌套（事件 → matcher 组 → handler 数组）
+ *      claude   ~/.claude/settings.json      hooks.<Event>，原生 type:"http"
+ *      codex    ~/.codex/hooks.json          hooks.<Event>，command（timeout 秒）
+ *      qwen     ~/.qwen/settings.json        hooks.<Event>，command
+ *      gemini   ~/.gemini/settings.json      hooks.<Event>，command（timeout 毫秒）
+ *      droid    ~/.factory/hooks.json        事件在顶层，无 hooks 包装
+ *      zcode    ~/.zcode/cli/config.json     hooks.events.<Event> + hooks.enabled
+ *   B. Cursor 式扁平
+ *      cursor   ~/.cursor/hooks.json         hooks.<event>: [{command,timeout}]
+ *   C. 插件式
+ *      opencode ~/.config/opencode/plugin/walkie.js   event: session.idle 等
+ *
+ * 桌面版与 CLI 共用同一批配置文件（Claude Desktop、Cursor 桌面版、ZCode 桌面版）。
  * ──────────────────────────────────────────────────────────── */
 
 const WALKIE_HOOK_MARKER = 'installed-by-walkie';
@@ -204,61 +224,188 @@ function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+const SCRIPT_NAME = 'walkie-notify.sh';
+/** walkie 自己写的 handler：http 指向 hook 端点，command 指向转发脚本 */
 function isWalkieHandler(handler) {
-  const url = typeof handler === 'object' && handler !== null ? String(handler.url ?? '') : '';
-  return url.includes('/api/v1/hooks/');
+  if (typeof handler !== 'object' || handler === null) return false;
+  return String(handler.url ?? '').includes('/api/v1/hooks/') || String(handler.command ?? '').includes(SCRIPT_NAME);
 }
 
-/** 深合并 walkie hooks 进 Claude/Codex 式 settings 的 hooks 字段；重复安装幂等 */
-function mergeHookGroups(settings, hookConfig, options = {}) {
-  const hooks = { ...(settings.hooks ?? {}) };
-  for (const [event, groups] of Object.entries(hookConfig)) {
-    const existing = Array.isArray(hooks[event]) ? hooks[event] : [];
-    const kept = existing.filter((group) => !(Array.isArray(group?.hooks) && group.hooks.some((entry) => options.match ? options.match(entry) : isWalkieHandler(entry))));
-    const matcher = groups.matcher;
-    const same = matcher ? kept.find((group) => group?.matcher === matcher) : undefined;
-    const handlers = Array.isArray(groups.hooks) ? groups.hooks : [groups.hooks];
-    if (same) same.hooks = [...(same.hooks ?? []), ...handlers];
-    else kept.push({ ...(matcher ? { matcher } : {}), hooks: handlers });
-    hooks[event] = kept;
+/** 在 root 的 path（如 ['hooks','events']）位置读出事件表并交给 fn 改写，返回新 root */
+function atPath(root, keys, fn) {
+  if (!keys.length) return fn(root ?? {});
+  const [head, ...rest] = keys;
+  const child = root?.[head] && typeof root[head] === 'object' ? root[head] : {};
+  return { ...root, [head]: atPath(child, rest, fn) };
+}
+
+/** 合并 walkie 的事件组进 Claude 式事件表；先摘旧的再加，所以重复安装幂等 */
+function mergeHookGroups(events, hookConfig) {
+  const merged = { ...events };
+  for (const [event, group] of Object.entries(hookConfig)) {
+    const existing = Array.isArray(merged[event]) ? merged[event] : [];
+    const kept = existing.filter((item) => !(Array.isArray(item?.hooks) && item.hooks.some(isWalkieHandler)));
+    const handlers = Array.isArray(group.hooks) ? group.hooks : [group.hooks];
+    kept.push({ ...(group.matcher ? { matcher: group.matcher } : {}), hooks: handlers });
+    merged[event] = kept;
   }
-  return { ...settings, hooks };
+  return merged;
 }
 
-function stripHookGroups(settings, options = {}) {
-  if (!settings.hooks) { stripHookGroups.removed = 0; return settings; }
-  const hooks = {};
+/** 反操作：摘掉 walkie 的 handler，组空了删组、事件空了删事件；用户自己的 hooks 原样。
+ *  非数组的键（未知 schema 的配置项）原样保留——卸载不能删用户没让删的东西 */
+function stripHookGroups(events) {
+  const kept = {};
   let removed = 0;
-  for (const [event, groups] of Object.entries(settings.hooks)) {
-    const kept = (Array.isArray(groups) ? groups : [])
-      .map((group) => ({ ...group, hooks: (group?.hooks ?? []).filter((entry) => { const hit = options.match ? options.match(entry) : isWalkieHandler(entry); if (hit) removed++; return !hit; }) }))
+  for (const [event, groups] of Object.entries(events ?? {})) {
+    if (!Array.isArray(groups)) { kept[event] = groups; continue; }
+    const rest = groups
+      .map((group) => ({ ...group, hooks: (group?.hooks ?? []).filter((entry) => { const hit = isWalkieHandler(entry); if (hit) removed++; return !hit; }) }))
       .filter((group) => (group.hooks ?? []).length > 0);
-    if (kept.length) hooks[event] = kept;
+    if (rest.length) kept[event] = rest;
   }
   stripHookGroups.removed = removed;
-  return { ...settings, hooks };
+  return kept;
 }
 
 /** 转发脚本：读 stdin JSON → POST 到 hook 端点。永远 exit 0（不阻塞工作流）。
- *  min_severity 编码进 URL——用户/Agent 改这行即改通知条件，不动服务端 */
+ *  min_severity 编码进 URL——用户/Agent 改这行即改通知条件，不动服务端。
+ *  查询串在 shell 里逐段拼：${q:+$q&} 是 POSIX 展开（q 非空补 &），最后
+ *  ${query:+?$query} 统一补 ?——min_severity 不再依赖 destination 先出现 */
 function forwardScript(minSeverity) {
-  const query = `\${WALKIE_DESTINATION:+?destination=$WALKIE_DESTINATION}`;
-  const levelQuery = minSeverity ? `&min_severity=${minSeverity}` : `\${WALKIE_MIN_SEVERITY:+&min_severity=$WALKIE_MIN_SEVERITY}`;
+  const levelLine = minSeverity
+    ? `query="\${query:+\$query&}min_severity=${minSeverity}"`
+    : `[ -n "\${WALKIE_MIN_SEVERITY:-}" ] && query="\${query:+\$query&}min_severity=\$WALKIE_MIN_SEVERITY"`;
   return `#!/bin/sh
 # ${WALKIE_HOOK_MARKER} — agent hook → Walkie 转发；由 walkie-notify hook 生成，可随时删除
 stdin_payload=$(cat)
 url="\${WALKIE_URL:-}"
 token="\${WALKIE_TOKEN:-}"
 [ -z "$token" ] || [ -z "$url" ] && exit 0
-curl -fsS --max-time 10 -X POST "$url${HOOK_ENDPOINT}${query}${levelQuery}" \\
+query=""
+[ -n "\${WALKIE_DESTINATION:-}" ] && query="destination=\$WALKIE_DESTINATION"
+${levelLine}
+curl -fsS --max-time 10 -X POST "$url${HOOK_ENDPOINT}\${query:+?\$query}" \\
   -H "authorization: Bearer $token" -H 'content-type: application/json' \\
   -d "$stdin_payload" >/dev/null 2>&1 || true
 exit 0
 `;
 }
 
-const SCRIPT_NAME = 'walkie-notify.sh';
 const isScriptEntry = (entry) => typeof entry === 'object' && entry !== null && String(entry.command ?? '').includes(SCRIPT_NAME);
+
+/** opencode 没有 hooks 配置文件，只有插件；插件里直接 fetch 到同一个端点 */
+function opencodePlugin(minSeverity) {
+  return `// ${WALKIE_HOOK_MARKER} — opencode 插件 → Walkie 转发；由 walkie-notify hook 生成，可随时删除
+const MIN_SEVERITY = ${minSeverity ? JSON.stringify(minSeverity) : 'process.env.WALKIE_MIN_SEVERITY'};
+
+export const WalkieNotify = async ({ directory }) => {
+  const post = async (payload) => {
+    const url = process.env.WALKIE_URL;
+    const token = process.env.WALKIE_TOKEN;
+    if (!url || !token) return;
+    const query = new URLSearchParams();
+    if (process.env.WALKIE_DESTINATION) query.set('destination', process.env.WALKIE_DESTINATION);
+    if (MIN_SEVERITY) query.set('min_severity', MIN_SEVERITY);
+    const suffix = query.toString() ? '?' + query.toString() : '';
+    try {
+      await fetch(url.replace(/\\/+$/, '') + '${HOOK_ENDPOINT}' + suffix, {
+        method: 'POST',
+        headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
+        body: JSON.stringify({ cwd: directory, ...payload })
+      });
+    } catch {
+      // 通知失败绝不影响会话
+    }
+  };
+  return {
+    event: async ({ event }) => {
+      if (event.type === 'session.idle') await post({ hook_event_name: 'Stop' });
+      if (event.type === 'session.error') await post({ hook_event_name: 'StopFailure', error: String(event.properties?.error?.name ?? 'session error') });
+      if (event.type === 'permission.updated') await post({ hook_event_name: 'PermissionRequest' });
+    }
+  };
+};
+`;
+}
+
+/**
+ * 工具表。shape 决定写法：
+ *   nested = Claude 式（事件 → 组 → handler），container 指出事件表在文件里的位置
+ *   flat   = Cursor 式（事件 → [{command,timeout}]）
+ *   plugin = opencode（写一个 JS 插件文件）
+ * events 用「服务端认识的事件名」——各家 schema 不同但事件语义同构，服务端统一归一化。
+ * bin 是可执行文件名，用于探测「装了但还没跑过（配置目录还不存在）」的工具。
+ */
+const TOOLS = {
+  claude: {
+    label: 'Claude Code', shape: 'nested', dir: ['.claude'], file: 'settings.json', container: ['hooks'], handler: 'http',
+    bin: ['claude'],
+    // matcher 省略 = 所有通知类型都发；auth_success 之类服务端会丢弃
+    events: ['Notification', 'Stop', 'StopFailure'], note: '等你授权 / 任务完成 / 回合失败'
+  },
+  codex: {
+    label: 'Codex', shape: 'nested', dir: ['.codex'], file: 'hooks.json', container: ['hooks'], timeout: 15,
+    bin: ['codex'],
+    events: ['Stop', 'PermissionRequest'], note: '任务完成 / 等你批准'
+  },
+  qwen: {
+    label: 'Qwen Code', shape: 'nested', dir: ['.qwen'], file: 'settings.json', container: ['hooks'], timeout: 15,
+    bin: ['qwen'],
+    events: ['Stop', 'Notification', 'PermissionRequest'], note: '任务完成 / 等你操作'
+  },
+  gemini: {
+    label: 'Gemini CLI', shape: 'nested', dir: ['.gemini'], file: 'settings.json', container: ['hooks'], timeout: 15000,
+    bin: ['gemini'],
+    events: ['AfterAgent', 'Notification'], note: '回合结束 / 系统提示'
+  },
+  droid: {
+    // Factory Droid：hooks.json 里事件直接在顶层，没有 hooks 包装层
+    label: 'Droid (Factory)', shape: 'nested', dir: ['.factory'], file: 'hooks.json', container: [], timeout: 15,
+    bin: ['droid'],
+    events: ['Stop', 'Notification'], note: '任务完成 / 等你操作'
+  },
+  zcode: {
+    // ZCode 的 hooks 默认关闭，且事件名是严格白名单——写错一个整份 hooks 会被静默丢弃
+    label: 'ZCode', shape: 'nested', dir: ['.zcode', 'cli'], file: 'config.json', container: ['hooks', 'events'], timeout: 15, enable: true,
+    bin: ['zcode'],
+    events: ['Stop', 'PermissionRequest', 'PostToolUseFailure'], note: '回合结束 / 等你批准 / 工具失败'
+  },
+  cursor: {
+    label: 'Cursor', shape: 'flat', dir: ['.cursor'], file: 'hooks.json',
+    bin: ['cursor', 'cursor-agent'],
+    events: { stop: 15, sessionEnd: 5 }, note: '任务结束（status=error → critical）/ 会话异常'
+  },
+  opencode: {
+    label: 'opencode', shape: 'plugin', dir: ['.config', 'opencode', 'plugin'], projectDir: ['.opencode', 'plugin'], file: 'walkie-notify.js',
+    bin: ['opencode'],
+    note: '会话空闲（任务完成）/ 会话错误 / 权限请求'
+  }
+};
+
+/** 可执行文件在 PATH 上？——只扫目录不执行任何东西（Windows 上带 PATHEXT） */
+function onPath(names) {
+  const dirs = String(process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
+  const exts = process.platform === 'win32'
+    ? String(process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';').filter(Boolean)
+    : [''];
+  return names.some((name) => dirs.some((dir) => exts.some((ext) => existsSync(path.join(dir, name + ext)))));
+}
+
+/** 一行问答；非 TTY 直接返回默认值（CI 里绝不卡住） */
+function ask(question, fallback = '') {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return Promise.resolve(fallback);
+  return new Promise((resolve) => {
+    process.stdout.write(question);
+    process.stdin.setEncoding('utf8');
+    process.stdin.resume();
+    process.stdin.once('data', (chunk) => {
+      process.stdin.pause();
+      resolve(String(chunk).trim());
+    });
+  });
+}
+
 
 if (command === 'hook') {
   const uninstall = Boolean(args.uninstall);
@@ -271,81 +418,138 @@ if (command === 'hook') {
   // Windows 上 os.homedir() 读注册表不看 $HOME；WALKIE_HOME 显式覆盖主要供测试与便携安装
   const base = scope === 'project' ? process.cwd() : (process.env.WALKIE_HOME || homedir());
 
-  const dirs = {
-    claude: path.join(base, '.claude'),
-    cursor: path.join(base, '.cursor'),
-    codex: path.join(base, '.codex'),
-    zcode: path.join(base, '.zcode', 'cli'),
-    gemini: path.join(base, '.gemini')
+  const KNOWN_TOOLS = Object.keys(TOOLS);
+  const toolDir = (name) => {
+    const tool = TOOLS[name];
+    return path.join(base, ...(scope === 'project' && tool.projectDir ? tool.projectDir : tool.dir));
   };
-  const KNOWN_TOOLS = Object.keys(dirs);
+  const configFile = (name) => path.join(toolDir(name), TOOLS[name].file);
+  // 检测按「工具的顶层配置目录」判断（.zcode/cli 的存在性看 .zcode，插件目录看 .config/opencode）
+  const detectDir = (name) => {
+    const tool = TOOLS[name];
+    const dir = scope === 'project' && tool.projectDir ? tool.projectDir : tool.dir;
+    return path.join(base, ...(name === 'opencode' && scope === 'user' ? dir.slice(0, 2) : [dir[0]]));
+  };
+  const scriptFileFor = (name) => path.join(toolDir(name), 'hooks', SCRIPT_NAME);
+
   for (const tool of requested) {
     if (!KNOWN_TOOLS.includes(tool)) usageError(`unknown tool "${tool}" (use ${KNOWN_TOOLS.join(' | ')})`);
   }
 
-  // 自动检测：默认只装已存在配置目录的工具（不无中生有）；--tools 可强制
-  const targets = requested.length ? requested : KNOWN_TOOLS.filter((tool) => existsSync(dirs[tool]));
+  /** 探测：配置目录在？可执行文件在 PATH 上？walkie hooks 已经装过了？ */
+  function detect(name) {
+    const tool = TOOLS[name];
+    const configured = existsSync(detectDir(name));
+    // --scope project 时 PATH 上有没有这个 CLI 说明不了本仓库要不要装，只看目录
+    const installed = scope === 'user' && Array.isArray(tool.bin) ? onPath(tool.bin) : false;
+    let hooked = false;
+    if (tool.shape === 'plugin') hooked = existsSync(configFile(name));
+    else hooked = JSON.stringify(readJson(configFile(name)) ?? {}).includes('/api/v1/hooks/') || existsSync(scriptFileFor(name));
+    return { name, label: tool.label, configured, installed, hooked, detected: configured || installed };
+  }
+
+  const report = KNOWN_TOOLS.map(detect);
+  const statusOf = (item) => item.hooked ? '已装 walkie hooks' : item.configured ? '已检测到（有配置目录）' : item.installed ? '已检测到（命令在 PATH 上）' : '未检测到';
+  const printReport = () => {
+    process.stdout.write(`\n本机探测到的编码 Agent（${scope === 'project' ? '项目作用域：' + process.cwd() : '用户作用域：' + base}）：\n`);
+    report.forEach((item, index) => {
+      const mark = item.hooked ? '✓' : item.detected ? '•' : '·';
+      process.stdout.write(`  ${mark} ${String(index + 1).padStart(2)}. ${item.label.padEnd(16)} ${statusOf(item)}\n`);
+    });
+  };
+
+  // --detect：只报告不写盘
+  if (args.detect) {
+    printReport();
+    const found = report.filter((item) => item.detected).map((item) => item.name);
+    process.stdout.write(found.length
+      ? `\n推荐安装：${found.join(', ')}\n执行：walkie-notify hook --url <url> --token <key>${args.only ? ` --only ${only}` : ''}\n`
+      : '\n没探测到已知工具。装好任一 Agent 后重跑，或用 --tools <name> 强制写入。\n');
+    process.exit(0);
+  }
+
+  const recommended = report.filter((item) => item.detected).map((item) => item.name);
+  let targets = requested;
+
+  if (!targets.length && !uninstall && !args.yes && !args.y) {
+    printReport();
+    if (!recommended.length) {
+      process.stderr.write(`\nwalkie-notify: 没探测到任何已知工具（配置目录与 PATH 都没有）。\n用 --tools <name> 强制创建，或先安装对应工具。\n`);
+      process.exit(1);
+    }
+    process.stdout.write(`\n推荐安装：${recommended.map((name) => TOOLS[name].label).join('、')}\n`);
+    const answer = await ask('回车=装推荐的 / 输入序号（如 1,3）/ a=全部 / q=退出：', '');
+    if (answer.toLowerCase() === 'q') { process.stdout.write('已取消，什么都没写。\n'); process.exit(0); }
+    if (answer.toLowerCase() === 'a') targets = KNOWN_TOOLS;
+    else if (answer) {
+      const picked = answer.split(/[,\s]+/).filter(Boolean).map((token) => {
+        const index = Number(token);
+        if (Number.isInteger(index) && index >= 1 && index <= report.length) return report[index - 1].name;
+        if (KNOWN_TOOLS.includes(token)) return token;
+        usageError(`看不懂的选择 "${token}"（用序号 1-${report.length} 或工具名）`);
+        return null;
+      });
+      targets = [...new Set(picked)];
+    } else targets = recommended;
+  }
+
+  // 卸载摘的是「装过 walkie hooks 的工具」；安装（--yes / 非交互）只碰探测到的
   if (!targets.length) {
-    process.stderr.write(`walkie-notify: 没找到任何已知工具的配置目录（${KNOWN_TOOLS.join('/')}）。\n用 --tools <name> 强制创建，或先安装对应工具。\n`);
-    process.exit(1);
+    targets = uninstall ? report.filter((item) => item.hooked).map((item) => item.name) : recommended;
+  }
+  if (!targets.length) {
+    process.stderr.write(uninstall
+      ? 'walkie-notify: 没有任何工具装着 walkie hooks，无需卸载。\n'
+      : `walkie-notify: 没找到任何已知工具（${KNOWN_TOOLS.join('/')}）。\n用 --tools <name> 强制创建，或先安装对应工具。\n`);
+    process.exit(uninstall ? 0 : 1);
   }
 
   if (uninstall) {
-    const removeScript = (scriptFile, label) => {
-      if (existsSync(scriptFile)) { rmSync(scriptFile); process.stdout.write(`✓ ${label} hooks 已移除\n`); }
-      else process.stdout.write(`· ${label}：没有 walkie hooks\n`);
+    // 孤儿脚本（配置没了、脚本还在）也是 walkie 痕迹，一并摘掉
+    const removeScript = (name) => {
+      const scriptFile = scriptFileFor(name);
+      if (!existsSync(scriptFile)) return false;
+      rmSync(scriptFile);
+      return true;
     };
-    for (const tool of targets) {
-      if (tool === 'claude') {
-        const file = path.join(dirs.claude, 'settings.json');
-        const settings = readJson(file) ?? {};
-        const stripped = stripHookGroups(settings);
-        if (stripHookGroups.removed > 0) { writeJson(file, stripped); process.stdout.write(`✓ Claude Code hooks 已移除（${stripHookGroups.removed} 个）\n`); }
-        else process.stdout.write('· Claude Code：没有 walkie hooks\n');
-      } else if (tool === 'cursor' || tool === 'codex') {
-        const label = tool === 'cursor' ? 'Cursor' : 'Codex';
-        const hooksFile = path.join(dirs[tool], 'hooks.json');
-        const hooks = readJson(hooksFile);
-        if (hooks && hooks.hooks) {
-          for (const event of Object.keys(hooks.hooks)) {
-            if (Array.isArray(hooks.hooks[event])) {
-              hooks.hooks[event] = hooks.hooks[event].filter((entry) => !isScriptEntry(entry));
-              if (hooks.hooks[event].length === 0) delete hooks.hooks[event];
+    for (const name of targets) {
+      const tool = TOOLS[name];
+      const file = configFile(name);
+      let removed = 0;
+      if (tool.shape === 'nested') {
+        const config = readJson(file);
+        if (config && typeof config === 'object') {
+          let next = atPath(config, tool.container, (events) => stripHookGroups(events));
+          removed = stripHookGroups.removed;
+          // 没摘到任何 handler 就一个字节都不写——不能凭空创建文件或重排用户配置。
+          // 事件表空了才把容器键也清掉（ZCode 的 hooks.enabled 是我们打开的，一并收回）
+          if (removed > 0) {
+            if (tool.container.length && Object.keys(next.hooks?.events ?? next.hooks ?? {}).length === 0) {
+              const rest = Object.keys(next.hooks ?? {}).filter((key) => key !== 'enabled' && key !== 'events');
+              if (rest.length === 0) { next = { ...next }; delete next.hooks; }
+              else { next = { ...next, hooks: { ...next.hooks } }; delete next.hooks.events; }
             }
-          }
-          writeJson(hooksFile, hooks);
-        }
-        removeScript(path.join(dirs[tool], 'hooks', SCRIPT_NAME), label);
-      } else if (tool === 'zcode') {
-        // ZCode：hooks.events 结构 + enabled 开关；摘除后组空了关掉 enabled（若用户没有别的 hooks）
-        const file = path.join(dirs.zcode, 'config.json');
-        const config = readJson(file) ?? {};
-        const events = config.hooks?.events;
-        if (events) {
-          for (const event of Object.keys(events)) {
-            if (Array.isArray(events[event])) {
-              events[event] = events[event].filter((entry) => !(Array.isArray(entry?.hooks) && entry.hooks.some(isScriptEntry)));
-              if (events[event].length === 0) delete events[event];
-            }
-          }
-          if (Object.keys(events).length === 0) {
-            delete config.hooks.events;
-            // 剩下的只有我们自己写的 enabled:true 时连 hooks 块一起清掉；
-            // 用户自设的 timeoutMs/maxOutputBytes 等其它键原样保留
-            const rest = Object.keys(config.hooks).filter((key) => key !== 'enabled');
-            if (rest.length === 0) delete config.hooks;
+            writeJson(file, next);
           }
         }
-        writeJson(file, config);
-        removeScript(path.join(dirs.zcode, 'hooks', SCRIPT_NAME), 'ZCode');
-      } else if (tool === 'gemini') {
-        const file = path.join(dirs.gemini, 'settings.json');
-        const settings = readJson(file) ?? {};
-        const stripped = stripHookGroups(settings, { match: isScriptEntry });
-        if (stripHookGroups.removed > 0) { writeJson(file, stripped); process.stdout.write(`✓ Gemini CLI hooks 已移除（${stripHookGroups.removed} 个）\n`); }
-        else process.stdout.write('· Gemini CLI：没有 walkie hooks\n');
-        removeScript(path.join(dirs.gemini, 'hooks', SCRIPT_NAME), 'Gemini CLI');
+        if (removeScript(name)) removed++;
+      } else if (tool.shape === 'flat') {
+        const config = readJson(file);
+        if (config?.hooks) {
+          for (const event of Object.keys(config.hooks)) {
+            if (!Array.isArray(config.hooks[event])) continue;
+            const before = config.hooks[event].length;
+            config.hooks[event] = config.hooks[event].filter((entry) => !isScriptEntry(entry));
+            removed += before - config.hooks[event].length;
+            if (config.hooks[event].length === 0) delete config.hooks[event];
+          }
+          if (removed > 0) writeJson(file, config);
+        }
+        if (removeScript(name)) removed++;
+      } else if (tool.shape === 'plugin') {
+        if (existsSync(file)) { rmSync(file); removed = 1; }
       }
+      process.stdout.write(removed > 0 ? `✓ ${tool.label} hooks 已移除（${removed} 个）\n` : `· ${tool.label}：没有 walkie hooks\n`);
     }
     process.exit(0);
   }
@@ -370,7 +574,8 @@ if (command === 'hook') {
     process.exit(2);
   }
 
-  const installScript = (scriptFile) => {
+  const installScript = (name) => {
+    const scriptFile = scriptFileFor(name);
     mkdirSync(path.dirname(scriptFile), { recursive: true });
     writeFileSync(scriptFile, forwardScript(minSeverity), { mode: 0o755 });
     return scriptFile;
@@ -378,76 +583,60 @@ if (command === 'hook') {
   // --only 未指定时脚本里留 WALKIE_MIN_SEVERITY 钩子：用户之后改环境变量即可改条件
   const installedEvents = [];
 
-  for (const tool of targets) {
-    if (tool === 'claude') {
-      const file = path.join(dirs.claude, 'settings.json');
-      const urlQuery = query ? `?${query}` : '';
-      const httpHandler = {
-        type: 'http',
-        url: `${baseUrl}${HOOK_ENDPOINT}${urlQuery}`,
-        headers: { Authorization: 'Bearer $WALKIE_TOKEN' },
-        allowedEnvVars: ['WALKIE_TOKEN']
-      };
-      const config = {
-        Notification: { matcher: 'permission_prompt|idle_prompt|agent_needs_input|agent_completed', hooks: [httpHandler] },
-        Stop: { hooks: [httpHandler] },
-        StopFailure: { hooks: [httpHandler] }
-      };
-      writeJson(file, mergeHookGroups(readJson(file) ?? {}, config));
-      process.stdout.write(`✓ Claude Code hooks 已写入 ${file}\n`);
-      installedEvents.push('Claude Code：等你授权 / 任务完成 / 回合失败');
-    } else if (tool === 'cursor' || tool === 'codex') {
-      const label = tool === 'cursor' ? 'Cursor' : 'Codex';
-      const scriptFile = installScript(path.join(dirs[tool], 'hooks', SCRIPT_NAME));
-      const hooksFile = path.join(dirs[tool], 'hooks.json');
-      const hooks = readJson(hooksFile) ?? {};
-      hooks.version = hooks.version ?? 1;
-      hooks.hooks = hooks.hooks ?? {};
-      hooks.hooks.stop = [{ command: scriptFile, timeout: 15 }];
-      hooks.hooks.sessionEnd = [{ command: scriptFile, timeout: 5 }];
-      writeJson(hooksFile, hooks);
-      process.stdout.write(`✓ ${label} hooks 已写入 ${hooksFile}（脚本 ${scriptFile}）\n`);
-      installedEvents.push(`${label}：任务结束（status=error → critical）/ 会话异常`);
-    } else if (tool === 'zcode') {
-      // ZCode 只有 7 个事件，没有 Notification——Stop 是「回合结束」，PostToolUseFailure 兜失败告警
-      const scriptFile = installScript(path.join(dirs.zcode, 'hooks', SCRIPT_NAME));
-      const file = path.join(dirs.zcode, 'config.json');
-      const config = readJson(file) ?? {};
-      const hooksBlock = config.hooks ?? {};
-      const events = hooksBlock.events ?? {};
-      const entry = { hooks: [{ type: 'command', command: JSON.stringify(scriptFile).slice(1, -1), timeout: 15 }] };
-      events.Stop = [...(Array.isArray(events.Stop) ? events.Stop.filter((group) => !(Array.isArray(group?.hooks) && group.hooks.some(isScriptEntry))) : []), entry];
-      events.PostToolUseFailure = [...(Array.isArray(events.PostToolUseFailure) ? events.PostToolUseFailure.filter((group) => !(Array.isArray(group?.hooks) && group.hooks.some(isScriptEntry))) : []), entry];
-      // 配置文件 hooks 默认不启用；walkie 依赖它必须打开（已有 hooks 时不关用户配置）
-      config.hooks = { ...hooksBlock, enabled: true, events };
+  for (const name of targets) {
+    const tool = TOOLS[name];
+    const file = configFile(name);
+    if (tool.shape === 'nested') {
+      const handler = tool.handler === 'http'
+        ? {
+            type: 'http',
+            url: `${baseUrl}${HOOK_ENDPOINT}${query ? `?${query}` : ''}`,
+            headers: { Authorization: 'Bearer $WALKIE_TOKEN' },
+            allowedEnvVars: ['WALKIE_TOKEN']
+          }
+        : { type: 'command', command: JSON.stringify(installScript(name)).slice(1, -1), timeout: tool.timeout };
+      const hookConfig = Object.fromEntries(tool.events.map((event) => [event, { hooks: [handler] }]));
+      let config = atPath(readJson(file) ?? {}, tool.container, (events) => mergeHookGroups(events, hookConfig));
+      // ZCode 的 hooks 默认不启用，walkie 依赖它必须打开
+      if (tool.enable) config = { ...config, hooks: { ...config.hooks, enabled: true } };
       writeJson(file, config);
-      process.stdout.write(`✓ ZCode hooks 已写入 ${file}（hooks.enabled=true）\n`);
-      installedEvents.push('ZCode：回合结束 / 工具调用失败');
-    } else if (tool === 'gemini') {
-      const scriptFile = installScript(path.join(dirs.gemini, 'hooks', SCRIPT_NAME));
-      const file = path.join(dirs.gemini, 'settings.json');
-      const config = {
-        AfterAgent: { hooks: [{ type: 'command', command: scriptFile, timeout: 15000 }] },
-        Notification: { hooks: [{ type: 'command', command: scriptFile, timeout: 15000 }] }
-      };
-      writeJson(file, mergeHookGroups(readJson(file) ?? {}, config, { match: isScriptEntry }));
-      process.stdout.write(`✓ Gemini CLI hooks 已写入 ${file}\n`);
-      installedEvents.push('Gemini CLI：回合结束（AfterAgent）/ 系统提示（Notification）');
+    } else if (tool.shape === 'flat') {
+      const scriptFile = installScript(name);
+      const config = readJson(file) ?? {};
+      config.version = config.version ?? 1;
+      config.hooks = config.hooks ?? {};
+      for (const [event, timeout] of Object.entries(tool.events)) {
+        const kept = (Array.isArray(config.hooks[event]) ? config.hooks[event] : []).filter((entry) => !isScriptEntry(entry));
+        config.hooks[event] = [...kept, { command: scriptFile, timeout }];
+      }
+      writeJson(file, config);
+    } else if (tool.shape === 'plugin') {
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, opencodePlugin(minSeverity));
     }
+    const already = report.find((item) => item.name === name)?.hooked;
+    process.stdout.write(`✓ ${tool.label} hooks 已${already ? '更新' : '写入'} ${file}\n`);
+    installedEvents.push(`${tool.label}：${tool.note}`);
   }
 
   const levelNote = minSeverity
     ? `\n通知级别：仅推送 ${minSeverity} 及以上（等你操作与失败=critical、工具失败=warning、任务完成=success、轻提示=info）。`
     : `\n通知级别：默认全部推送。想只收关键信息，重装时加 --only critical|warning|success，
 或设环境变量 WALKIE_MIN_SEVERITY（脚本会读取）。`;
+  // 密钥只从环境变量读，所以这一步不做就等于没装——把当前 shell 的原话给出来
+  const exports = process.platform === 'win32'
+    ? [`$env:WALKIE_URL = "${baseUrl}"`, '$env:WALKIE_TOKEN = "<你的 Agent Key>"', ...(destination ? [`$env:WALKIE_DESTINATION = "${destination}"`] : [])]
+    : [`export WALKIE_URL="${baseUrl}"`, 'export WALKIE_TOKEN=<你的 Agent Key>', ...(destination ? [`export WALKIE_DESTINATION="${destination}"`] : [])];
+  const profile = process.platform === 'win32' ? 'PowerShell 的 $PROFILE' : (String(process.env.SHELL ?? '').includes('zsh') ? '~/.zshrc' : '~/.bashrc');
+  const skipped = KNOWN_TOOLS.filter((name) => !targets.includes(name));
   process.stdout.write(`
-已安装 ${targets.length} 个工具的 hooks。还需要在 shell 配置（~/.bashrc / ~/.zshrc / PowerShell $PROFILE）里导出：
-  export WALKIE_URL="${baseUrl}"
-  export WALKIE_TOKEN=<你的 Agent Key>
-${destination ? `  export WALKIE_DESTINATION="${destination}"\n` : ''}
+已安装 ${targets.length} 个工具的 hooks。下一步（必做）——把凭据写进 ${profile}：
+${exports.map((line) => `  ${line}`).join('\n')}
+
 触发时机：
 ${installedEvents.map((line) => `  · ${line}`).join('\n')}${levelNote}
-卸载：walkie-notify hook --uninstall${targets.length < KNOWN_TOOLS.length ? '（或 --tools <name> 指定单一工具）' : ''}
+${skipped.length ? `\n没装的：${skipped.map((name) => TOOLS[name].label).join('、')}（重跑并选序号，或 --tools ${skipped[0]}）` : ''}
+自检：walkie-notify hook --detect    卸载：walkie-notify hook --uninstall
 `);
   process.exit(0);
 }

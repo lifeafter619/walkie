@@ -109,7 +109,7 @@ export function openApiSpec(publicUrl: string): Record<string, unknown> {
       },
       '/api/v1/hooks/agent': {
         post: {
-          summary: 'Coding-agent hook receiver (Claude Code / Cursor / Codex / ZCode / Gemini CLI)',
+          summary: 'Coding-agent hook receiver (Claude Code / Cursor / Codex / Qwen Code / Gemini CLI / Droid / ZCode / opencode)',
           description: 'POST agent hook event JSON here — Claude Code natively via type:"http" hooks, other tools via the walkie-notify forwarding script. Events are normalized (camelCase names, Codex notify type, Gemini AfterAgent) and translated into notifications: permission waits and hard failures → critical, tool failures → warning, task completion → success, idle hints → info; no-op events (SessionEnd, PreToolUse…) are acknowledged with ignored:true. min_severity drops events below the chosen level (the user or agent picks what deserves a ping); filtered:true in the response means it was dropped by that rule. The key must target exactly one destination, or pass ?destination=<slug>.',
           security,
           parameters: [

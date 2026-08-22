@@ -3,11 +3,12 @@ import { AddressInfo } from 'node:net';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 
 const run = promisify(execFile);
+const SCRIPT = 'walkie-notify.sh';
 
 /** CLI 端到端（#15）：对 mock server 走真实子进程，验证 send/status/错误码 */
 describe('walkie CLI', () => {
@@ -106,8 +107,9 @@ describe('walkie CLI', () => {
     expect(cursorHooks.hooks.stop?.[0]?.command).toContain('walkie-notify.sh');
     const script = readFileSync(join(home, '.cursor', 'hooks', 'walkie-notify.sh'), 'utf8');
     expect(script).toContain('/api/v1/hooks/agent');
-    expect(script).toContain('${WALKIE_DESTINATION:+?destination=$WALKIE_DESTINATION}'); // 运行时展开，不写死
-    expect(script).toContain('${WALKIE_MIN_SEVERITY:+&min_severity=$WALKIE_MIN_SEVERITY}'); // 级别可后调，无需重装
+    expect(script).toContain('destination=$WALKIE_DESTINATION'); // 运行时展开，不写死
+    expect(script).toContain('${query:+?$query}'); // ? 由第一个查询参数补——没有 destination 时 min_severity 也能拼出合法 URL
+    expect(script).toContain('min_severity=$WALKIE_MIN_SEVERITY'); // 级别可后调，无需重装
 
     // 幂等重装：handler 不重复
     await cli(['hook', '--tools', 'claude,cursor']);
@@ -145,17 +147,17 @@ describe('walkie CLI', () => {
     server.close();
   }, 20_000);
 
-  it('installs codex/zcode/gemini with their distinct config shapes and bakes --only into the URL', async () => {
+  it('installs codex/zcode/gemini/droid with their distinct config shapes and bakes --only into the URL', async () => {
     const server = http.createServer((_req, res) => { res.statusCode = 200; res.end(JSON.stringify({ ok: true, deliveryId: 'd-1' })); });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as AddressInfo).port;
     const home = mkdtempSync(join(tmpdir(), 'walkie-hook-multi-'));
-    for (const dir of ['.codex', ['.zcode', 'cli'], '.gemini']) {
+    for (const dir of ['.codex', ['.zcode', 'cli'], '.gemini', '.factory']) {
       mkdirSync(join(home, ...(Array.isArray(dir) ? dir : [dir])), { recursive: true });
     }
     writeFileSync(join(home, '.zcode', 'cli', 'config.json'), JSON.stringify({ theme: 'dark' })); // 用户已有配置必须保留
 
-    const cli = (extra: string[]) => run('node', ['packages/walkie-cli/walkie.mjs', 'hook', '--tools', 'codex,zcode,gemini', ...extra], {
+    const cli = (extra: string[]) => run('node', ['packages/walkie-cli/walkie.mjs', 'hook', '--tools', 'codex,zcode,gemini,droid', ...extra], {
       env: { ...process.env, WALKIE_HOME: home, WALKIE_URL: `http://127.0.0.1:${port}`, WALKIE_API_KEY: 'tok' }
     });
 
@@ -163,11 +165,18 @@ describe('walkie CLI', () => {
     expect(out.stdout).toContain('Codex');
     expect(out.stdout).toContain('ZCode');
     expect(out.stdout).toContain('Gemini');
+    expect(out.stdout).toContain('Droid');
 
-    // Codex：hooks.json，事件 stop/sessionEnd
+    // Codex：hooks.json 用的是 Claude 式嵌套 schema（事件 → 组 → handler），不是 Cursor 的扁平形状
     const codex = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
-    expect(codex.hooks.stop[0].command).toContain('walkie-notify.sh');
-    expect(codex.hooks.sessionEnd[0].command).toContain('walkie-notify.sh');
+    expect(codex.hooks.Stop[0].hooks[0].command).toContain('walkie-notify.sh');
+    expect(codex.hooks.PermissionRequest[0].hooks[0].type).toBe('command');
+
+    // Droid：.factory/hooks.json 事件直接在顶层，没有 hooks 包装层
+    const droid = JSON.parse(readFileSync(join(home, '.factory', 'hooks.json'), 'utf8'));
+    expect(droid.hooks).toBeUndefined();
+    expect(droid.Stop[0].hooks[0].command).toContain('walkie-notify.sh');
+    expect(droid.Notification[0].hooks[0].type).toBe('command');
 
     // ZCode：config.json 的 hooks.events 结构 + enabled:true；用户主题保留
     const zcode = JSON.parse(readFileSync(join(home, '.zcode', 'cli', 'config.json'), 'utf8'));
@@ -182,7 +191,7 @@ describe('walkie CLI', () => {
     expect(gemini.hooks.Notification[0].hooks[0].timeout).toBe(15000); // Gemini 用毫秒
 
     // --only critical 已烧进脚本 URL：级别随安装走，不用动服务端
-    const script = readFileSync(join(home, '.codex', 'hooks', 'walkie-notify.sh'), 'utf8');
+    const script = readFileSync(join(home, '.codex', 'hooks', SCRIPT), 'utf8');
     expect(script).toContain('min_severity=critical');
 
     // 卸载：ZCode 摘空后 hooks 块清理，用户 theme 保留
@@ -191,10 +200,101 @@ describe('walkie CLI', () => {
     expect(zcodeAfter.theme).toBe('dark');
     expect(zcodeAfter.hooks).toBeUndefined();
     const codexAfter = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
-    expect(codexAfter.hooks.stop).toBeUndefined();
-    expect(existsSync(join(home, '.gemini', 'hooks', 'walkie-notify.sh'))).toBe(false);
+    expect(codexAfter.hooks).toBeUndefined();
+    const droidAfter = JSON.parse(readFileSync(join(home, '.factory', 'hooks.json'), 'utf8'));
+    expect(droidAfter.Stop).toBeUndefined();
+    expect(existsSync(join(home, '.gemini', 'hooks', SCRIPT))).toBe(false);
+
+    // 卸载空跑：从未装过 hooks 的工具（无配置文件）不能被凭空创建文件，
+    // 已有配置不能被重排——只有真的摘到 walkie handler 才写盘
+    const untouchedHome = mkdtempSync(join(tmpdir(), 'walkie-hook-noop-'));
+    mkdirSync(join(untouchedHome, '.claude'), { recursive: true });
+    mkdirSync(join(untouchedHome, '.qwen'), { recursive: true });
+    writeFileSync(join(untouchedHome, '.claude', 'settings.json'), '{"model":"opus"}');
+    writeFileSync(join(untouchedHome, '.qwen', 'settings.json'), JSON.stringify({ theme: 'light', hooks: { Stop: { custom: 'yes' } } }, null, 4));
+    const noopServer = http.createServer((_req, res) => { res.statusCode = 200; res.end(JSON.stringify({ ok: true })); });
+    await new Promise<void>((resolve) => noopServer.listen(0, '127.0.0.1', resolve));
+    await run('node', ['packages/walkie-cli/walkie.mjs', 'hook', '--tools', 'claude,qwen,droid', '--uninstall'], {
+      env: { ...process.env, WALKIE_HOME: untouchedHome, WALKIE_URL: `http://127.0.0.1:${(noopServer.address() as AddressInfo).port}`, WALKIE_API_KEY: 'tok' }
+    });
+    expect(readFileSync(join(untouchedHome, '.claude', 'settings.json'), 'utf8')).toBe('{"model":"opus"}'); // 一字节不动
+    const qwenAfter = JSON.parse(readFileSync(join(untouchedHome, '.qwen', 'settings.json'), 'utf8'));
+    expect(qwenAfter.hooks.Stop).toEqual({ custom: 'yes' }); // 非数组事件值（未知 schema）原样保留
+    expect(existsSync(join(untouchedHome, '.factory', 'hooks.json'))).toBe(false); // 从未装过 → 不凭空创建
+    noopServer.close();
+    rmSync(untouchedHome, { recursive: true, force: true });
 
     rmSync(home, { recursive: true, force: true });
+    server.close();
+  }, 30_000);
+
+  it('installs the opencode plugin and removes it again', async () => {
+    const server = http.createServer((_req, res) => { res.statusCode = 200; res.end(JSON.stringify({ ok: true })); });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const home = mkdtempSync(join(tmpdir(), 'walkie-hook-oc-'));
+    const cli = (extra: string[]) => run('node', ['packages/walkie-cli/walkie.mjs', 'hook', '--tools', 'opencode', ...extra], {
+      env: { ...process.env, WALKIE_HOME: home, WALKIE_URL: `http://127.0.0.1:${port}`, WALKIE_API_KEY: 'tok' }
+    });
+
+    await cli([]);
+    const pluginFile = join(home, '.config', 'opencode', 'plugin', 'walkie-notify.js');
+    const plugin = readFileSync(pluginFile, 'utf8');
+    expect(plugin).toContain('session.idle');
+    expect(plugin).toContain('/api/v1/hooks/agent');
+    expect(plugin).not.toContain('secret-key-xyz'); // 密钥只从环境变量读，绝不落盘
+
+    await cli(['--uninstall']);
+    expect(existsSync(pluginFile)).toBe(false);
+
+    rmSync(home, { recursive: true, force: true });
+    server.close();
+  }, 30_000);
+
+  it('detects agents by config dir and PATH, and --yes installs every detected one', async () => {
+    const server = http.createServer((_req, res) => { res.statusCode = 200; res.end(JSON.stringify({ ok: true })); });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const home = mkdtempSync(join(tmpdir(), 'walkie-hook-detect-'));
+    mkdirSync(join(home, '.gemini'), { recursive: true });
+    // 「装了但从没跑过」的工具没有配置目录，只能靠 PATH 上的可执行文件认出来
+    const fakeBin = mkdtempSync(join(tmpdir(), 'walkie-fakebin-'));
+    writeFileSync(join(fakeBin, process.platform === 'win32' ? 'droid.CMD' : 'droid'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+
+    const env = {
+      ...process.env,
+      WALKIE_HOME: home,
+      WALKIE_URL: `http://127.0.0.1:${port}`,
+      WALKIE_API_KEY: 'tok',
+      // 只留假 bin 目录（外加 node 自己所在目录，否则 spawn node 都找不到），
+      // 免得把真机上装的 Agent 也探测进来
+      PATH: `${fakeBin}${delimiter}${dirname(process.execPath)}`,
+      Path: `${fakeBin}${delimiter}${dirname(process.execPath)}`
+    };
+    const cli = (args: string[]) => run('node', ['packages/walkie-cli/walkie.mjs', 'hook', ...args], { env });
+
+    // --detect 不需要凭据，也绝不写盘
+    const detected = await run('node', ['packages/walkie-cli/walkie.mjs', 'hook', '--detect'], { env: { ...env, WALKIE_URL: '', WALKIE_API_KEY: '' } });
+    expect(detected.stdout).toContain('有配置目录'); // gemini
+    expect(detected.stdout).toContain('命令在 PATH 上'); // droid
+    expect(detected.stdout).toContain('推荐安装：gemini, droid');
+    expect(existsSync(join(home, '.gemini', 'settings.json'))).toBe(false);
+
+    // --yes：装全部探测到的（gemini + droid），不问问题
+    const installed = await cli(['--yes']);
+    expect(installed.stdout).toContain('已安装 2 个工具');
+    expect(existsSync(join(home, '.gemini', 'settings.json'))).toBe(true);
+    expect(existsSync(join(home, '.factory', 'hooks.json'))).toBe(true);
+
+    // 重装报「更新」而不是「写入」——探测认得出自己装过的
+    expect((await cli(['--yes'])).stdout).toContain('已更新');
+
+    // --uninstall 不给 --tools 时，摘的是所有装过 walkie hooks 的工具
+    expect((await cli(['--uninstall'])).stdout).toContain('已移除');
+    expect((await cli(['--uninstall'])).stdout).not.toContain('已移除');
+
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeBin, { recursive: true, force: true });
     server.close();
   }, 30_000);
 });

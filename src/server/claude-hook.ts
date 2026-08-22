@@ -5,11 +5,12 @@ import { sendWithAgentKey } from './compat.js';
 /**
  * 编码 Agent HTTP hook 接收端点（POST /api/v1/hooks/agent）。
  *
- * 一个端点接所有工具：Claude Code（原生 http hook）、Cursor / Codex / ZCode /
- * Gemini CLI（command hook 转发脚本 POST 过来）。各家事件 schema 高度同构，
- * 服务端统一归一化后按语义映射 severity：
+ * 一个端点接所有工具：Claude Code（原生 http hook）、Codex / Qwen Code / Gemini CLI /
+ * Droid / ZCode / Cursor（command hook 转发脚本 POST 过来）、opencode（生成的插件）。
+ * 各家事件 schema 高度同构，服务端统一归一化后按语义映射 severity：
  *
- *   等你操作类（permission_prompt / agent_needs_input / elicitation_* / Gemini Notification）
+ *   等你操作类（permission_prompt / agent_needs_input / elicitation_* / PermissionRequest /
+ *     Gemini·Qwen·Droid 的 Notification）
  *     与失败类（StopFailure / Cursor stop.status=error / sessionEnd.reason=error）
  *     → critical
  *   任务完成类（Stop / agent_completed / Codex agent-turn-complete / Gemini AfterAgent）
@@ -30,9 +31,11 @@ interface HookInput {
   title?: string;
   error?: string;
   error_details?: string;
+  error_message?: string;
   reason?: string;
   status?: string;
   cwd?: string;
+  workspace_roots?: unknown;
   last_assistant_message?: string;
   'last-assistant-message'?: string;
   input_messages?: unknown;
@@ -70,16 +73,42 @@ function normalizeEvent(input: HookInput): string {
 }
 
 const lastMessage = (input: HookInput): string =>
-  (input.last_assistant_message ?? input['last-assistant-message'] ?? input.message ?? '').trim();
+  (input.last_assistant_message ?? input['last-assistant-message'] ?? input.message ?? input.error_message ?? '').trim();
+
+/** hook 载沙是各家工具随手 POST 的 JSON，字段类型不可信——统一收窄成 string，畸形类型不能把端点打成 500 */
+function coerceHookInput(rawInput: HookInput): HookInput {
+  const str = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
+  return {
+    ...rawInput,
+    hook_event_name: str(rawInput.hook_event_name),
+    type: str(rawInput.type),
+    notification_type: str(rawInput.notification_type),
+    message: str(rawInput.message),
+    title: str(rawInput.title),
+    error: str(rawInput.error),
+    error_details: str(rawInput.error_details),
+    error_message: str(rawInput.error_message),
+    reason: str(rawInput.reason),
+    status: str(rawInput.status),
+    cwd: str(rawInput.cwd),
+    last_assistant_message: str(rawInput.last_assistant_message),
+    'last-assistant-message': str(rawInput['last-assistant-message']),
+    tool_name: str(rawInput.tool_name),
+    agent_type: str(rawInput.agent_type)
+  };
+}
 
 /** 事件 → 通知的映射；返回 undefined 表示「收下但不发通知」 */
-export function claudeHookToNotification(input: HookInput): {
+export function claudeHookToNotification(rawInput: HookInput): {
   title: string;
   body: string;
   severity: Severity;
   tags: string;
 } | undefined {
-  const project = projectTag(input.cwd);
+  const input = coerceHookInput(rawInput);
+  // Cursor 的事件没有 cwd，项目标识在 workspace_roots 里
+  const roots = Array.isArray(input.workspace_roots) ? input.workspace_roots : [];
+  const project = projectTag(input.cwd ?? (typeof roots[0] === 'string' ? roots[0] : undefined));
   const where = project ? `（${project}）` : '';
   const event = normalizeEvent(input);
 
@@ -95,11 +124,22 @@ export function claudeHookToNotification(input: HookInput): {
     if (type === 'idle_prompt') {
       return { title: `Agent 在等你${where}`, body: (input.message || '回复已挂起 60 秒').slice(0, 2000), severity: 'info', tags: 'agent-hook|idle' };
     }
-    // Gemini CLI 的 Notification 事件：系统级提示，多数无行动价值，仅在带 message 时作 info
-    if (input.cursor_version === undefined && input.message && !input.notification_type) {
-      return { title: `Agent 提示${where}`, body: input.message.slice(0, 2000), severity: 'info', tags: 'agent-hook|notification' };
+    // Gemini / Qwen / Droid 的 Notification 没有 notification_type，语义就是「要你看一眼」
+    // （Droid：需要授权或输入已空闲 60 秒）——按等你操作处理
+    if (!input.notification_type && (input.message || input.title)) {
+      return { title: `Agent 需要你${where}`, body: (input.message || input.title || '').slice(0, 2000), severity: 'critical', tags: 'agent-hook|permission' };
     }
     return undefined; // auth_success 等无行动价值
+  }
+
+  // Codex / Qwen / ZCode：Agent 在等你批准某次工具调用。转发脚本不产出 stdout，
+  // 所以不影响它们各自的审批流程（无 decision = 走正常提示）
+  if (event === 'PermissionRequest') {
+    return {
+      title: `Agent 等你批准${where}`,
+      body: `${input.tool_name ?? '工具调用'} 等待授权`.slice(0, 2000),
+      severity: 'critical', tags: 'agent-hook|permission'
+    };
   }
 
   if (event === 'Stop') {
@@ -120,10 +160,10 @@ export function claudeHookToNotification(input: HookInput): {
   }
 
   if (event === 'PostToolUseFailure') {
-    // Claude Code 也有此事件但每次工具失败都触发，太吵——只在 Cursor 转发（带 cursor_version）
-    // 时按 warning 告警一次；Cursor 侧由 CLI 只挂 stop/sessionEnd，这里是兜底
-    if (!input.cursor_version) return undefined;
-    return { title: `工具调用失败${where}`, body: `${input.tool_name ?? 'tool'}${input.message ? `：${input.message}` : ''}`.slice(0, 2000) || '工具调用失败', severity: 'warning', tags: 'agent-hook|tool-failure' };
+    // Claude Code 也有此事件但每次工具失败都触发，太吵——CLI 不给 Claude 装它；
+    // 走到这里的是主动挂了该事件的工具（ZCode / Cursor 兜底）
+    const detail = input.message || input.error_message || '';
+    return { title: `工具调用失败${where}`, body: `${input.tool_name ?? 'tool'}${detail ? `：${detail}` : ''}`.slice(0, 2000), severity: 'warning', tags: 'agent-hook|tool-failure' };
   }
 
   if (event === 'StopFailure') {

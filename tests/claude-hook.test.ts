@@ -51,6 +51,16 @@ describe('claude hook event → notification mapping', () => {
     expect(mapped!.title).toContain('nested/project-x');
   });
 
+  it('tolerates malformed field types instead of throwing (hook payloads are untrusted JSON)', () => {
+    // 各家工具随手 POST 的 JSON：字段类型不可信。数字/对象/数组都不能把映射打成 500
+    expect(() => claudeHookToNotification({ hook_event_name: 'Notification', notification_type: 42, message: 7, cwd: 99 })).not.toThrow();
+    expect(() => claudeHookToNotification({ hook_event_name: 'stop', status: {}, workspace_roots: 'not-an-array' })).not.toThrow();
+    expect(() => claudeHookToNotification({ type: [], hook_event_name: null })).not.toThrow();
+    // 畸形 message 被丢掉后仍按事件语义处理，而不是崩溃或发出空正文
+    const stop = claudeHookToNotification({ hook_event_name: 'Stop', last_assistant_message: { text: 'no' }, cwd: CWD });
+    expect(stop!.body).toBe('回合结束，等待下一步指令。');
+  });
+
   it('normalizes Cursor camelCase event names and maps stop.status / sessionEnd reason=error', () => {
     // Cursor: stop 带 status 字段（小驼峰事件名）
     const done = claudeHookToNotification({ hook_event_name: 'stop', status: 'completed', cwd: CWD });
@@ -66,9 +76,30 @@ describe('claude hook event → notification mapping', () => {
     expect(crash).toMatchObject({ severity: 'critical' });
     expect(claudeHookToNotification({ hook_event_name: 'sessionEnd', reason: 'clear' })).toBeUndefined();
 
-    // PostToolUseFailure 只在 Cursor 载荷（带 cursor_version）时告警；Claude Code 的太吵
-    expect(claudeHookToNotification({ hook_event_name: 'PostToolUseFailure', tool_name: 'Bash' })).toBeUndefined();
-    expect(claudeHookToNotification({ hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', cursor_version: '1.0', message: 'exit 1' })!.severity).toBe('warning');
+    // PostToolUseFailure：只有主动挂它的工具（ZCode/Cursor）会送来，一律 warning
+    expect(claudeHookToNotification({ hook_event_name: 'PostToolUseFailure', tool_name: 'Bash' })!.severity).toBe('warning');
+    expect(claudeHookToNotification({ hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', cursor_version: '1.0', message: 'exit 1' })!.body).toContain('exit 1');
+  });
+
+  it('handles the payload shapes the other CLIs actually send', () => {
+    // Cursor 的事件没有 cwd：项目名要从 workspace_roots 里拿，否则通知里认不出是哪个项目
+    const cursor = claudeHookToNotification({ hook_event_name: 'stop', status: 'completed', workspace_roots: ['/home/me/Project/relaydock'] });
+    expect(cursor!.title).toContain('Project/relaydock');
+
+    // Cursor sessionEnd 的错误正文在 error_message 里
+    const crashed = claudeHookToNotification({ hook_event_name: 'sessionEnd', reason: 'error', error_message: 'renderer died' });
+    expect(crashed!.body).toContain('renderer died');
+
+    // Codex / Qwen / ZCode：等你批准 → critical
+    const ask = claudeHookToNotification({ hook_event_name: 'PermissionRequest', tool_name: 'Bash', cwd: CWD });
+    expect(ask).toMatchObject({ severity: 'critical' });
+    expect(ask!.body).toContain('Bash');
+
+    // Gemini / Qwen / Droid 的 Notification 没有 notification_type，语义是「要你看一眼」
+    const droid = claudeHookToNotification({ hook_event_name: 'Notification', message: 'Droid is waiting for your input', cwd: CWD });
+    expect(droid).toMatchObject({ severity: 'critical' });
+    // 没有任何正文的 Notification（auth_success 之类）仍然不打扰
+    expect(claudeHookToNotification({ hook_event_name: 'Notification', notification_type: 'auth_success' })).toBeUndefined();
   });
 
   it('maps Gemini CLI AfterAgent and Codex notify agent-turn-complete payloads', () => {

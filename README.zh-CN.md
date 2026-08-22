@@ -339,23 +339,41 @@ curl "https://api.telegram.org/bot<BotToken>/setWebhook" \
 
 ### 盯住编码 Agent 会话（hooks）
 
-编码 Agent 干完了、失败了、在等你授权——都推到你手机上，不用守着终端。一条命令装好 **Claude Code、Cursor、Codex、ZCode、Gemini CLI** 的 hooks（自动检测装了哪些）：
+编码 Agent 干完了、失败了、在等你授权——都推到你手机上，不用守着终端。一条命令装好 **Claude Code、Cursor、Codex、Qwen Code、Gemini CLI、Droid（Factory）、ZCode、opencode** 的 hooks（自动检测装了哪些；桌面版与 CLI 共用同一批配置文件）：
 
 ```bash
 npx walkie-notify hook --url https://你的域名 --token rdk_xxx --only critical
 ```
 
-命令会先发一条真实测试通知（key 或目的地配错当场报错，绝不带病写入），然后合并进各工具的配置——已有 hooks 与配置原样保留，重复执行幂等，`--uninstall` 精确摘除。最后在 shell 配置里导出 `WALKIE_URL` 和 `WALKIE_TOKEN`：写入的配置引用 `$WALKIE_TOKEN`，密钥不落盘。
+命令先探测本机——既看各工具的配置目录，也看 PATH 上的可执行文件，所以「装了但还没跑过」的
+Agent 一样能认出来——列出结果再问你装哪些：
+
+```
+本机探测到的编码 Agent（用户作用域：/home/you）：
+  ✓  1. Claude Code      已装 walkie hooks
+  •  2. Codex            已检测到（命令在 PATH 上）
+  ·  3. Qwen Code        未检测到
+  ...
+回车=装推荐的 / 输入序号（如 1,3）/ a=全部 / q=退出：
+```
+
+`--detect` 只报告不写盘（也不需要 token）；`--yes` 不问直接装上所有探测到的（CI 等非
+TTY 环境也是这个行为）；`--tools claude,cursor` 仍可精确指定。
+
+然后命令会先发一条真实测试通知（key 或目的地配错当场报错，绝不带病写入），然后合并进各工具的配置——已有 hooks 与配置原样保留，重复执行幂等，`--uninstall` 精确摘除。最后在 shell 配置里导出 `WALKIE_URL` 和 `WALKIE_TOKEN`：写入的配置引用 `$WALKIE_TOKEN`，密钥不落盘。
 
 **什么时候通知你**（hooks 监听的事件）：
 
-| 工具 | 在等你 | 任务完成 | 失败 |
-| --- | --- | --- | --- |
-| Claude Code | 授权/闲置/等你输入提示（`Notification`） | `Stop`（带 Agent 摘要） | `StopFailure`（API 错误） |
-| Cursor | — | `stop` | `stop` 带 `status: error`、`sessionEnd` 带 `reason: error` |
-| Codex | — | `stop` / `sessionEnd`（hooks） | 同 Cursor |
-| ZCode | — | `Stop` | `PostToolUseFailure` |
-| Gemini CLI | `Notification` | `AfterAgent` | — |
+| 工具 | 配置文件 | 在等你 | 任务完成 | 失败 |
+| --- | --- | --- | --- | --- |
+| Claude Code | `~/.claude/settings.json`（原生 HTTP hook） | 授权/闲置/等你输入提示（`Notification`） | `Stop`（带 Agent 摘要） | `StopFailure`（API 错误） |
+| Cursor | `~/.cursor/hooks.json` | — | `stop` | `stop` 带 `status: error`、`sessionEnd` 带 `reason: error` |
+| Codex | `~/.codex/hooks.json` | `PermissionRequest` | `Stop` | — |
+| Qwen Code | `~/.qwen/settings.json` | `PermissionRequest`、`Notification` | `Stop` | — |
+| Gemini CLI | `~/.gemini/settings.json` | `Notification` | `AfterAgent` | — |
+| Droid（Factory） | `~/.factory/hooks.json` | `Notification` | `Stop` | — |
+| ZCode | `~/.zcode/cli/config.json` | `PermissionRequest` | `Stop` | `PostToolUseFailure` |
+| opencode | `~/.config/opencode/plugin/walkie-notify.js` | `permission.updated` | `session.idle` | `session.error` |
 
 **自己选什么才值得打扰你**——安装时用 `--only <级别>` 定最低通知级别，之后改环境变量 `WALKIE_MIN_SEVERITY` 即可调整、无需重装：
 

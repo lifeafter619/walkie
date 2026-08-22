@@ -324,23 +324,43 @@ Long-running agents can be steered mid-task. Type into **Conversations → Send 
 
 ### Keep an eye on coding agents (hooks)
 
-Get pinged when a coding agent finishes, fails, or is waiting for your approval — no babysitting. One command installs hooks for **Claude Code, Cursor, Codex, ZCode and Gemini CLI** (auto-detects which are installed):
+Get pinged when a coding agent finishes, fails, or is waiting for your approval — no babysitting. One command installs hooks for **Claude Code, Cursor, Codex, Qwen Code, Gemini CLI, Droid (Factory), ZCode and opencode** (auto-detects which are installed; desktop apps share the same config files as their CLIs):
 
 ```bash
 npx walkie-notify hook --url https://your-domain --token rdk_xxx --only critical
 ```
 
-The command first sends a real test notification (a bad key or destination fails loudly before anything is written), then merges into each tool's config — your existing hooks and settings are preserved, re-running is idempotent, and `--uninstall` removes exactly what was added. Export `WALKIE_URL` and `WALKIE_TOKEN` in your shell profile: the config references `$WALKIE_TOKEN`, so the secret never lands in a file.
+It probes the machine first — each tool's config directory **and** its executable on
+PATH, so an agent you installed but never launched is still found — prints what it
+found, and asks which to set up:
+
+```
+本机探测到的编码 Agent（用户作用域：/home/you）：
+  ✓  1. Claude Code      已装 walkie hooks
+  •  2. Codex            已检测到（命令在 PATH 上）
+  ·  3. Qwen Code        未检测到
+  ...
+回车=装推荐的 / 输入序号（如 1,3）/ a=全部 / q=退出：
+```
+
+`--detect` reports and exits without writing anything (no token needed); `--yes`
+installs every detected agent without asking (that is also what happens in CI and
+other non-TTY runs); `--tools claude,cursor` still forces an exact set.
+
+The command then sends a real test notification (a bad key or destination fails loudly before anything is written), then merges into each tool's config — your existing hooks and settings are preserved, re-running is idempotent, and `--uninstall` removes exactly what was added. Export `WALKIE_URL` and `WALKIE_TOKEN` in your shell profile: the config references `$WALKIE_TOKEN`, so the secret never lands in a file.
 
 **When you get notified** (that's what the hooks listen to):
 
-| Tool | Waiting on you | Task done | Failures |
-| --- | --- | --- | --- |
-| Claude Code | permission / idle / agent-input prompts (`Notification`) | `Stop` (with the agent's summary) | `StopFailure` (API errors) |
-| Cursor | — | `stop` | `stop` with `status: error`, `sessionEnd` with `reason: error` |
-| Codex | — | `stop` / `sessionEnd` via hooks | same as Cursor |
-| ZCode | — | `Stop` | `PostToolUseFailure` |
-| Gemini CLI | `Notification` | `AfterAgent` | — |
+| Tool | Config file | Waiting on you | Task done | Failures |
+| --- | --- | --- | --- | --- |
+| Claude Code | `~/.claude/settings.json` (native HTTP hook) | permission / idle / agent-input prompts (`Notification`) | `Stop` (with the agent's summary) | `StopFailure` (API errors) |
+| Cursor | `~/.cursor/hooks.json` | — | `stop` | `stop` with `status: error`, `sessionEnd` with `reason: error` |
+| Codex | `~/.codex/hooks.json` | `PermissionRequest` | `Stop` | — |
+| Qwen Code | `~/.qwen/settings.json` | `PermissionRequest`, `Notification` | `Stop` | — |
+| Gemini CLI | `~/.gemini/settings.json` | `Notification` | `AfterAgent` | — |
+| Droid (Factory) | `~/.factory/hooks.json` | `Notification` | `Stop` | — |
+| ZCode | `~/.zcode/cli/config.json` | `PermissionRequest` | `Stop` | `PostToolUseFailure` |
+| opencode | `~/.config/opencode/plugin/walkie-notify.js` | `permission.updated` | `session.idle` | `session.error` |
 
 **Choose what deserves a ping** — `--only <level>` sets the minimum severity at install time, and `WALKIE_MIN_SEVERITY` changes it later without reinstalling:
 

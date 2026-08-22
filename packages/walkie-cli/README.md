@@ -20,8 +20,35 @@ WALKIE_URL=https://walkie.example.com WALKIE_API_KEY=rdk_xxx \
 | --- | --- |
 | `walkie-notify send` | POST `/api/v1/notify`; prints the delivery ID (`--json` for full response) |
 | `walkie-notify status <id>` | GET `/api/v1/deliveries/<id>`; prints JSON |
+| `walkie-notify hook` | Install coding-agent hooks (`--uninstall` removes them) |
 
 `--url`/`--token` fall back to `WALKIE_URL`/`WALKIE_API_KEY`. Exit codes: 0 ok, 1 usage error, 2 API error.
+
+## Coding-agent hooks | 编码 Agent hooks
+
+```bash
+npx walkie-notify hook --url https://walkie.example.com --token rdk_xxx --only critical
+```
+
+Probes the machine (each tool's config directory **and** its executable on PATH, so an
+agent installed but never launched is still found), prints what it found, and asks which
+to set up. **Claude Code, Cursor, Codex, Qwen Code, Gemini CLI, Droid (Factory), ZCode
+and opencode** are supported; desktop apps share the same config files as their CLIs.
+
+| Flag | Effect |
+| --- | --- |
+| `--detect` | Report detected agents and exit — writes nothing, needs no token |
+| `--yes` | Install every detected agent without asking (also the non-TTY/CI behaviour) |
+| `--tools claude,cursor,…` | Force an exact set instead of the detected one |
+| `--scope project` | Write into the current repo instead of `$HOME` |
+| `--uninstall` | Remove walkie hooks (without `--tools`: from every tool that has them) |
+
+A real test notification is sent before anything is written; existing hooks are preserved
+and re-running is idempotent.
+
+The token is never written to a config file — export `WALKIE_URL` and `WALKIE_TOKEN`
+in your shell profile. `--only <critical|warning|success|info>` sets the minimum
+severity; `WALKIE_MIN_SEVERITY` changes it later without reinstalling.
 
 ## GitHub Actions
 

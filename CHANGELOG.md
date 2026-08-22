@@ -3,6 +3,30 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Hook install flow — probe the machine, then ask
+
+- `walkie-notify hook` now detects agents by config directory **and** by executable on PATH, so a tool that is installed but never launched is offered too. It prints a status list (already hooked / detected / not found) and asks which to install; pressing Enter takes the recommendation.
+- `--detect` reports and exits without writing anything and without needing a token; `--yes` installs every detected agent unattended (the same path CI and other non-TTY runs take).
+- `--uninstall` without `--tools` now removes hooks from every tool that actually has them, instead of only the ones currently detected.
+- Re-installing reports "更新" instead of "写入", and the closing summary prints the exact `export` lines for the current shell plus which tools were skipped.
+
+### Coding-agent hooks — schemas verified against vendor docs, three more tools
+
+- **Fixed: Codex hooks never fired.** `~/.codex/hooks.json` was written in Cursor's flat shape; Codex uses the Claude-style nested schema (event → matcher group → handler). Now written correctly, with `Stop` and `PermissionRequest`.
+- **Fixed: Cursor notifications lost the project name.** Cursor hook payloads carry `workspace_roots`, not `cwd`, and `sessionEnd` errors arrive in `error_message` — both are read now.
+- Added `PermissionRequest` (Codex / Qwen Code / ZCode) as a critical "waiting for your approval" event, and mapped the type-less `Notification` sent by Gemini CLI / Qwen Code / Droid to the same tier.
+- New tools: **Qwen Code** (`~/.qwen/settings.json`), **Droid / Factory** (`~/.factory/hooks.json`, events at the top level with no wrapper) and **opencode** (a generated plugin, since it has no hook config file).
+- Claude Code's `Notification` hook no longer carries a matcher, so elicitation prompts reach you too; the server still drops no-op types like `auth_success`.
+
+### Hardening found by the pre-commit audit
+
+- **Fixed: forwarding script built a broken URL when `--only` was set without `--destination`.** The query string always started with `&` (no `?`), so every forwarded event hit a 404 and no notification was ever delivered — silently, because the script swallows errors by design. The query is now assembled segment by segment (`${query:+?$query}`), verified against a real `sh` in six environment combinations.
+- The agent-hook endpoint no longer returns 500 on malformed field types: a payload like `{"message": 42}` used to throw inside the event mapper. All string fields are now type-narrowed before use; malformed values are dropped and the event still maps by its semantics.
+- `--uninstall` writes nothing unless it actually removed a handler — a no-op uninstall no longer creates an empty config file for a tool that was never hooked, nor reformats an existing one.
+- Uninstall also preserves non-array values in the hooks table (unknown-schema config keys survive), and cleans up an orphaned forwarding script even when its config file is gone.
+
 ## [0.3.0] — 2026-08-21
 
 First public release.
