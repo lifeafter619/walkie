@@ -17,7 +17,7 @@ import { ProviderDispatcher } from '../server/providers/dispatcher.js';
 import { DeliveryWorker } from '../server/queue.js';
 import { assertKeyDestinations, validateChannelCreate, validateChannelUpdate, validateRouteChannelIds } from '../server/validation.js';
 import { barkFailure, barkSuccess, registerResponse, resolveBarkDestination, sendBark } from '../server/bark-compat.js';
-import { appriseSeverity, discordText, parseAlertmanager, prioritySeverity, safeCompatUrl, sendWithAgentKey, slackText } from '../server/compat.js';
+import { appriseSeverity, bareFormText, discordText, parseAlertmanager, prioritySeverity, safeCompatUrl, sendWithAgentKey, slackText } from '../server/compat.js';
 import { handleTelegramWebhook } from '../server/telegram-webhook.js';
 import { handleClaudeHook, parseMinSeverity } from '../server/claude-hook.js';
 import { handleSlackEvent, handleSlackInteractive } from '../server/slack-interactive.js';
@@ -202,9 +202,12 @@ export class RelayDockState extends DurableObject<WorkerEnv> {
       const ntfy = /^\/ntfy\/([^/]+)$/.exec(path);
       if (ntfy && request.method === 'POST') {
         const isText = (request.headers.get('content-type') ?? '').includes('text/plain');
+        const isForm = (request.headers.get('content-type') ?? '').includes('application/x-www-form-urlencoded');
         const content = isText ? await readTextBody(request) : await readBody(request);
+        // curl -d "hi" 发的是 urlencoded 裸文本（不是 key=value），readBody 会解析成
+        // { 'hi': '' }——正文跑到 key 里。还原回正文（真正的 key=value 不会撞上该形态）
         const params = typeof content === 'string' ? {} : content;
-        const message = typeof content === 'string' ? content : String(params.message ?? params.body ?? '');
+        const message = typeof content === 'string' ? content : String(params.message ?? params.body ?? '') || bareFormText(params) || '';
         try {
           const delivery = await sendWithAgentKey(this.repository, this.notifications, bearer(request) ?? '', {
             destination: decodeURIComponent(ntfy[1]!), title: String(request.headers.get('title') ?? params.title ?? 'ntfy').slice(0, 200),

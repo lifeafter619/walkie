@@ -156,6 +156,27 @@ describe('HTTP API and MCP', () => {
     expect(deliveries.map((item) => item.source)).toEqual(expect.arrayContaining(['gotify-compat', 'pushplus-compat', 'ntfy-compat']));
   });
 
+  // ntfy 官方文档的第一条示例就是 curl -d "hi" ntfy.sh/topic——urlencoded 裸文本。
+  // 解析器把它读成 { 'hi': '' }，正文跑到 key 里，用户收到的是 Empty Message
+  it('treats a bare urlencoded body on the ntfy endpoint as the message (curl -d)', async () => {
+    const { app, repository } = await setup();
+    const channel = await repository.createChannel({ name: 'Hook', slug: 'hook', provider: 'webhook', config: { url: 'https://hooks.example.com/x', method: 'POST', bodyTemplate: '{}' } });
+    const { secret } = await repository.createKey({ name: 'compat', destinationIds: [channel.id] });
+
+    const response = await request(app).post('/ntfy/hook')
+      .set('Authorization', `Bearer ${secret}`)
+      .type('form').send('磁盘满了 hi');
+    expect(response.status).toBe(200);
+    expect(response.body.message).toBe('磁盘满了 hi');
+    const delivery = (await repository.getDelivery(String(response.body.id)))!;
+    expect(delivery.body).toBe('磁盘满了 hi');
+    // 正经的 key=value form 提交不受影响
+    const keyed = await request(app).post('/ntfy/hook')
+      .set('Authorization', `Bearer ${secret}`)
+      .type('form').send({ message: '表单正文' });
+    expect(keyed.body.message).toBe('表单正文');
+  });
+
   // Gotify 官方文档、curl 示例与 shoutrrr 默认都用 X-Gotify-Key 头传 token，只认 ?token= 会让它们全部 401
   it('accepts the Gotify token from the X-Gotify-Key header and from Bearer auth', async () => {
     const { app, repository } = await setup();

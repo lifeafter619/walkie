@@ -452,10 +452,18 @@ function ask(question, fallback = '') {
     process.stdout.write(question);
     process.stdin.setEncoding('utf8');
     process.stdin.resume();
-    process.stdin.once('data', (chunk) => {
+    const done = (value) => {
       process.stdin.pause();
-      resolve(String(chunk).trim());
-    });
+      process.stdin.off('data', onData);
+      process.stdin.off('end', onEnd);
+      resolve(value);
+    };
+    const onData = (chunk) => done(String(chunk).trim());
+    // Ctrl+D（EOF）在 cooked 模式 TTY 上只触发 end、不触发 data——不监听的话
+    // promise 永远不落定，进程挂住只能 Ctrl+C。EOF 视为「接受默认值」
+    const onEnd = () => done(fallback);
+    process.stdin.once('data', onData);
+    process.stdin.once('end', onEnd);
   });
 }
 

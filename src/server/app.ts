@@ -21,7 +21,7 @@ import type { DeliveryWorker } from './queue.js';
 import { applyUpdate, checkUpdate } from './update.js';
 import { assertKeyDestinations, validateChannelCreate, validateChannelUpdate, validateRouteChannelIds } from './validation.js';
 import { barkFailure, barkSuccess, registerResponse, resolveBarkDestination, sendBark } from './bark-compat.js';
-import { appriseSeverity, discordText, parseAlertmanager, prioritySeverity, safeCompatUrl, sendWithAgentKey, slackText } from './compat.js';
+import { appriseSeverity, bareFormText, discordText, parseAlertmanager, prioritySeverity, safeCompatUrl, sendWithAgentKey, slackText } from './compat.js';
 import { handleTelegramWebhook } from './telegram-webhook.js';
 import { handleSlackEvent, handleSlackInteractive } from './slack-interactive.js';
 import { handleDiscordInteraction } from './discord-interactions.js';
@@ -489,7 +489,8 @@ export function createApp(deps: AppDependencies) {
 
   app.post(/^\/ntfy\/([^/]+)$/, asyncRoute(async (req, res) => {
     const params = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
-    const message = typeof req.body === 'string' ? req.body : String(params.message ?? params.body ?? '');
+    // curl -d "hi" 的裸文本会被 urlencoded 解析成 { 'hi': '' }，还原回正文
+    const message = typeof req.body === 'string' ? req.body : String(params.message ?? params.body ?? '') || bareFormText(params) || '';
     try {
       const delivery = await sendWithAgentKey(repository, notifications, bearer(req) ?? '', {
         destination: String(req.params[0]),

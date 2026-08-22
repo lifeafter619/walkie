@@ -198,6 +198,10 @@ export class RelayRepository {
     if (!deliveryColumns.has('schedule_id')) await this.db.exec('ALTER TABLE deliveries ADD COLUMN schedule_id TEXT');
     // 密钥按哈希直查（支持自定义密钥），哈希必须唯一；历史数据全是随机值，无碰撞
     await this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS api_keys_secret_hash ON api_keys(secret_hash)');
+    const attemptColumns = new Set((await this.db.all('PRAGMA table_info(attempts)')).map((row) => String(row.name)));
+    // 分块投递的断点续发：长正文按渠道上限拆成多块逐块发送，中途失败重试时记录已成功的
+    // 块数，避免从第一块重发——用户会收到前几块的重复通知
+    if (!attemptColumns.has('chunks_sent')) await this.db.exec('ALTER TABLE attempts ADD COLUMN chunks_sent INTEGER NOT NULL DEFAULT 0');
     const legacyAdminHash = await this.db.get("SELECT value FROM settings WHERE key='admin_token_hash'");
     if (legacyAdminHash) {
       const legacyPrefix = await this.db.get("SELECT value FROM settings WHERE key='admin_token_prefix'");
@@ -999,6 +1003,18 @@ export class RelayRepository {
     await this.db.run('UPDATE attempts SET status=?,response_code=?,error=?,next_attempt_at=?,updated_at=? WHERE id=?',
       [status, result.responseCode ?? null, result.error ?? null, result.retryAt ?? null, now(), id]);
     await this.refreshDeliveryStatus(String(attempt.delivery_id));
+  }
+
+  /** 分块投递的断点记账：第 N 块已成功送达。发送中途失败时 processAttempt 读取该值续发，
+   *  避免「块 1 已送达、块 2 失败、整次重试从块 1 重发」造成的重复通知 */
+  async ackChunks(id: string, chunksSent: number): Promise<void> {
+    await this.db.run('UPDATE attempts SET chunks_sent=?,updated_at=? WHERE id=? AND status=?', [chunksSent, now(), id, 'sending']);
+  }
+
+  /** 本轮发送应从第几块开始（0 基）：上次中断前已成功送达的块数 */
+  async getChunksSent(id: string): Promise<number> {
+    const row = await this.db.get('SELECT chunks_sent FROM attempts WHERE id=?', [id]);
+    return Number(row?.chunks_sent ?? 0);
   }
 
   async skipAttempts(deliveryId: string, exceptId: string): Promise<void> {

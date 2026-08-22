@@ -223,6 +223,10 @@ export class DeliveryWorker {
             ...(delivery.idempotencyKey ? { idempotencyKey: delivery.idempotencyKey } : {}),
             ...(channel.provider === 'walkie' ? { walkieDeliveryId: delivery.id } : {})
           }
+        }, {
+          // 断点续发：上次失败前已送达的块跳过；每块成功即时记账，发送中途抛错也不丢进度
+          skipChunks: await this.repository.getChunksSent(attempt.id),
+          onChunkSent: (chunksSent) => { void this.repository.ackChunks(attempt.id, chunksSent).catch(() => undefined); }
         });
         // 发送结果一旦确定立即提交；后续记账失败也不得把已送达改写回重试中（会造成重复推送）
         await this.repository.completeAttempt(attempt.id, { success: true, responseCode: result.responseCode });

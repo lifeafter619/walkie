@@ -2,7 +2,8 @@ import { randomBytes } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { createNodeRepository } from '../src/server/database-node.js';
 import { NotificationService } from '../src/server/notifications.js';
-import type { ProviderDispatcher } from '../src/server/providers/dispatcher.js';
+import { ProviderDispatcher } from '../src/server/providers/dispatcher.js';
+import type { ProviderDispatcher as ProviderDispatcherType } from '../src/server/providers/dispatcher.js';
 import { DeliveryWorker, quietUntil } from '../src/server/queue.js';
 
 describe('delivery worker', () => {
@@ -15,7 +16,7 @@ describe('delivery worker', () => {
       if (config.target === 'first') throw new Error('primary unavailable');
       return { responseCode: 200 };
     });
-    const worker = new DeliveryWorker(repository, { send } as unknown as ProviderDispatcher, { deliveryWorkers: 4, maxDeliveryAttempts: 1, retryBaseMs: 1 });
+    const worker = new DeliveryWorker(repository, { send } as unknown as ProviderDispatcherType, { deliveryWorkers: 4, maxDeliveryAttempts: 1, retryBaseMs: 1 });
     const delivery = await new NotificationService(repository).send({ destination: route.id, title: 'Incident', body: 'Database unavailable' }, 'test');
 
     expect(await worker.drainOnce()).toBe(1);
@@ -31,10 +32,39 @@ describe('delivery worker', () => {
     const channels = await Promise.all([1, 2, 3].map((index) => repository.createChannel({ name: `C${index}`, slug: `c-${index}`, provider: 'webhook', config: {} })));
     const route = await repository.createRoute({ name: 'All', slug: 'all-three', strategy: 'fanout', channelIds: channels.map((channel) => channel.id) });
     const send = vi.fn(async () => ({ responseCode: 200 }));
-    const worker = new DeliveryWorker(repository, { send } as unknown as ProviderDispatcher, { deliveryWorkers: 1, maxDeliveryAttempts: 1, retryBaseMs: 1 });
+    const worker = new DeliveryWorker(repository, { send } as unknown as ProviderDispatcherType, { deliveryWorkers: 1, maxDeliveryAttempts: 1, retryBaseMs: 1 });
     const delivery = await new NotificationService(repository).send({ destination: route.id, title: 'T', body: 'B' }, 'test');
     expect(await worker.drainAll()).toBe(3);
     expect(send).toHaveBeenCalledTimes(3);
+    expect((await repository.getDelivery(delivery.id))?.status).toBe('delivered');
+    repository.close();
+  });
+
+  // 分块续发：长正文按渠道上限拆块逐块发送。块 1 成功、块 2 失败后重试必须从块 2 续发——
+  // 从块 1 重发等于给用户重复推送。必须用真 dispatcher（mock send 会绕过拆块与 onChunkSent 记账）
+  it('resumes a failed chunked delivery from the failed chunk instead of resending delivered ones', async () => {
+    const repository = await createNodeRepository(':memory:', randomBytes(32));
+    const channel = await repository.createChannel({ name: 'C', slug: 'chunked', provider: 'telegram', config: { botToken: 't', chatId: 'c' } });
+    let requestCount = 0;
+    const fetcher = vi.fn(async (_url: unknown, init: { body?: unknown } = {}) => {
+      requestCount += 1;
+      if (requestCount === 2) return new Response('{"ok":false,"error_code":500,"description":"chunk 2 failed"}', { status: 200 });
+      return new Response('{"ok":true,"result":{"message_id":1}}', { status: 200 });
+    });
+    const dispatcher = new ProviderDispatcher({ allowPrivateWebhooks: true, allowInsecureHttp: false }, fetcher as unknown as typeof fetch, async () => ['142.250.0.1']);
+    const worker = new DeliveryWorker(repository, dispatcher, { deliveryWorkers: 2, maxDeliveryAttempts: 2, retryBaseMs: 1 });
+    const delivery = await new NotificationService(repository).send({ destination: channel.id, title: '长文', body: 'x'.repeat(9000) }, 'test');
+
+    await worker.drainOnce(); // 块 1 送达、块 2 平台报错 → retrying
+    expect((await repository.getDelivery(delivery.id))?.status).toBe('processing');
+    await new Promise((resolve) => setImmediate(resolve)); // 等 fire-and-forget 的 ackChunks 落库
+    await worker.drainOnce(); // 重试：从块 2 续发
+
+    // 9000 字符按 Telegram 3600 上限拆 3 块：首轮 2 次调用 + 重试 2 次（块 2、块 3）。
+    // 从头重发会是 5 次（块 1 又来一遍）——断点续发的关键就是不重发已送达的块 1
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    const lengths = fetcher.mock.calls.map((call) => (JSON.parse(String(call[1]?.body)).text as string).length);
+    expect(lengths).toEqual([3610, 3610, 3610, 1810]); // 重试轮补发块 2（3610）与块 3（1810），块 1 不重复
     expect((await repository.getDelivery(delivery.id))?.status).toBe('delivered');
     repository.close();
   });
@@ -71,7 +101,7 @@ describe('delivery worker', () => {
     const repository = await createNodeRepository(':memory:', randomBytes(32));
     const channel = await repository.createChannel({ name: 'Limited', slug: 'limited', provider: 'webhook', config: {}, rateLimitPerMin: 1 });
     const send = vi.fn(async () => ({ responseCode: 200 }));
-    const worker = new DeliveryWorker(repository, { send } as unknown as ProviderDispatcher, { deliveryWorkers: 4, maxDeliveryAttempts: 3, retryBaseMs: 1 });
+    const worker = new DeliveryWorker(repository, { send } as unknown as ProviderDispatcherType, { deliveryWorkers: 4, maxDeliveryAttempts: 3, retryBaseMs: 1 });
     const notifications = new NotificationService(repository);
     await notifications.send({ destination: channel.id, title: 'first', body: 'x' }, 'test');
     await notifications.send({ destination: channel.id, title: 'second', body: 'x' }, 'test');

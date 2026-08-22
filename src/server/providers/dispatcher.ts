@@ -261,14 +261,16 @@ export class ProviderDispatcher {
     private readonly resolveHost?: ResolveHost
   ) {}
 
-  async send(provider: ProviderId, config: Record<string, unknown>, message: ProviderMessage): Promise<ProviderResult> {
+  async send(provider: ProviderId, config: Record<string, unknown>, message: ProviderMessage, options: { skipChunks?: number; onChunkSent?: (chunksSent: number) => void } = {}): Promise<ProviderResult> {
     if (provider === 'smtp') return this.sendSmtp(config, message);
     if (provider === 'webpush') return this.sendWebPush(message);
     const limit = BODY_LIMITS[provider];
     const byteLimit = BODY_BYTE_LIMITS[provider];
     const chunks = byteLimit ? splitBodyBytes(message.body, byteLimit) : limit ? splitBody(message.body, limit) : [message.body];
+    // 断点续发：上次中断前已成功的块不再重发（重发=用户收到重复通知）
+    const skip = Math.min(options.skipChunks ?? 0, chunks.length);
     let result: ProviderResult = {};
-    for (let index = 0; index < chunks.length; index += 1) {
+    for (let index = skip; index < chunks.length; index += 1) {
       const part: ProviderMessage = chunks.length === 1 ? message : {
         ...message,
         title: `${message.title} (${index + 1}/${chunks.length})`,
@@ -280,6 +282,7 @@ export class ProviderDispatcher {
       const response = await safeFetch(request.url, request.init, this.appConfig, this.fetcher, this.resolveHost);
       this.assertProviderResponse(provider, response.body);
       result = { responseCode: response.status, response: response.body };
+      options.onChunkSent?.(index + 1);
     }
     return result;
   }

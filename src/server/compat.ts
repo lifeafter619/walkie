@@ -17,6 +17,16 @@ export function safeCompatUrl(value: unknown): string | undefined {
   }
 }
 
+/** ntfy 官方文档的示例就是 `curl -d "hi" ntfy.sh/topic`：Content-Type 是
+ *  x-www-form-urlencoded，body 是裸文本而非 key=value。urlencoded 解析器会把它解析成
+ *  { 'hi': '' }——正文跑到 key 里去了。解析结果恰好是「单 key 空值」时，把 key 本身
+ *  还原为正文（真正的 key=value 提交至少会带 =，不会撞上这个形态） */
+export function bareFormText(fields: Record<string, unknown>): string | undefined {
+  const keys = Object.keys(fields);
+  if (keys.length !== 1 || String(fields[keys[0]]) !== '') return undefined;
+  return keys[0];
+}
+
 export async function sendWithAgentKey(
   repository: RelayRepository,
   notifications: NotificationService,
