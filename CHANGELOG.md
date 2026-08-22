@@ -5,6 +5,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-22
+
 ### Hook install flow — probe the machine, then ask
 
 - `walkie-notify hook` now detects agents by config directory **and** by executable on PATH, so a tool that is installed but never launched is offered too. It prints a status list (already hooked / detected / not found) and asks which to install; pressing Enter takes the recommendation.
@@ -16,7 +18,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 - **Fixed: Codex hooks never fired.** `~/.codex/hooks.json` was written in Cursor's flat shape; Codex uses the Claude-style nested schema (event → matcher group → handler). Now written correctly, with `Stop` and `PermissionRequest`.
 - **Fixed: Cursor notifications lost the project name.** Cursor hook payloads carry `workspace_roots`, not `cwd`, and `sessionEnd` errors arrive in `error_message` — both are read now.
-- Added `PermissionRequest` (Codex / Qwen Code / ZCode) as a critical "waiting for your approval" event, and mapped the type-less `Notification` sent by Gemini CLI / Qwen Code / Droid to the same tier.
+- Added `PermissionRequest` (Codex / Qwen Code / ZCode) as a critical "waiting for your approval" event. `Notification` now defaults to delivery for every type except `agent_completed` / `idle_prompt` / `auth_success`, instead of matching a whitelist — Gemini CLI sends `notification_type: "ToolPermission"` and Droid sends no type at all, both of which the whitelist silently dropped.
 - New tools: **Qwen Code** (`~/.qwen/settings.json`), **Droid / Factory** (`~/.factory/hooks.json`, events at the top level with no wrapper) and **opencode** (a generated plugin, since it has no hook config file).
 - Claude Code's `Notification` hook no longer carries a matcher, so elicitation prompts reach you too; the server still drops no-op types like `auth_success`.
 
@@ -26,6 +28,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - The agent-hook endpoint no longer returns 500 on malformed field types: a payload like `{"message": 42}` used to throw inside the event mapper. All string fields are now type-narrowed before use; malformed values are dropped and the event still maps by its semantics.
 - `--uninstall` writes nothing unless it actually removed a handler — a no-op uninstall no longer creates an empty config file for a tool that was never hooked, nor reformats an existing one.
 - Uninstall also preserves non-array values in the hooks table (unknown-schema config keys survive), and cleans up an orphaned forwarding script even when its config file is gone.
+
+### Windows hooks — installed successfully, never fired
+
+- **Fixed: every command-hook tool was dead on Windows.** The forwarding script was written as `walkie-notify.sh` and referenced verbatim as the hook command; `cmd.exe` cannot execute it, so Codex / Cursor / Qwen Code / Gemini CLI / Droid / ZCode installed cleanly and then never notified anything. Windows now gets `walkie-notify.ps1`, invoked as `powershell -NoProfile -ExecutionPolicy Bypass -File …` (built-in Windows PowerShell 5.1 — no curl, no Git Bash).
+- **Fixed: the script path was JSON-escaped twice**, so configs contained `C:\\Users\\…` and the tools looked for a file that does not exist.
+- **Fixed: PowerShell decoded the generated script with the machine's ANSI code page** (no BOM), which on a Chinese locale swallowed the line after a comment and produced an empty payload; the script is now written with a UTF-8 BOM.
+- **Fixed: notification bodies arrived as mojibake on Windows.** `[Console]::In.ReadToEnd()` decodes stdin with the console code page; the payload is now passed through as raw bytes, so Chinese text and emoji survive.
+- `--uninstall` now recognises both script names (`.sh` and `.ps1`), so hooks installed on another platform are cleaned up too — and it matches the script filename only, so a hand-written `walkie-notify send …` hook of your own is left alone.
+- CI runs the full verify job on `windows-latest` as well — the reason all of the above was invisible.
+- The CLI test suite now executes the generated PowerShell hook against a local server and asserts the exact forwarded URL, `Authorization` header and byte-identical body.
+
+### Correctness fixes from the vendor-doc audit
+
+- **Fixed: Qwen Code hooks were killed after 15 ms.** Its `timeout` is in milliseconds (like Gemini CLI), not seconds as in Codex / Droid / Cursor / ZCode.
+- **Fixed: the opencode plugin listened on `permission.updated`**, an event that does not exist — it is `permission.asked`.
+- **Fixed: the hook endpoint answered unauthenticated requests with 200 on Cloudflare.** Authentication now runs before event mapping, so `ignored` / `filtered` responses cannot leak from a missing or revoked key (the Node path was already covered by middleware; the Worker/Durable Object path was not). A bad key with `--only critical` could also pass the install probe this way.
+- The install probe now says when its own test notification was filtered by `--only`, instead of implying a notification was delivered.
+- ZCode installs warn that hooks are user-scope only and are snapshotted at session start, so the session has to be restarted.
+- **Fixed: `npm run typecheck` was red on main** — the test project did not compile (a deliberately malformed hook payload was typed as `HookInput`).
 
 ## [0.3.0] — 2026-08-21
 

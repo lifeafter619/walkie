@@ -47,8 +47,9 @@ A real test notification is sent before anything is written; existing hooks are 
 and re-running is idempotent.
 
 The token is never written to a config file — export `WALKIE_URL` and `WALKIE_TOKEN`
-in your shell profile. `--only <critical|warning|success|info>` sets the minimum
-severity; `WALKIE_MIN_SEVERITY` changes it later without reinstalling.
+in your shell profile (on Windows: `$env:WALKIE_URL` / `$env:WALKIE_TOKEN` in `$PROFILE`,
+where the forwarding script is generated as PowerShell). `--only <critical|warning|success|info>`
+sets the minimum severity; `WALKIE_MIN_SEVERITY` changes it later without reinstalling.
 
 ## GitHub Actions
 

@@ -8,7 +8,7 @@ Your agent calls you when work is done, asks when it is unsure, and you reply fr
 
 [![License](https://img.shields.io/badge/license-MIT-22c55e)](LICENSE)
 [![CI](https://github.com/lifeafter619/walkie/actions/workflows/ci.yml/badge.svg)](https://github.com/lifeafter619/walkie/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.3.0-black)](package.json)
+[![Version](https://img.shields.io/badge/version-0.4.0-black)](package.json)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6366f1)](https://modelcontextprotocol.io)
 
@@ -349,6 +349,14 @@ other non-TTY runs); `--tools claude,cursor` still forces an exact set.
 
 The command then sends a real test notification (a bad key or destination fails loudly before anything is written), then merges into each tool's config — your existing hooks and settings are preserved, re-running is idempotent, and `--uninstall` removes exactly what was added. Export `WALKIE_URL` and `WALKIE_TOKEN` in your shell profile: the config references `$WALKIE_TOKEN`, so the secret never lands in a file.
 
+On Windows the forwarding script is generated as PowerShell (`walkie-notify.ps1`, run through the built-in Windows PowerShell 5.1 — no curl or Git Bash needed), so put the credentials in your PowerShell profile instead:
+
+```powershell
+# notepad $PROFILE
+$env:WALKIE_URL = "https://your-domain"
+$env:WALKIE_TOKEN = "rdk_xxx"
+```
+
 **When you get notified** (that's what the hooks listen to):
 
 | Tool | Config file | Waiting on you | Task done | Failures |
@@ -360,7 +368,7 @@ The command then sends a real test notification (a bad key or destination fails 
 | Gemini CLI | `~/.gemini/settings.json` | `Notification` | `AfterAgent` | — |
 | Droid (Factory) | `~/.factory/hooks.json` | `Notification` | `Stop` | — |
 | ZCode | `~/.zcode/cli/config.json` | `PermissionRequest` | `Stop` | `PostToolUseFailure` |
-| opencode | `~/.config/opencode/plugin/walkie-notify.js` | `permission.updated` | `session.idle` | `session.error` |
+| opencode | `~/.config/opencode/plugin/walkie-notify.js` | `permission.asked` | `session.idle` | `session.error` |
 
 **Choose what deserves a ping** — `--only <level>` sets the minimum severity at install time, and `WALKIE_MIN_SEVERITY` changes it later without reinstalling:
 

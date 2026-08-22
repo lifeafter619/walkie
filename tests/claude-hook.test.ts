@@ -53,11 +53,13 @@ describe('claude hook event → notification mapping', () => {
 
   it('tolerates malformed field types instead of throwing (hook payloads are untrusted JSON)', () => {
     // 各家工具随手 POST 的 JSON：字段类型不可信。数字/对象/数组都不能把映射打成 500
-    expect(() => claudeHookToNotification({ hook_event_name: 'Notification', notification_type: 42, message: 7, cwd: 99 })).not.toThrow();
-    expect(() => claudeHookToNotification({ hook_event_name: 'stop', status: {}, workspace_roots: 'not-an-array' })).not.toThrow();
-    expect(() => claudeHookToNotification({ type: [], hook_event_name: null })).not.toThrow();
+    // HookInput 把字段收窄成 string，畸形值要穿过类型层才塞得进来（真实请求也是这样进来的）
+    const raw = (payload: Record<string, unknown>) => claudeHookToNotification(payload as never);
+    expect(() => raw({ hook_event_name: 'Notification', notification_type: 42, message: 7, cwd: 99 })).not.toThrow();
+    expect(() => raw({ hook_event_name: 'stop', status: {}, workspace_roots: 'not-an-array' })).not.toThrow();
+    expect(() => raw({ type: [], hook_event_name: null })).not.toThrow();
     // 畸形 message 被丢掉后仍按事件语义处理，而不是崩溃或发出空正文
-    const stop = claudeHookToNotification({ hook_event_name: 'Stop', last_assistant_message: { text: 'no' }, cwd: CWD });
+    const stop = raw({ hook_event_name: 'Stop', last_assistant_message: { text: 'no' }, cwd: CWD });
     expect(stop!.body).toBe('回合结束，等待下一步指令。');
   });
 
@@ -114,6 +116,16 @@ describe('claude hook event → notification mapping', () => {
     expect(codex!.body).toContain('测试全绿');
   });
 
+  it('delivers unknown notification_type values instead of dropping them (Gemini ToolPermission)', () => {
+    // Gemini CLI 的 Notification 带 notification_type: "ToolPermission"——白名单版本会静默丢掉
+    // 唯一一条真正需要人立刻响应的通知。各家新增类型同理，默认送达
+    const gemini = claudeHookToNotification({ hook_event_name: 'Notification', notification_type: 'ToolPermission', message: 'Allow run_shell_command?', cwd: CWD });
+    expect(gemini).toMatchObject({ severity: 'critical' });
+    expect(gemini!.body).toContain('run_shell_command');
+    // 没有 message 的未知类型也算「CLI 想让人看到」
+    expect(claudeHookToNotification({ hook_event_name: 'Notification', notification_type: 'brand_new_type' })!.severity).toBe('critical');
+  });
+
   it('parseMinSeverity validates values', () => {
     expect(parseMinSeverity('critical')).toBe('critical');
     expect(parseMinSeverity('info')).toBe('info');
@@ -138,6 +150,25 @@ describe('claude hook event → notification mapping', () => {
     const deliveries = await repository.listDeliveries({ limit: 5 });
     expect(deliveries.filter((item) => item.source === 'agent-hook')).toHaveLength(1);
     expect(deliveries.find((item) => item.source === 'agent-hook')?.severity).toBe('critical');
+  });
+
+  it('authenticates before mapping so ignored/filtered events cannot 200 without a key', async () => {
+    // Worker/DO 路径没有 requireAgent 中间件，鉴权只有 handleClaudeHook 这一道：
+    // 映射先跑的话，无 key 的 SessionEnd 会拿到 200 {ignored:true}，
+    // --only critical 下无效 key 还能骗过安装探测（200 = 凭据没问题）
+    const repository = await createNodeRepository(':memory:', randomBytes(32));
+    repositories.push(repository);
+    const notifications = new NotificationService(repository);
+    const drain = () => undefined;
+
+    for (const [payload, minSeverity] of [
+      [{ hook_event_name: 'SessionEnd', reason: 'clear' }, undefined],
+      [{ hook_event_name: 'Stop', last_assistant_message: 'done' }, 'critical' as const]
+    ] as const) {
+      const response = await handleClaudeHook(repository, notifications, payload, 'wk_bogus', undefined, drain, minSeverity);
+      expect(response.statusCode).toBe(401);
+    }
+    expect((await handleClaudeHook(repository, notifications, { hook_event_name: 'SessionEnd' }, '', undefined, drain)).statusCode).toBe(401);
   });
 });
 

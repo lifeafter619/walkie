@@ -1,7 +1,7 @@
 services:
   walkie:
     build: .
-    image: walkie:0.3.0
+    image: walkie:0.4.0
     restart: unless-stopped
     ports:
       - "127.0.0.1:4310:4310"

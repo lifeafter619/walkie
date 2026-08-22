@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { AddressInfo } from 'node:net';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
@@ -8,7 +8,9 @@ import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 
 const run = promisify(execFile);
-const SCRIPT = 'walkie-notify.sh';
+// Windows 上转发脚本是 .ps1（cmd.exe 执行不了 .sh），命令还要 powershell 包一层
+const isWindows = process.platform === 'win32';
+const SCRIPT = isWindows ? 'walkie-notify.ps1' : 'walkie-notify.sh';
 
 /** CLI 端到端（#15）：对 mock server 走真实子进程，验证 send/status/错误码 */
 describe('walkie CLI', () => {
@@ -104,12 +106,20 @@ describe('walkie CLI', () => {
 
     const cursorHooks = JSON.parse(readFileSync(join(home, '.cursor', 'hooks.json'), 'utf8'));
     expect(cursorHooks.hooks.beforeShellExecution).toHaveLength(1); // 用户已有 hook 保留
-    expect(cursorHooks.hooks.stop?.[0]?.command).toContain('walkie-notify.sh');
-    const script = readFileSync(join(home, '.cursor', 'hooks', 'walkie-notify.sh'), 'utf8');
+    expect(cursorHooks.hooks.stop?.[0]?.command).toContain(SCRIPT);
+    // 路径原样落盘：JSON 序列化只该转义一次，Windows 的 \ 不能变成 \\
+    expect(cursorHooks.hooks.stop?.[0]?.command).toContain(join(home, '.cursor', 'hooks', SCRIPT));
+    const script = readFileSync(join(home, '.cursor', 'hooks', SCRIPT), 'utf8');
     expect(script).toContain('/api/v1/hooks/agent');
-    expect(script).toContain('destination=$WALKIE_DESTINATION'); // 运行时展开，不写死
-    expect(script).toContain('${query:+?$query}'); // ? 由第一个查询参数补——没有 destination 时 min_severity 也能拼出合法 URL
-    expect(script).toContain('min_severity=$WALKIE_MIN_SEVERITY'); // 级别可后调，无需重装
+    if (isWindows) {
+      expect(cursorHooks.hooks.stop?.[0]?.command).toContain('powershell'); // cmd.exe 不认 .ps1
+      expect(script).toContain('$env:WALKIE_DESTINATION'); // 运行时展开，不写死
+      expect(script).toContain('min_severity=$env:WALKIE_MIN_SEVERITY'); // 级别可后调，无需重装
+    } else {
+      expect(script).toContain('destination=$WALKIE_DESTINATION'); // 运行时展开，不写死
+      expect(script).toContain('${query:+?$query}'); // ? 由第一个查询参数补——没有 destination 时 min_severity 也能拼出合法 URL
+      expect(script).toContain('min_severity=$WALKIE_MIN_SEVERITY'); // 级别可后调，无需重装
+    }
 
     // 幂等重装：handler 不重复
     await cli(['hook', '--tools', 'claude,cursor']);
@@ -125,7 +135,7 @@ describe('walkie CLI', () => {
     const cursorStripped = JSON.parse(readFileSync(join(home, '.cursor', 'hooks.json'), 'utf8'));
     expect(['stop', 'sessionEnd'].filter((event) => cursorStripped.hooks[event])).toHaveLength(0);
     expect(cursorStripped.hooks.beforeShellExecution).toHaveLength(1);
-    expect(existsSync(join(home, '.cursor', 'hooks', 'walkie-notify.sh'))).toBe(false);
+    expect(existsSync(join(home, '.cursor', 'hooks', SCRIPT))).toBe(false);
 
     rmSync(home, { recursive: true, force: true });
     server.close();
@@ -157,7 +167,7 @@ describe('walkie CLI', () => {
     }
     writeFileSync(join(home, '.zcode', 'cli', 'config.json'), JSON.stringify({ theme: 'dark' })); // 用户已有配置必须保留
 
-    const cli = (extra: string[]) => run('node', ['packages/walkie-cli/walkie.mjs', 'hook', '--tools', 'codex,zcode,gemini,droid', ...extra], {
+    const cli = (extra: string[]) => run('node', ['packages/walkie-cli/walkie.mjs', 'hook', '--tools', 'codex,zcode,gemini,droid,qwen', ...extra], {
       env: { ...process.env, WALKIE_HOME: home, WALKIE_URL: `http://127.0.0.1:${port}`, WALKIE_API_KEY: 'tok' }
     });
 
@@ -169,26 +179,33 @@ describe('walkie CLI', () => {
 
     // Codex：hooks.json 用的是 Claude 式嵌套 schema（事件 → 组 → handler），不是 Cursor 的扁平形状
     const codex = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
-    expect(codex.hooks.Stop[0].hooks[0].command).toContain('walkie-notify.sh');
+    expect(codex.hooks.Stop[0].hooks[0].command).toContain(SCRIPT);
+    // 脚本路径原样落盘（Windows 上曾被二次 JSON 转义成 C:\\Users\\…，工具照着找不到文件）
+    expect(codex.hooks.Stop[0].hooks[0].command).toContain(join(home, '.codex', 'hooks', SCRIPT));
     expect(codex.hooks.PermissionRequest[0].hooks[0].type).toBe('command');
+    expect(codex.hooks.Stop[0].hooks[0].timeout).toBe(15); // Codex 用秒
 
     // Droid：.factory/hooks.json 事件直接在顶层，没有 hooks 包装层
     const droid = JSON.parse(readFileSync(join(home, '.factory', 'hooks.json'), 'utf8'));
     expect(droid.hooks).toBeUndefined();
-    expect(droid.Stop[0].hooks[0].command).toContain('walkie-notify.sh');
+    expect(droid.Stop[0].hooks[0].command).toContain(SCRIPT);
     expect(droid.Notification[0].hooks[0].type).toBe('command');
 
     // ZCode：config.json 的 hooks.events 结构 + enabled:true；用户主题保留
     const zcode = JSON.parse(readFileSync(join(home, '.zcode', 'cli', 'config.json'), 'utf8'));
     expect(zcode.theme).toBe('dark');
     expect(zcode.hooks.enabled).toBe(true);
-    expect(zcode.hooks.events.Stop[0].hooks[0].command).toContain('walkie-notify.sh');
+    expect(zcode.hooks.events.Stop[0].hooks[0].command).toContain(SCRIPT);
     expect(zcode.hooks.events.PostToolUseFailure[0].hooks[0].type).toBe('command');
 
     // Gemini：settings.json 的 hooks.<Event> 结构（AfterAgent/Notification）
     const gemini = JSON.parse(readFileSync(join(home, '.gemini', 'settings.json'), 'utf8'));
-    expect(gemini.hooks.AfterAgent[0].hooks[0].command).toContain('walkie-notify.sh');
+    expect(gemini.hooks.AfterAgent[0].hooks[0].command).toContain(SCRIPT);
     expect(gemini.hooks.Notification[0].hooks[0].timeout).toBe(15000); // Gemini 用毫秒
+
+    // Qwen Code 的 command hook timeout 也是毫秒——写 15 会让 hook 在 15ms 后被杀
+    const qwen = JSON.parse(readFileSync(join(home, '.qwen', 'settings.json'), 'utf8'));
+    expect(qwen.hooks.Stop[0].hooks[0].timeout).toBe(15000);
 
     // --only critical 已烧进脚本 URL：级别随安装走，不用动服务端
     const script = readFileSync(join(home, '.codex', 'hooks', SCRIPT), 'utf8');
@@ -228,6 +245,45 @@ describe('walkie CLI', () => {
     server.close();
   }, 30_000);
 
+  // Windows 上真的把生成的 .ps1 跑一遍：文件内容对不等于 hook 能触发
+  // （曾经三处一起挂——装成 .sh、路径被二次转义、PowerShell 按 ANSI 解码把 $buffer 那行吞了）
+  it.skipIf(!isWindows)('runs the generated PowerShell hook end to end', async () => {
+    const received: Array<{ url: string | undefined; auth: string | undefined; body: string }> = [];
+    const server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        received.push({ url: req.url, auth: req.headers.authorization, body });
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ ok: true, deliveryId: 'd-1' }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const url = `http://127.0.0.1:${port}`;
+    const home = mkdtempSync(join(tmpdir(), 'walkie-hook-ps1-'));
+    await run('node', ['packages/walkie-cli/walkie.mjs', 'hook', '--tools', 'cursor'], {
+      env: { ...process.env, WALKIE_HOME: home, WALKIE_URL: url, WALKIE_API_KEY: 'tok' }
+    });
+    received.length = 0; // 丢掉安装探测那条
+
+    // 照 Cursor 的做法执行：command 交给系统 shell，载荷走 stdin
+    const command = JSON.parse(readFileSync(join(home, '.cursor', 'hooks.json'), 'utf8')).hooks.stop[0].command as string;
+    const payload = '{"hook_event_name":"stop","status":"error","last_assistant_message":"ENOSPC 磁盘满了 🚨"}';
+    const child = spawn(command, { shell: true, env: { ...process.env, WALKIE_URL: url, WALKIE_TOKEN: 'tok-live', WALKIE_DESTINATION: 'phone' } });
+    child.stdin.end(payload);
+    const code = await new Promise<number | null>((resolve) => child.on('close', resolve));
+
+    expect(code).toBe(0); // 转发脚本永不阻塞工作流
+    expect(received).toHaveLength(1);
+    expect(received[0]!.url).toBe('/api/v1/hooks/agent?destination=phone');
+    expect(received[0]!.auth).toBe('Bearer tok-live'); // 密钥来自环境变量，不在脚本里
+    expect(received[0]!.body).toBe(payload); // 中文/emoji 原样透传（不能被 936 代码页啃掉）
+
+    rmSync(home, { recursive: true, force: true });
+    server.close();
+  }, 60_000);
+
   it('installs the opencode plugin and removes it again', async () => {
     const server = http.createServer((_req, res) => { res.statusCode = 200; res.end(JSON.stringify({ ok: true })); });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -241,6 +297,7 @@ describe('walkie CLI', () => {
     const pluginFile = join(home, '.config', 'opencode', 'plugin', 'walkie-notify.js');
     const plugin = readFileSync(pluginFile, 'utf8');
     expect(plugin).toContain('session.idle');
+    expect(plugin).toContain('permission.asked'); // opencode 的事件叫 permission.asked，没有 permission.updated
     expect(plugin).toContain('/api/v1/hooks/agent');
     expect(plugin).not.toContain('secret-key-xyz'); // 密钥只从环境变量读，绝不落盘
 

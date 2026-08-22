@@ -12,7 +12,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 
 const USAGE = `walkie-notify — CLI for Walkie notifications
 
@@ -195,25 +195,24 @@ if (command === 'status') {
 /* ────────────────────────────────────────────────────────────
  * hook install / uninstall — 八家编码 Agent 工具一键接入
  *
- * 两种 schema，一套写入器：
+ * 两种 schema，一套写入器（timeout 单位各家不同，已按官方文档标注）：
  *   A. Claude 式嵌套（事件 → matcher 组 → handler 数组）
  *      claude   ~/.claude/settings.json      hooks.<Event>，原生 type:"http"
  *      codex    ~/.codex/hooks.json          hooks.<Event>，command（timeout 秒）
- *      qwen     ~/.qwen/settings.json        hooks.<Event>，command
+ *      qwen     ~/.qwen/settings.json        hooks.<Event>，command（timeout 毫秒）
  *      gemini   ~/.gemini/settings.json      hooks.<Event>，command（timeout 毫秒）
- *      droid    ~/.factory/hooks.json        事件在顶层，无 hooks 包装
- *      zcode    ~/.zcode/cli/config.json     hooks.events.<Event> + hooks.enabled
+ *      droid    ~/.factory/hooks.json        事件在顶层，无 hooks 包装（timeout 秒）
+ *      zcode    ~/.zcode/cli/config.json     hooks.events.<Event> + hooks.enabled（timeout 秒）
  *   B. Cursor 式扁平
- *      cursor   ~/.cursor/hooks.json         hooks.<event>: [{command,timeout}]
+ *      cursor   ~/.cursor/hooks.json         hooks.<event>: [{command,timeout}]（秒）
  *   C. 插件式
- *      opencode ~/.config/opencode/plugin/walkie.js   event: session.idle 等
+ *      opencode ~/.config/opencode/plugin/walkie-notify.js   event: session.idle 等
  *
  * 桌面版与 CLI 共用同一批配置文件（Claude Desktop、Cursor 桌面版、ZCode 桌面版）。
  * ──────────────────────────────────────────────────────────── */
 
 const WALKIE_HOOK_MARKER = 'installed-by-walkie';
 const HOOK_ENDPOINT = '/api/v1/hooks/agent';
-const SEVERITY_RANK = { info: 0, success: 1, warning: 2, critical: 3 };
 
 function readJson(file) {
   try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
@@ -224,11 +223,22 @@ function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-const SCRIPT_NAME = 'walkie-notify.sh';
+const isWindows = process.platform === 'win32';
+const SCRIPT_BASE = 'walkie-notify';
+/** 转发脚本：POSIX 用 sh，Windows 用 PowerShell（cmd.exe 执行不了 .sh，装了也永远不触发） */
+const SCRIPT_NAME = `${SCRIPT_BASE}.${isWindows ? 'ps1' : 'sh'}`;
+const SCRIPT_NAMES = [`${SCRIPT_BASE}.sh`, `${SCRIPT_BASE}.ps1`];
+/** 各家 hook 的 command 交给系统 shell 执行；.ps1 得显式喊 powershell（Win 10/11 内置 5.1） */
+const runCommand = (file) => isWindows
+  ? `powershell -NoProfile -ExecutionPolicy Bypass -File "${file}"`
+  : file;
+/** 命令里提到转发脚本？.sh / .ps1 都算（换平台重跑、旧装卸载都要认得出），
+ *  但只认带后缀的文件名——用户手写的 `walkie-notify send ...` hook 不能被当成我们的 */
+const mentionsScript = (value) => SCRIPT_NAMES.some((script) => String(value ?? '').includes(script));
 /** walkie 自己写的 handler：http 指向 hook 端点，command 指向转发脚本 */
 function isWalkieHandler(handler) {
   if (typeof handler !== 'object' || handler === null) return false;
-  return String(handler.url ?? '').includes('/api/v1/hooks/') || String(handler.command ?? '').includes(SCRIPT_NAME);
+  return String(handler.url ?? '').includes('/api/v1/hooks/') || mentionsScript(handler.command);
 }
 
 /** 在 root 的 path（如 ['hooks','events']）位置读出事件表并交给 fn 改写，返回新 root */
@@ -273,6 +283,7 @@ function stripHookGroups(events) {
  *  查询串在 shell 里逐段拼：${q:+$q&} 是 POSIX 展开（q 非空补 &），最后
  *  ${query:+?$query} 统一补 ?——min_severity 不再依赖 destination 先出现 */
 function forwardScript(minSeverity) {
+  if (isWindows) return powershellForwardScript(minSeverity);
   const levelLine = minSeverity
     ? `query="\${query:+\$query&}min_severity=${minSeverity}"`
     : `[ -n "\${WALKIE_MIN_SEVERITY:-}" ] && query="\${query:+\$query&}min_severity=\$WALKIE_MIN_SEVERITY"`;
@@ -292,7 +303,32 @@ exit 0
 `;
 }
 
-const isScriptEntry = (entry) => typeof entry === 'object' && entry !== null && String(entry.command ?? '').includes(SCRIPT_NAME);
+/** Windows 版转发脚本。用内置的 Windows PowerShell 5.1，不依赖 curl / Git Bash。
+ *  开头的 ﻿ 是 UTF-8 BOM：PowerShell 5.1 对没有 BOM 的文件按 ANSI 代码页解码，
+ *  中文注释会被解成乱码，其中的字节还可能当成续行符把下一行吞掉（$buffer 未赋值 → 空载荷） */
+function powershellForwardScript(minSeverity) {
+  const levelLine = minSeverity
+    ? `$query += 'min_severity=${minSeverity}'`
+    : `if ($env:WALKIE_MIN_SEVERITY) { $query += "min_severity=$env:WALKIE_MIN_SEVERITY" }`;
+  return `﻿# ${WALKIE_HOOK_MARKER} — agent hook → Walkie 转发；由 walkie-notify hook 生成，可随时删除
+$ErrorActionPreference = 'SilentlyContinue'
+# 原样透传 stdin 的字节：[Console]::In.ReadToEnd() 会按控制台代码页（中文机器上是 936）
+# 解码，中文/emoji 正文会变成乱码。载荷只是转发，不需要解码
+$buffer = New-Object IO.MemoryStream
+[Console]::OpenStandardInput().CopyTo($buffer)
+$payload = $buffer.ToArray()
+if (-not $env:WALKIE_URL -or -not $env:WALKIE_TOKEN) { exit 0 }
+$query = @()
+if ($env:WALKIE_DESTINATION) { $query += "destination=$env:WALKIE_DESTINATION" }
+${levelLine}
+$uri = $env:WALKIE_URL.TrimEnd('/') + '${HOOK_ENDPOINT}'
+if ($query.Count -gt 0) { $uri += '?' + ($query -join '&') }
+try { Invoke-RestMethod -Method Post -Uri $uri -TimeoutSec 10 -ContentType 'application/json; charset=utf-8' -Headers @{ Authorization = "Bearer $env:WALKIE_TOKEN" } -Body $payload | Out-Null } catch { }
+exit 0
+`;
+}
+
+const isScriptEntry = (entry) => typeof entry === 'object' && entry !== null && mentionsScript(entry.command);
 
 /** opencode 没有 hooks 配置文件，只有插件；插件里直接 fetch 到同一个端点 */
 function opencodePlugin(minSeverity) {
@@ -322,7 +358,7 @@ export const WalkieNotify = async ({ directory }) => {
     event: async ({ event }) => {
       if (event.type === 'session.idle') await post({ hook_event_name: 'Stop' });
       if (event.type === 'session.error') await post({ hook_event_name: 'StopFailure', error: String(event.properties?.error?.name ?? 'session error') });
-      if (event.type === 'permission.updated') await post({ hook_event_name: 'PermissionRequest' });
+      if (event.type === 'permission.asked') await post({ hook_event_name: 'PermissionRequest' });
     }
   };
 };
@@ -350,7 +386,8 @@ const TOOLS = {
     events: ['Stop', 'PermissionRequest'], note: '任务完成 / 等你批准'
   },
   qwen: {
-    label: 'Qwen Code', shape: 'nested', dir: ['.qwen'], file: 'settings.json', container: ['hooks'], timeout: 15,
+    // Qwen Code 的 command hook timeout 单位是毫秒（默认 60000），不是秒
+    label: 'Qwen Code', shape: 'nested', dir: ['.qwen'], file: 'settings.json', container: ['hooks'], timeout: 15000,
     bin: ['qwen'],
     events: ['Stop', 'Notification', 'PermissionRequest'], note: '任务完成 / 等你操作'
   },
@@ -366,8 +403,9 @@ const TOOLS = {
     events: ['Stop', 'Notification'], note: '任务完成 / 等你操作'
   },
   zcode: {
-    // ZCode 的 hooks 默认关闭，且事件名是严格白名单——写错一个整份 hooks 会被静默丢弃
-    label: 'ZCode', shape: 'nested', dir: ['.zcode', 'cli'], file: 'config.json', container: ['hooks', 'events'], timeout: 15, enable: true,
+    // ZCode 的 hooks 默认关闭，且事件名是严格白名单——写错一个整份 hooks 会被静默丢弃。
+    // 配置在会话启动时快照（改完要重开会话），且当前版本忽略 workspace 级 hooks
+    label: 'ZCode', shape: 'nested', dir: ['.zcode', 'cli'], file: 'config.json', container: ['hooks', 'events'], timeout: 15, enable: true, restart: true, userOnly: true,
     bin: ['zcode'],
     events: ['Stop', 'PermissionRequest', 'PostToolUseFailure'], note: '回合结束 / 等你批准 / 工具失败'
   },
@@ -431,6 +469,8 @@ if (command === 'hook') {
     return path.join(base, ...(name === 'opencode' && scope === 'user' ? dir.slice(0, 2) : [dir[0]]));
   };
   const scriptFileFor = (name) => path.join(toolDir(name), 'hooks', SCRIPT_NAME);
+  /** 装过转发脚本？.sh / .ps1 都算（换平台重跑时不能漏认已装） */
+  const hasScript = (name) => SCRIPT_NAMES.some((script) => existsSync(path.join(toolDir(name), 'hooks', script)));
 
   for (const tool of requested) {
     if (!KNOWN_TOOLS.includes(tool)) usageError(`unknown tool "${tool}" (use ${KNOWN_TOOLS.join(' | ')})`);
@@ -444,7 +484,7 @@ if (command === 'hook') {
     const installed = scope === 'user' && Array.isArray(tool.bin) ? onPath(tool.bin) : false;
     let hooked = false;
     if (tool.shape === 'plugin') hooked = existsSync(configFile(name));
-    else hooked = JSON.stringify(readJson(configFile(name)) ?? {}).includes('/api/v1/hooks/') || existsSync(scriptFileFor(name));
+    else hooked = JSON.stringify(readJson(configFile(name)) ?? {}).includes('/api/v1/hooks/') || hasScript(name);
     return { name, label: tool.label, configured, installed, hooked, detected: configured || installed };
   }
 
@@ -505,12 +545,17 @@ if (command === 'hook') {
   }
 
   if (uninstall) {
-    // 孤儿脚本（配置没了、脚本还在）也是 walkie 痕迹，一并摘掉
+    // 孤儿脚本（配置没了、脚本还在）也是 walkie 痕迹，一并摘掉；
+    // 换过平台的旧装（.sh / .ps1 两种）都清
     const removeScript = (name) => {
-      const scriptFile = scriptFileFor(name);
-      if (!existsSync(scriptFile)) return false;
-      rmSync(scriptFile);
-      return true;
+      let hit = false;
+      for (const script of SCRIPT_NAMES) {
+        const scriptFile = path.join(toolDir(name), 'hooks', script);
+        if (!existsSync(scriptFile)) continue;
+        rmSync(scriptFile);
+        hit = true;
+      }
+      return hit;
     };
     for (const name of targets) {
       const tool = TOOLS[name];
@@ -568,11 +613,14 @@ if (command === 'hook') {
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ hook_event_name: 'Stop', last_assistant_message: `✅ walkie hook 安装验证（级别 ${minSeverity ?? '全部'}）：收到这条说明配置正确。`, cwd: process.cwd() })
   }).catch(() => null);
+  const probeBody = probe ? await probe.text().catch(() => '') : 'network error';
   if (!probe || !probe.ok) {
-    const detail = probe ? await probe.text().catch(() => '') : 'network error';
-    process.stderr.write(`walkie-notify: 验证失败（HTTP ${probe ? probe.status : 'n/a'}）: ${detail.slice(0, 300)}\n请检查 --url/--token${destination ? '' : '；若 key 绑定多个目的地需 --destination'}\n`);
+    process.stderr.write(`walkie-notify: 验证失败（HTTP ${probe ? probe.status : 'n/a'}）: ${probeBody.slice(0, 300)}\n请检查 --url/--token${destination ? '' : '；若 key 绑定多个目的地需 --destination'}\n`);
     process.exit(2);
   }
+  // 探针发的是 Stop（success 级）。--only warning/critical 时服务端会按级别过滤掉它：
+  // 凭据是好的，但用户等不到那条测试推送——说清楚，否则就是一张「装完没反应」的工单
+  const probeFiltered = probeBody.includes('"filtered":true');
 
   const installScript = (name) => {
     const scriptFile = scriptFileFor(name);
@@ -594,7 +642,7 @@ if (command === 'hook') {
             headers: { Authorization: 'Bearer $WALKIE_TOKEN' },
             allowedEnvVars: ['WALKIE_TOKEN']
           }
-        : { type: 'command', command: JSON.stringify(installScript(name)).slice(1, -1), timeout: tool.timeout };
+        : { type: 'command', command: runCommand(installScript(name)), timeout: tool.timeout };
       const hookConfig = Object.fromEntries(tool.events.map((event) => [event, { hooks: [handler] }]));
       let config = atPath(readJson(file) ?? {}, tool.container, (events) => mergeHookGroups(events, hookConfig));
       // ZCode 的 hooks 默认不启用，walkie 依赖它必须打开
@@ -607,7 +655,7 @@ if (command === 'hook') {
       config.hooks = config.hooks ?? {};
       for (const [event, timeout] of Object.entries(tool.events)) {
         const kept = (Array.isArray(config.hooks[event]) ? config.hooks[event] : []).filter((entry) => !isScriptEntry(entry));
-        config.hooks[event] = [...kept, { command: scriptFile, timeout }];
+        config.hooks[event] = [...kept, { command: runCommand(scriptFile), timeout }];
       }
       writeJson(file, config);
     } else if (tool.shape === 'plugin') {
@@ -616,6 +664,10 @@ if (command === 'hook') {
     }
     const already = report.find((item) => item.name === name)?.hooked;
     process.stdout.write(`✓ ${tool.label} hooks 已${already ? '更新' : '写入'} ${file}\n`);
+    // 装了但不会生效的组合要当场说，不能让人等一个永远不来的通知
+    if (tool.userOnly && scope === 'project') {
+      process.stdout.write(`  ⚠ ${tool.label} 当前版本忽略项目级 hooks，这份配置不会触发——改用 --scope user\n`);
+    }
     installedEvents.push(`${tool.label}：${tool.note}`);
   }
 
@@ -629,14 +681,15 @@ if (command === 'hook') {
     : [`export WALKIE_URL="${baseUrl}"`, 'export WALKIE_TOKEN=<你的 Agent Key>', ...(destination ? [`export WALKIE_DESTINATION="${destination}"`] : [])];
   const profile = process.platform === 'win32' ? 'PowerShell 的 $PROFILE' : (String(process.env.SHELL ?? '').includes('zsh') ? '~/.zshrc' : '~/.bashrc');
   const skipped = KNOWN_TOOLS.filter((name) => !targets.includes(name));
+  // 配置在会话启动时快照，跑着的会话读不到新 hooks
+  const restart = targets.filter((name) => TOOLS[name].restart).map((name) => TOOLS[name].label);
   process.stdout.write(`
 已安装 ${targets.length} 个工具的 hooks。下一步（必做）——把凭据写进 ${profile}：
 ${exports.map((line) => `  ${line}`).join('\n')}
 
 触发时机：
-${installedEvents.map((line) => `  · ${line}`).join('\n')}${levelNote}
-${skipped.length ? `\n没装的：${skipped.map((name) => TOOLS[name].label).join('、')}（重跑并选序号，或 --tools ${skipped[0]}）` : ''}
-自检：walkie-notify hook --detect    卸载：walkie-notify hook --uninstall
+${installedEvents.map((line) => `  · ${line}`).join('\n')}${levelNote}${probeFiltered ? `\n注意：验证请求已被服务端按 --only ${minSeverity} 过滤（凭据与路由没问题，只是这条测试事件级别不够，所以你没收到推送）。` : ''}
+${restart.length ? `重启会话后生效：${restart.join('、')}（配置在会话启动时快照）\n` : ''}${skipped.length ? `没装的：${skipped.map((name) => TOOLS[name].label).join('、')}（重跑并选序号，或 --tools ${skipped[0]}）\n` : ''}自检：walkie-notify hook --detect    卸载：walkie-notify hook --uninstall
 `);
   process.exit(0);
 }

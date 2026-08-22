@@ -16,7 +16,13 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # Windows 必测：hook 转发脚本在 Windows 上装的是 .ps1（POSIX 装 .sh），
+      # 只在 ubuntu 上跑的话「装好了但永远不触发」这类 bug 一个都看不见
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

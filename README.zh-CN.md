@@ -8,7 +8,7 @@ Agent 干完活呼叫你、拿不准主意时问你，你在任何设备上按�
 
 [![License](https://img.shields.io/badge/license-MIT-22c55e)](LICENSE)
 [![CI](https://github.com/lifeafter619/walkie/actions/workflows/ci.yml/badge.svg)](https://github.com/lifeafter619/walkie/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.3.0-black)](package.json)
+[![Version](https://img.shields.io/badge/version-0.4.0-black)](package.json)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6366f1)](https://modelcontextprotocol.io)
 
@@ -362,6 +362,14 @@ TTY 环境也是这个行为）；`--tools claude,cursor` 仍可精确指定。
 
 然后命令会先发一条真实测试通知（key 或目的地配错当场报错，绝不带病写入），然后合并进各工具的配置——已有 hooks 与配置原样保留，重复执行幂等，`--uninstall` 精确摘除。最后在 shell 配置里导出 `WALKIE_URL` 和 `WALKIE_TOKEN`：写入的配置引用 `$WALKIE_TOKEN`，密钥不落盘。
 
+Windows 上转发脚本生成的是 PowerShell 版（`walkie-notify.ps1`，走系统自带的 Windows PowerShell 5.1，不需要 curl 或 Git Bash），凭据写进 PowerShell 配置文件：
+
+```powershell
+# notepad $PROFILE
+$env:WALKIE_URL = "https://your-domain"
+$env:WALKIE_TOKEN = "rdk_xxx"
+```
+
 **什么时候通知你**（hooks 监听的事件）：
 
 | 工具 | 配置文件 | 在等你 | 任务完成 | 失败 |
@@ -373,7 +381,7 @@ TTY 环境也是这个行为）；`--tools claude,cursor` 仍可精确指定。
 | Gemini CLI | `~/.gemini/settings.json` | `Notification` | `AfterAgent` | — |
 | Droid（Factory） | `~/.factory/hooks.json` | `Notification` | `Stop` | — |
 | ZCode | `~/.zcode/cli/config.json` | `PermissionRequest` | `Stop` | `PostToolUseFailure` |
-| opencode | `~/.config/opencode/plugin/walkie-notify.js` | `permission.updated` | `session.idle` | `session.error` |
+| opencode | `~/.config/opencode/plugin/walkie-notify.js` | `permission.asked` | `session.idle` | `session.error` |
 
 **自己选什么才值得打扰你**——安装时用 `--only <级别>` 定最低通知级别，之后改环境变量 `WALKIE_MIN_SEVERITY` 即可调整、无需重装：
 

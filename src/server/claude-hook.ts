@@ -9,8 +9,9 @@ import { sendWithAgentKey } from './compat.js';
  * Droid / ZCode / Cursor（command hook 转发脚本 POST 过来）、opencode（生成的插件）。
  * 各家事件 schema 高度同构，服务端统一归一化后按语义映射 severity：
  *
- *   等你操作类（permission_prompt / agent_needs_input / elicitation_* / PermissionRequest /
- *     Gemini·Qwen·Droid 的 Notification）
+ *   等你操作类（PermissionRequest，以及除 agent_completed / idle_prompt / auth_success
+ *     以外的所有 Notification——permission_prompt / agent_needs_input / elicitation_* /
+ *     Gemini 的 ToolPermission / Droid 的无类型载荷）
  *     与失败类（StopFailure / Cursor stop.status=error / sessionEnd.reason=error）
  *     → critical
  *   任务完成类（Stop / agent_completed / Codex agent-turn-complete / Gemini AfterAgent）
@@ -114,22 +115,21 @@ export function claudeHookToNotification(rawInput: HookInput): {
 
   if (event === 'Notification') {
     const type = input.notification_type ?? input.message ?? '';
-    if (type === 'permission_prompt' || type === 'agent_needs_input' || type.startsWith('elicitation_')) {
-      // 等你操作：critical 配合 Web Push 的 requireInteraction + 长振动
-      return { title: `Agent 需要你${where}`, body: (input.message || input.title || '等你授权或输入').slice(0, 2000), severity: 'critical', tags: 'agent-hook|permission' };
-    }
     if (type === 'agent_completed') {
       return { title: `后台任务完成${where}`, body: (input.message || input.title || '后台会话已结束').slice(0, 2000), severity: 'success', tags: 'agent-hook' };
     }
     if (type === 'idle_prompt') {
       return { title: `Agent 在等你${where}`, body: (input.message || '回复已挂起 60 秒').slice(0, 2000), severity: 'info', tags: 'agent-hook|idle' };
     }
-    // Gemini / Qwen / Droid 的 Notification 没有 notification_type，语义就是「要你看一眼」
-    // （Droid：需要授权或输入已空闲 60 秒）——按等你操作处理
-    if (!input.notification_type && (input.message || input.title)) {
-      return { title: `Agent 需要你${where}`, body: (input.message || input.title || '').slice(0, 2000), severity: 'critical', tags: 'agent-hook|permission' };
+    if (type === 'auth_success') return undefined; // 登录成功没有行动价值
+    // 其余一律「要你看一眼」：Claude Code 的 permission_prompt / agent_needs_input /
+    // elicitation_*、Gemini CLI 的 ToolPermission、Qwen 的 permission_prompt，以及
+    // Droid 等不带 notification_type 的载荷。白名单会漏掉各家新增的类型——Notification
+    // 本就是「CLI 想让人看到」的事件，默认送达（嫌吵用 min_severity 收窄）
+    if (input.message || input.title || type) {
+      return { title: `Agent 需要你${where}`, body: (input.message || input.title || '等你授权或输入').slice(0, 2000), severity: 'critical', tags: 'agent-hook|permission' };
     }
-    return undefined; // auth_success 等无行动价值
+    return undefined;
   }
 
   // Codex / Qwen / ZCode：Agent 在等你批准某次工具调用。转发脚本不产出 stdout，
@@ -201,15 +201,16 @@ export async function handleClaudeHook(
   minSeverity: Severity | undefined = undefined
 ): Promise<{ statusCode: number; body: Record<string, unknown> }> {
   const input = (body && typeof body === 'object' ? body : {}) as HookInput;
+  // 鉴权在最前：ignored/filtered 也是回答，无 key 不该拿到 200
+  // （Node 端 requireAgent 中间件已前置，DO 端只有这一道）
+  if (!token || !(await repository.authenticateKey(token))) {
+    return { statusCode: 401, body: { ok: false, error: '无效或已吊销的 Agent API Key' } };
+  }
   const mapped = claudeHookToNotification(input);
   if (!mapped) return { statusCode: 200, body: { ok: true, ignored: true, event: input.hook_event_name ?? input.type ?? null } };
   // 通知条件过滤：低于选定级别的事件收下不转发（用户/Agent 安装时自选，改 URL 即改条件）
   if (minSeverity !== undefined && SEVERITY_ORDER[mapped.severity] < SEVERITY_ORDER[minSeverity]) {
     return { statusCode: 200, body: { ok: true, filtered: true, severity: mapped.severity } };
-  }
-  // 先验 key：无效/缺失走 401（与 requireAgent 语义一致；Node 端由中间件前置，DO 端这里补）
-  if (!token || !(await repository.authenticateKey(token))) {
-    return { statusCode: 401, body: { ok: false, error: '无效或已吊销的 Agent API Key' } };
   }
   try {
     const delivery = await sendWithAgentKey(repository, notifications, token, { destination, ...mapped, metadata: { via: 'agent-hook' } }, 'agent-hook');
