@@ -1,0 +1,50 @@
+name: Release
+
+# 推 v* tag 就发 npm。凭据走 npm Trusted Publishing（GitHub Actions OIDC）——
+# 仓库里不存 NPM_TOKEN，短时令牌由 npm 现场校验，顺带自动带上 provenance。
+# npm 侧的信任关系绑定的是「仓库 + 这个文件名」，所以文件不能改名，改名要去 npm 重配。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write # OIDC 令牌，缺了就退回找 NPM_TOKEN 然后失败
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+      # Node 22 自带 npm 10.9，不认 OIDC（trusted publishing 要 npm ≥ 11.5.1），
+      # 不升的话这一步会去找不存在的 NPM_TOKEN 然后 401
+      - run: npm install -g npm@^11
+      # --ignore-scripts：见 ci.yml，npm ≥11.17 会给 better-sqlite3 造一个多余的 node-gyp rebuild
+      - run: npm ci --ignore-scripts
+      - run: npm test
+
+      - name: Publish packages matching the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          want="${TAG#v}"
+          for dir in packages/walkie-cli packages/walkie-mcp; do
+            name=$(node -p "require('./$dir/package.json').name")
+            version=$(node -p "require('./$dir/package.json').version")
+            # tag 与包版本不一致就停：否则 v0.5.0 会把上一版原封不动再发一次
+            if [ "$version" != "$want" ]; then
+              echo "::error::$name is at $version but tag says $want — bump the package or fix the tag"
+              exit 1
+            fi
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version already published — skipping"
+              continue
+            fi
+            (cd "$dir" && npm publish --access public --provenance)
+            echo "published $name@$version"
+          done
