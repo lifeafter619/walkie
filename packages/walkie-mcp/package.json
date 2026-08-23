@@ -5,7 +5,7 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "walkie-mcp": "./walkie-mcp.mjs"
+    "walkie-mcp": "walkie-mcp.mjs"
   },
   "main": "./walkie-mcp.mjs",
   "engines": {
