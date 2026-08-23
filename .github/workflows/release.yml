@@ -6,13 +6,47 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # 手动跑 = 只体检不发包：npm 保存 trusted publisher 时不做任何校验，
+  # 配错了要等真发版才炸。信任关系认的是这个文件名，所以探针只能长在这里
+  workflow_dispatch:
 
 permissions:
   contents: read
   id-token: write # OIDC 令牌，缺了就退回找 NPM_TOKEN 然后失败
 
 jobs:
+  # 手动触发时只跑这个：把 OIDC 令牌拿去 npm 换发布令牌，换到了就说明信任关系配对了。
+  # npm 的 oidc.js 换不到令牌时是 return undefined 不抛错，会静默退回找 NPM_TOKEN
+  # 然后报 401，看不出是 trust 配错——所以显式探一次
+  verify-trust:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Exchange the OIDC token for each package
+        run: |
+          set -euo pipefail
+          idtoken=$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" \
+            | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).value')
+          fail=0
+          for name in walkie-notify walkie-mcp; do
+            # 200 的响应体里是真发布令牌，所以只在失败时才打印 body
+            code=$(curl -sS -o body.json -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer $idtoken" \
+              "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/$name")
+            if [ "$code" = "200" ]; then
+              echo "$name: trusted publisher OK"
+            else
+              echo "::error::$name: token exchange returned $code — check the trusted publisher on npmjs.com (repo lifeafter619/walkie, workflow release.yml, publish allowed)"
+              cat body.json
+              fail=1
+            fi
+            rm -f body.json
+          done
+          exit $fail
+
   publish:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
