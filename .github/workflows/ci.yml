@@ -29,7 +29,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      # --ignore-scripts：npm ≥11.17 会给 better-sqlite3 造一个隐式 node-gyp rebuild
+      # （它自带各平台 N-API 预编译产物，本不需要编译）。windows runner 的 VS 18 又不被
+      # node-gyp 11 识别，于是 npm ci 直接失败。跳过安装脚本后依赖照常可用。
+      - run: npm ci --ignore-scripts
       - name: Typecheck (browser + node + workerd + vercel)
         run: npm run typecheck
       - run: npm test

@@ -1,7 +1,10 @@
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+# --ignore-scripts：better-sqlite3 13 在 tarball 里自带各平台 N-API 预编译产物（gypfile:false），
+# 但 npm ≥11.17 仍会给它造一个隐式 `node-gyp rebuild`。slim 镜像没有 python3/g++，
+# 编译必挂——而这次编译本来就是多余的。esbuild/workerd 的二进制来自各自的平台包，不依赖脚本。
+RUN npm ci --ignore-scripts
 COPY tsconfig.json tsconfig.server.json vite.config.ts vitest.config.ts ./
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
