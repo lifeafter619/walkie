@@ -16,6 +16,8 @@
     "url": "git+https://github.com/lifeafter619/walkie.git",
     "directory": "packages/walkie-mcp"
   },
+  "homepage": "https://github.com/lifeafter619/walkie#readme",
+  "bugs": "https://github.com/lifeafter619/walkie/issues",
   "keywords": [
     "notifications",
     "mcp",
