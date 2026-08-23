@@ -682,7 +682,7 @@ export class ProviderDispatcher {
           ? { type: 2, style: 5, label: '查看详情', url: message.url }
           : undefined;
         const payload: Record<string, unknown> = {
-          content: message.url ? `${message.title}\n${message.body}` : `${message.title}\n${message.body}`
+          content: `${message.title}\n${message.body}`
         };
         // ask_user 的选项渲染成按钮行；custom_id 填 <conversationId>:<index>，
         // 由 POST /discord/interactions/<secret> 收回

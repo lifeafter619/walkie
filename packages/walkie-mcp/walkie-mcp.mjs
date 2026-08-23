@@ -48,7 +48,7 @@ Example (Claude Code / Codex stdio config):
   } } }
 `;
 
-const VERSION = '0.1.0';
+const VERSION = '0.4.0';
 
 /** Parse CLI args of the form --flag value / --flag=value. */
 function parseArgs(argv) {

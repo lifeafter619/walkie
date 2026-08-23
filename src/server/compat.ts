@@ -133,7 +133,7 @@ export function discordText(payload: Record<string, unknown>): string {
       for (const value of [record.title, record.description]) {
         if (typeof value === 'string' && value.trim()) parts.push(value.trim());
       }
- if (Array.isArray(record.fields)) {
+      if (Array.isArray(record.fields)) {
         for (const field of record.fields) {
           if (field && typeof field === 'object' && typeof (field as Record<string, unknown>).value === 'string') {
             parts.push(String((field as Record<string, unknown>).value));

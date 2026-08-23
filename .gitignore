@@ -19,6 +19,7 @@ output/
 .zcode/
 .vercel
 .env*
+!.env.example
 
 # Playwright MCP 会话产物
 .playwright-mcp/

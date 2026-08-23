@@ -76,7 +76,7 @@ function normalizeEvent(input: HookInput): string {
 const lastMessage = (input: HookInput): string =>
   (input.last_assistant_message ?? input['last-assistant-message'] ?? input.message ?? input.error_message ?? '').trim();
 
-/** hook 载沙是各家工具随手 POST 的 JSON，字段类型不可信——统一收窄成 string，畸形类型不能把端点打成 500 */
+/** hook 载荷是各家工具随手 POST 的 JSON，字段类型不可信——统一收窄成 string，畸形类型不能把端点打成 500 */
 function coerceHookInput(rawInput: HookInput): HookInput {
   const str = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
   return {
