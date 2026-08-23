@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question / help
+    url: https://github.com/lifeafter619/walkie/discussions
+    about: How do I set up channel X, why is a delivery not arriving, deployment help — ask in Discussions.
+  - name: Security vulnerability
+    url: https://github.com/lifeafter619/walkie/security/policy
+    about: Report privately, not as a public issue.
