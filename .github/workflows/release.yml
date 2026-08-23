@@ -30,15 +30,16 @@ jobs:
             | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).value')
           fail=0
           for name in walkie-notify walkie-mcp; do
-            # 200 的响应体里是真发布令牌，所以只在失败时才打印 body
             code=$(curl -sS -o body.json -w '%{http_code}' -X POST \
               -H "Authorization: Bearer $idtoken" \
               "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/$name")
-            if [ "$code" = "200" ]; then
+            # 换成功是 201（不是 200），body 里是真发布令牌——公开仓库的日志谁都能读，
+            # 所以只摘错误信息，任何情况下都不整体打印 body
+            if [ "$code" = "201" ] || [ "$code" = "200" ]; then
               echo "$name: trusted publisher OK"
             else
-              echo "::error::$name: token exchange returned $code — check the trusted publisher on npmjs.com (repo lifeafter619/walkie, workflow release.yml, publish allowed)"
-              cat body.json
+              msg=$(node -p 'try { JSON.parse(require("fs").readFileSync("body.json", "utf8")).message ?? "" } catch { "" }')
+              echo "::error::$name: token exchange returned $code ${msg} — check the trusted publisher on npmjs.com (repo lifeafter619/walkie, workflow release.yml, publish allowed)"
               fail=1
             fi
             rm -f body.json
