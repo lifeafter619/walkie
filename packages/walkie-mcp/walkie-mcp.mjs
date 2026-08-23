@@ -9,6 +9,7 @@
 //
 // Zero dependencies, Node >= 22 (global fetch, ReadableStream iteration).
 
+import { readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import process from 'node:process';
 
@@ -48,7 +49,8 @@ Example (Claude Code / Codex stdio config):
   } } }
 `;
 
-const VERSION = '0.4.0';
+// 版本号只留 package.json 一处：写死在这里的常量迟早跟发布版本对不上（见 CHANGELOG 0.4.0）
+const VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
 
 /** Parse CLI args of the form --flag value / --flag=value. */
 function parseArgs(argv) {

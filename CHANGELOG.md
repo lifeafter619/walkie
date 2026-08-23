@@ -5,6 +5,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Changed
+
+- Releases are cut by pushing a `v*` tag: `.github/workflows/release.yml` runs the tests, refuses to publish when any version disagrees with the tag, and publishes both npm packages with provenance via trusted publishing (GitHub Actions OIDC — no npm token stored in the repository).
+- `walkie-notify` and `walkie-mcp` read their version from their own `package.json` at runtime instead of a hardcoded constant, so `--version` can no longer drift from the published version (it did in 0.4.0).
+
 ## [0.4.0] — 2026-08-22
 
 ### Fixed

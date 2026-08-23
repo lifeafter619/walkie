@@ -33,6 +33,16 @@ jobs:
         run: |
           set -euo pipefail
           want="${TAG#v}"
+          # 应用自身的版本号有两处（根 package.json / src/shared/version.ts，后者被三端打包进产物，
+          # 读不了文件所以只能写死）——对不上就停在这里，别让 /health 报着旧版本发出去
+          root=$(node -p "require('./package.json').version")
+          app=$(node -p "require('fs').readFileSync('src/shared/version.ts','utf8').match(/'([^']+)'/)[1]")
+          for pair in "package.json:$root" "src/shared/version.ts:$app"; do
+            if [ "${pair#*:}" != "$want" ]; then
+              echo "::error::${pair%%:*} is at ${pair#*:} but tag says $want"
+              exit 1
+            fi
+          done
           for dir in packages/walkie-cli packages/walkie-mcp; do
             name=$(node -p "require('./$dir/package.json').name")
             version=$(node -p "require('./$dir/package.json').version")

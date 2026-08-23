@@ -12,7 +12,8 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 
-const VERSION = '0.4.0';
+// 版本号只留 package.json 一处：写死在这里的常量迟早跟发布版本对不上（见 CHANGELOG 0.4.0）
+const VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
 
 const USAGE = `walkie-notify — CLI for Walkie notifications
 
