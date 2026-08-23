@@ -5,6 +5,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Fixed
+
+- **`walkie-notify send` ignored the variable its own hook installer tells you to export.** The generated forwarding scripts and the post-install hint use `WALKIE_TOKEN`, but `send` / `status` / `hook` only read `WALKIE_API_KEY` — so following the printed instructions and then sending a notification by hand failed with `missing --token`. Both names are accepted now (`WALKIE_TOKEN` first), matching what `walkie-mcp` already did.
+- `bin` paths dropped the `./` prefix, so `npm publish` no longer prints `"bin[walkie-notify]" script name walkie.mjs was invalid and removed` — npm normalises the path and keeps the entry, but the wording reads like a broken package.
+
 ## [0.4.0] — 2026-08-22
 
 ### Hook install flow — probe the machine, then ask

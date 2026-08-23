@@ -22,7 +22,7 @@ WALKIE_URL=https://walkie.example.com WALKIE_API_KEY=rdk_xxx \
 | `walkie-notify status <id>` | GET `/api/v1/deliveries/<id>`; prints JSON |
 | `walkie-notify hook` | Install coding-agent hooks (`--uninstall` removes them) |
 
-`--url`/`--token` fall back to `WALKIE_URL`/`WALKIE_API_KEY`. Exit codes: 0 ok, 1 usage error, 2 API error.
+`--url`/`--token` fall back to `WALKIE_URL`/`WALKIE_TOKEN` (or `WALKIE_API_KEY`) — the same variables the installed hooks read. Exit codes: 0 ok, 1 usage error, 2 API error.
 
 ## Coding-agent hooks | 编码 Agent hooks
 

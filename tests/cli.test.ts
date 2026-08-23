@@ -52,6 +52,14 @@ describe('walkie CLI', () => {
     await cli(['send', '--to', 'x', '--title', 't', '--body', 'b', '--idempotency-key', 'deploy-42']);
     expect(received[1]!.body).toMatchObject({ idempotencyKey: 'deploy-42' });
 
+    // hook 装完打印的 export 提示、以及转发脚本里读的都是 WALKIE_TOKEN；
+    // send 只认 WALKIE_API_KEY 的话，照提示配好环境变量再手动发一条就报 missing --token
+    const viaToken = await run('node', ['packages/walkie-cli/walkie.mjs', 'send', '--to', 'x', '--title', 't', '--body', 'b'], {
+      env: { ...process.env, WALKIE_URL: `http://127.0.0.1:${port}`, WALKIE_API_KEY: '', WALKIE_TOKEN: 'tok-env' }
+    });
+    expect(viaToken.stdout.trim()).toBe('d-42');
+    expect(received[2]!.auth).toBe('Bearer tok-env');
+
     await expect(cli(['send', '--to', 'x', '--title', 't', '--body', 'b', '--severity', 'bogus'])).rejects.toMatchObject({ code: 1 });
     server.close();
   }, 20_000);

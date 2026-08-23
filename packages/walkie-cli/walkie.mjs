@@ -27,7 +27,7 @@ Usage:
 Options for send:
   --url <url>          Walkie base URL, e.g. https://walkie.example.com
                        (default: $WALKIE_URL)
-  --token <key>        Agent API key, sent as Bearer (default: $WALKIE_API_KEY)
+  --token <key>        Agent API key, sent as Bearer (default: $WALKIE_TOKEN or $WALKIE_API_KEY)
   --to <destination>   Destination ID or slug (channel / route)
   --title <text>       Notification title (required)
   --body <text>        Notification body (required)
@@ -120,7 +120,9 @@ if (args.help || args.h || args.version || args.v) {
 }
 
 const baseUrl = String(args.url ?? process.env.WALKIE_URL ?? '').trim().replace(/\/+$/, '');
-const token = String(args.token ?? process.env.WALKIE_API_KEY ?? '').trim();
+// hook 装出来的转发脚本、以及安装结束时打印的 export 提示，用的都是 WALKIE_TOKEN；
+// send/status 以前只认 WALKIE_API_KEY，照提示配完环境变量再手动发一条就报 missing --token
+const token = String(args.token ?? process.env.WALKIE_TOKEN ?? process.env.WALKIE_API_KEY ?? '').trim();
 const severity = String(args.severity ?? 'info').toLowerCase();
 const SEVERITIES = ['info', 'success', 'warning', 'critical'];
 
@@ -128,7 +130,7 @@ if (!command) usageError('missing command (send | status | hook)');
 // hook --detect / --uninstall 只动本地文件，不需要凭据
 const needsCredentials = !(command === 'hook' && (args.detect || args.uninstall));
 if (needsCredentials && !baseUrl) usageError('missing --url (or set WALKIE_URL)');
-if (needsCredentials && !token) usageError('missing --token (or set WALKIE_API_KEY)');
+if (needsCredentials && !token) usageError('missing --token (or set WALKIE_TOKEN / WALKIE_API_KEY)');
 
 async function api(path, init) {
   let response;
@@ -623,7 +625,7 @@ if (command === 'hook') {
   }
 
   if (!baseUrl) usageError('missing --url (or set WALKIE_URL)');
-  if (!token) usageError('missing --token (or set WALKIE_API_KEY)');
+  if (!token) usageError('missing --token (or set WALKIE_TOKEN / WALKIE_API_KEY)');
   const destination = String(args.destination ?? '').trim();
   const query = [
     ...(destination ? [`destination=${encodeURIComponent(destination)}`] : []),
