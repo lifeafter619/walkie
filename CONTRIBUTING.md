@@ -25,3 +25,5 @@ Provider changes should document platform limits and use the platform's official
 3. `git tag -a v<x.y.z> -m "walkie v<x.y.z>" && git push origin v<x.y.z>`.
 
 `.github/workflows/release.yml` then runs the test suite, refuses to publish if any version disagrees with the tag, skips versions already on the registry, and publishes both packages to npm with provenance. Credentials come from npm trusted publishing (GitHub Actions OIDC) — there is no npm token in this repository, and the trust is bound to this workflow's filename, so renaming it means reconfiguring it on npmjs.com.
+
+Run the same workflow manually (`gh workflow run release.yml`) to check the trust configuration without publishing anything: it exchanges the OIDC token for each package and fails loudly if npm rejects it. Worth doing after touching the trusted publisher, because npm does not validate that configuration when you save it, and a broken exchange otherwise surfaces as a bare `401` at publish time.
