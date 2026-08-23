@@ -20,9 +20,10 @@ jobs:
         with:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
-      # Node 22 自带 npm 10.9，不认 OIDC（trusted publishing 要 npm ≥ 11.5.1），
-      # 不升的话这一步会去找不存在的 NPM_TOKEN 然后 401
-      - run: npm install -g npm@^11
+      # Node 22/24 自带的是 npm 10/11，不认 OIDC（trusted publishing 要 npm ≥ 11.5.1），
+      # 不升的话这一步会去找不存在的 NPM_TOKEN 然后 401。钉 12：11.x 发给注册表的
+      # trust/publish 请求体缺权限字段，配置信任关系时就是 400
+      - run: npm install -g npm@^12
       # --ignore-scripts：见 ci.yml，npm ≥11.17 会给 better-sqlite3 造一个多余的 node-gyp rebuild
       - run: npm ci --ignore-scripts
       - run: npm test
